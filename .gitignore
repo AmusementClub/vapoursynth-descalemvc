@@ -1,0 +1,62 @@
+# Build trees and generated CMake files
+/build/
+/out/
+/cmake-build-*/
+/CMakeFiles/
+/_deps/
+/Testing/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+Makefile.*
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+CMakeUserPresets.json
+
+# IDE metadata
+/.vs/
+/.vscode/
+/.idea/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+
+# Python caches and local environments
+**/__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.venv/
+/venv/
+/env/
+
+# Reproducible benchmark output and profiler data
+/benchmark-results/
+/benchmark-results-*/
+*.uprof
+*.profraw
+*.gcda
+*.gcno
+
+# Native build products and crash dumps
+*.dll
+*.exe
+*.lib
+*.a
+*.so
+*.dylib
+*.o
+*.obj
+*.pdb
+*.dmp
+
+# Logs and operating-system metadata
+*.log
+.DS_Store
+Thumbs.db
