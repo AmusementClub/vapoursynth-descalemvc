@@ -159,6 +159,25 @@ def run(options) -> None:
             custom_source, width=80, height=48, backend="cpu", **arguments)
         compare_clips(old_custom, new_custom, label)
 
+    large_support_source = core.std.BlankClip(
+        width=160, height=160, format=vs.GRAYS, color=[0.4])
+    compare_clips(
+        core.descale.Delanczos(
+            large_support_source, width=128, height=128, taps=16),
+        core.dsmvc.Delanczos(
+            large_support_source, width=128, height=128, taps=16,
+            backend="cpu"),
+        "lanczos/taps-16")
+    large_support_kernel = lambda x: max(1.0 - abs(x), 0.0)
+    compare_clips(
+        core.descale.Descale(
+            large_support_source, width=128, height=128,
+            custom_kernel=large_support_kernel, taps=65),
+        core.dsmvc.Descale(
+            large_support_source, width=128, height=128,
+            custom_kernel=large_support_kernel, taps=65, backend="cpu"),
+        "custom/taps-65")
+
     scalar = core.dsmvc.Debicubic(
         float_source, width=80, height=48, opt=1, backend="cpu")
     avx2 = core.dsmvc.Debicubic(
@@ -196,7 +215,9 @@ def run(options) -> None:
     rgb = core.std.BlankClip(width=96, height=64, format=vs.RGB24)
     compare_clips(
         old_wrapper.Debicubic(rgb, 80, 48, b=0.0, c=1.0),
-        new_wrapper.Debicubic(rgb, 80, 48, b=0.0, c=1.0, backend="cpu"),
+        new_wrapper.Debicubic(
+            rgb, 80, 48, b=0.0, c=1.0,
+            opt=new_wrapper.Opt.NONE, backend="cpu"),
         "wrapper/RGB24")
     yuv = core.std.BlankClip(width=96, height=64, format=vs.YUV420P10)
     compare_clips(

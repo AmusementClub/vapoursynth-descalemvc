@@ -15,63 +15,68 @@ class Opt(IntEnum):
     AVX2 = 2
 
 
-def _backend_args(backend):
-    return {} if backend is None else {"backend": backend}
+def _plugin_args(opt, backend):
+    result = {}
+    if opt is not None:
+        result["opt"] = int(opt)
+    if backend is not None:
+        result["backend"] = backend
+    return result
 
 
 def Debilinear(src, width, height, border_handling=None, yuv444=False,
-               gray=False, chromaloc=None, backend=None):
+               gray=False, chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, kernel="bilinear",
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Debicubic(src, width, height, b=0.0, c=0.5, border_handling=None,
-              yuv444=False, gray=False, chromaloc=None, backend=None):
+              yuv444=False, gray=False, chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, kernel="bicubic", b=b, c=c,
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Delanczos(src, width, height, taps=3, border_handling=None,
-              yuv444=False, gray=False, chromaloc=None, backend=None):
+              yuv444=False, gray=False, chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, kernel="lanczos", taps=taps,
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Despline16(src, width, height, border_handling=None, yuv444=False,
-               gray=False, chromaloc=None, backend=None):
+               gray=False, chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, kernel="spline16",
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Despline36(src, width, height, border_handling=None, yuv444=False,
-               gray=False, chromaloc=None, backend=None):
+               gray=False, chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, kernel="spline36",
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Despline64(src, width, height, border_handling=None, yuv444=False,
-               gray=False, chromaloc=None, backend=None):
+               gray=False, chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, kernel="spline64",
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Decustom(src, width, height, custom_kernel, taps,
              border_handling=None, yuv444=False, gray=False,
-             chromaloc=None, backend=None):
+             chromaloc=None, opt=None, backend=None):
     return Descale(src, width, height, custom_kernel=custom_kernel, taps=taps,
                    border_handling=border_handling, yuv444=yuv444,
-                   gray=gray, chromaloc=chromaloc, backend=backend)
+                   gray=gray, chromaloc=chromaloc, opt=opt, backend=backend)
 
 
 def Descale(src, width, height, kernel=None, custom_kernel=None, taps=None,
             b=None, c=None, border_handling=None, yuv444=False, gray=False,
-            chromaloc=None, backend=None):
+            chromaloc=None, opt=None, backend=None):
     src_f = src.format
     src_cf = src_f.color_family
     src_st = src_f.sample_type
@@ -81,7 +86,7 @@ def Descale(src, width, height, kernel=None, custom_kernel=None, taps=None,
     call_args = dict(kernel=kernel, taps=taps, b=b, c=c,
                      custom_kernel=custom_kernel,
                      border_handling=border_handling)
-    call_args.update(_backend_args(backend))
+    call_args.update(_plugin_args(opt, backend))
 
     if src_cf == RGB and not gray:
         rgb = core.dsmvc.Descale(to_rgbs(src), width, height, **call_args)

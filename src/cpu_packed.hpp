@@ -1,14 +1,16 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
-#include <getnative/axis_plan.hpp>
+#include <dsmvc/engine.hpp>
 
 namespace dsmvc::detail {
 
 struct PackedCpuPlan {
-    const getnative::AxisPlan *axis = nullptr;
+    std::shared_ptr<const AxisPlan> axis;
+    const AxisPlan *identity = nullptr;
     std::int32_t padded_source_size = 0;
     std::int32_t padded_destination_size = 0;
     std::int32_t weights_columns = 0;
@@ -20,6 +22,7 @@ struct PackedCpuPlan {
     std::vector<float> inverse_diagonal;
 };
 
-[[nodiscard]] PackedCpuPlan pack_cpu_plan(const getnative::AxisPlan &plan);
+[[nodiscard]] PackedCpuPlan pack_cpu_plan(
+    std::shared_ptr<const AxisPlan> plan, const AxisPlan *identity = nullptr);
 
 } // namespace dsmvc::detail

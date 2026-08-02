@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -37,7 +38,7 @@ void test_identity_bilinear() {
     std::vector<float> input(32);
     std::vector<float> output(32);
     for (std::size_t i = 0; i < input.size(); ++i) input[i] = static_cast<float>(i) / 31.0F;
-    getnative::inverse_axis_f32(plan, input, output);
+    dsmvc::inverse_axis_f32(plan, input, output);
     for (std::size_t i = 0; i < input.size(); ++i) {
         require(std::abs(input[i] - output[i]) < 1.0e-5F,
                 "identity bilinear solve drifted");
@@ -55,6 +56,59 @@ void test_custom_plan() {
         request, [](double x) { return std::max(1.0 - x, 0.0); });
     require(plan.valid(), "custom axis plan is invalid");
     require(plan.half_bandwidth == 1, "custom plan bandwidth is incorrect");
+}
+
+void test_inverse_only_cache() {
+    dsmvc::clear_planner_caches();
+    dsmvc::AxisRequest request;
+    request.source_size = 96;
+    request.destination_size = 64;
+    request.active_length = 63.75;
+    request.shift = 0.125;
+    request.kernel.kind = dsmvc::KernelKind::bicubic;
+    request.kernel.b = 0.0;
+    request.kernel.c = 0.5;
+
+    std::vector<std::shared_ptr<const dsmvc::AxisPlan>> plans(8);
+    std::vector<std::jthread> workers;
+    for (std::size_t index = 0; index < plans.size(); ++index) {
+        workers.emplace_back([&, index] {
+            plans[index] = dsmvc::get_or_build_axis_plan(request);
+        });
+    }
+    workers.clear();
+    for (const auto &plan : plans) {
+        require(plan == plans.front(), "single-flight plan cache did not share a plan");
+        require(plan->valid(), "cached inverse-only plan is invalid");
+    }
+    auto stats = dsmvc::planner_cache_stats();
+    require(stats.plan_builds == 1, "single-flight cache duplicated a plan build");
+    require(stats.plan_hits == plans.size() - 1U, "plan hit accounting is incorrect");
+    require(stats.geometry_builds == 1, "geometry was built more than once");
+
+    request.kernel.b = 0.7;
+    request.kernel.c = 0.6;
+    const auto second = dsmvc::get_or_build_axis_plan(request);
+    require(second != plans.front(), "different bicubic parameters shared a plan");
+    stats = dsmvc::planner_cache_stats();
+    require(stats.geometry_hits >= 1, "bicubic family did not reuse geometry");
+}
+
+void test_large_support_compatibility() {
+    dsmvc::AxisRequest request;
+    request.source_size = 32;
+    request.destination_size = 16;
+    request.active_length = 16.0;
+    request.kernel.kind = dsmvc::KernelKind::lanczos;
+    request.kernel.taps = 16;
+    require(dsmvc::build_axis_plan(request).valid(),
+            "Lanczos taps=16 was rejected");
+
+    request.kernel.kind = dsmvc::KernelKind::custom;
+    request.kernel.taps = 65;
+    require(dsmvc::build_axis_plan(
+                request, [](double x) { return std::max(1.0 - x, 0.0); }).valid(),
+            "custom taps=65 was rejected");
 }
 
 void test_executor_agreement() {
@@ -166,6 +220,8 @@ int main() {
         test_backend_selection();
         test_identity_bilinear();
         test_custom_plan();
+        test_inverse_only_cache();
+        test_large_support_compatibility();
         test_executor_agreement();
         test_executor_padded_geometry();
         test_column_executor_padded_geometry();

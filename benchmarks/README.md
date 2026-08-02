@@ -57,3 +57,13 @@ old/new PNGs, amplified difference PNGs, and sweep error-curve plots. Reports
 include plugin load, graph construction, cold frame, warm frame, VSPipe,
 full-sweep, median, MAD, p95, minimum, maximum, hashes, per-plane error,
 reconstruction error, best candidate, and rank changes.
+
+The focused whole-process benchmark reproduces the three recorded getnative
+graphs through runtime `FrameEval`, launches a fresh VSPipe process for every
+sample, and measures wall time through process exit:
+
+```powershell
+& 'D:\okegui\OKEGui\tools\vapoursynth\python.exe' `
+  benchmarks\vspipe_process_benchmark.py `
+  --frames 500 --requests 32 --threads 32 --runs 3
+```

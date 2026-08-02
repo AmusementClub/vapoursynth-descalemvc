@@ -50,12 +50,9 @@ if(NOT DSMVC_VAPOURSYNTH_INCLUDE_DIR)
 endif()
 
 set(DSMVC_ENGINE_SOURCES
+    src/axis_plan.cpp
     src/backend.cpp
     src/cpu_executor.cpp
-    src/custom_plan.cpp
-    src/engine.cpp
-    "${DSMVC_GETNATIVE_ROOT}/engine/src/planner/axis_plan.cpp"
-    "${DSMVC_GETNATIVE_ROOT}/engine/src/planner/axis_planner.cpp"
     "${DSMVC_GETNATIVE_ROOT}/engine/src/planner/filter.cpp"
 )
 

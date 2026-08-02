@@ -267,7 +267,7 @@ void solve_horizontal_b3(const detail::PackedCpuPlan &packed, const float *scrat
         + static_cast<std::ptrdiff_t>(index & ~7);
 }
 
-void solve_horizontal_generic(const getnative::AxisPlan &plan,
+void solve_horizontal_generic(const AxisPlan &plan,
                               const detail::PackedCpuPlan &packed,
                               const float *scratch, float *output,
                               std::ptrdiff_t stride) noexcept {
@@ -326,7 +326,7 @@ void solve_horizontal_generic(const getnative::AxisPlan &plan,
     }
 }
 
-void solve_horizontal_block(const getnative::AxisPlan &plan,
+void solve_horizontal_block(const AxisPlan &plan,
                             const detail::PackedCpuPlan &packed,
                             const float *input, std::ptrdiff_t input_stride,
                             float *output, std::ptrdiff_t output_stride,
@@ -620,7 +620,7 @@ void solve_columns_b3_single(const detail::PackedCpuPlan &packed,
     }
 }
 
-void solve_columns_b3(const getnative::AxisPlan &plan,
+void solve_columns_b3(const AxisPlan &plan,
                       const detail::PackedCpuPlan &packed,
                       const float *input, std::ptrdiff_t input_stride,
                       float *output, std::ptrdiff_t output_stride,
@@ -726,7 +726,7 @@ void solve_columns_b1_single(const detail::PackedCpuPlan &packed,
     }
 }
 
-void solve_columns_b1(const getnative::AxisPlan &plan,
+void solve_columns_b1(const AxisPlan &plan,
                       const detail::PackedCpuPlan &packed,
                       const float *input, std::ptrdiff_t input_stride,
                       float *output, std::ptrdiff_t output_stride,
@@ -745,7 +745,7 @@ void solve_columns_b1(const getnative::AxisPlan &plan,
 }
 
 template <int FixedBandwidth>
-void solve_columns_vector(const getnative::AxisPlan &plan,
+void solve_columns_vector(const AxisPlan &plan,
                           const detail::PackedCpuPlan &packed,
                           const float *input, std::ptrdiff_t input_stride,
                           float *output, std::ptrdiff_t output_stride,
@@ -827,7 +827,7 @@ void solve_columns_vector(const getnative::AxisPlan &plan,
 
 } // namespace
 
-void inverse_rows_avx2(const getnative::AxisPlan &plan,
+void inverse_rows_avx2(const AxisPlan &plan,
                        const detail::PackedCpuPlan &packed,
                        const float *input, std::ptrdiff_t input_row_stride,
                        float *output, std::ptrdiff_t output_row_stride,
@@ -836,7 +836,7 @@ void inverse_rows_avx2(const getnative::AxisPlan &plan,
         || input_row_stride < packed.padded_source_size
         || output_row_stride < packed.padded_destination_size) {
         for (std::int32_t row = 0; row < row_count; ++row) {
-            getnative::inverse_axis_f32(
+            dsmvc::inverse_axis_f32(
                 plan, input + static_cast<std::ptrdiff_t>(row) * input_row_stride, 1,
                 output + static_cast<std::ptrdiff_t>(row) * output_row_stride, 1);
         }
@@ -866,7 +866,7 @@ void inverse_rows_avx2(const getnative::AxisPlan &plan,
     }
 }
 
-void inverse_columns_avx2(const getnative::AxisPlan &plan,
+void inverse_columns_avx2(const AxisPlan &plan,
                           const detail::PackedCpuPlan &packed,
                           const float *input, std::ptrdiff_t input_row_stride,
                           float *output, std::ptrdiff_t output_row_stride,
@@ -886,8 +886,8 @@ void inverse_columns_avx2(const getnative::AxisPlan &plan,
                                 output_row_stride, vector_columns);
     }
     for (std::int32_t column = vector_columns; column < column_count; ++column) {
-        getnative::inverse_axis_f32(plan, input + column, input_row_stride,
-                                    output + column, output_row_stride);
+        dsmvc::inverse_axis_f32(plan, input + column, input_row_stride,
+                               output + column, output_row_stride);
     }
 }
 

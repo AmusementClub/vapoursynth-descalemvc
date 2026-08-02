@@ -34,9 +34,16 @@ the CPU implementation. The three GPU names are stable capability stubs and
 raise an explicit unsupported error; they never silently fall back to CPU.
 
 For the CPU backend, `opt=1` selects the scalar path and `opt=2` strictly
-requires AVX2 and FMA. The default selects AVX2/FMA when available. Planning is
-performed in Float64 and packed into immutable Float32 axis plans before frame
-execution.
+requires AVX2 and FMA. The default selects AVX2/FMA when available. Other
+numeric values retain baseline behavior and select automatic dispatch. The
+Python wrapper accepts either these integers or `Opt.AUTO`, `Opt.NONE`, and
+`Opt.AVX2`.
+
+Planning is deferred until the first requested frame. The inverse-only planner
+uses Float64 CSR and banded LDLT construction, then stores immutable Float32
+coefficients. Built-in plans use bounded exact-key single-flight LRU caching;
+sampling geometry is cached separately so Bicubic parameter families can reuse
+it. AVX2 packed plans are shared by filters that share a canonical plan.
 
 The Python wrapper is [python/dsmvc.py](python/dsmvc.py). It preserves the
 baseline RGB, YUV, GRAY, bit-depth, subsampling, `yuv444`, `gray`, and chroma

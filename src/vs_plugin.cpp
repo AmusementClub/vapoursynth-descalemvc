@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -59,8 +60,16 @@ struct FilterData {
     int num_planes = 0;
     bool process_horizontal = false;
     bool process_vertical = false;
-    std::shared_ptr<const getnative::AxisPlan> horizontal[2];
-    std::shared_ptr<const getnative::AxisPlan> vertical[2];
+    AxisRequest horizontal_requests[2];
+    AxisRequest vertical_requests[2];
+    bool has_horizontal_request[2]{};
+    bool has_vertical_request[2]{};
+    std::shared_ptr<const dsmvc::AxisPlan> horizontal[2];
+    std::shared_ptr<const dsmvc::AxisPlan> vertical[2];
+    std::once_flag planning_once;
+    std::exception_ptr planning_error;
+    VSFuncRef *custom_kernel = nullptr;
+    CustomKernel custom_callback;
     CpuExecutor executor{};
 };
 
@@ -343,14 +352,12 @@ double call_custom_kernel(VSFuncRef *function, double x, VSCore *core,
     return value;
 }
 
-std::shared_ptr<const getnative::AxisPlan> make_plan(
+std::shared_ptr<const dsmvc::AxisPlan> make_plan(
     const AxisRequest &request, const CustomKernel &custom) {
-    return std::make_shared<const getnative::AxisPlan>(
-        dsmvc::build_axis_plan(request, custom));
+    return dsmvc::get_or_build_axis_plan(request, custom);
 }
 
-void build_filter_plans(FilterData &data, const ParsedArguments &parsed,
-                        const CustomKernel &custom) {
+void prepare_filter_requests(FilterData &data, const ParsedArguments &parsed) {
     AxisRequest request;
     request.kernel = parsed.kernel;
     request.border = parsed.border;
@@ -360,7 +367,8 @@ void build_filter_plans(FilterData &data, const ParsedArguments &parsed,
         request.destination_size = data.destination_width;
         request.active_length = parsed.src_width;
         request.shift = parsed.src_left;
-        data.horizontal[0] = make_plan(request, custom);
+        data.horizontal_requests[0] = request;
+        data.has_horizontal_request[0] = true;
         if (data.num_planes > 1 && data.subsampling_w > 0) {
             const auto chroma_source = data.source_width >> data.subsampling_w;
             request.source_size = chroma_source;
@@ -372,7 +380,8 @@ void build_filter_plans(FilterData &data, const ParsedArguments &parsed,
             request.active_length = parsed.src_width
                 * static_cast<double>(chroma_source)
                 / static_cast<double>(data.source_width);
-            data.horizontal[1] = make_plan(request, custom);
+            data.horizontal_requests[1] = request;
+            data.has_horizontal_request[1] = true;
         }
     }
 
@@ -381,7 +390,8 @@ void build_filter_plans(FilterData &data, const ParsedArguments &parsed,
         request.destination_size = data.destination_height;
         request.active_length = parsed.src_height;
         request.shift = parsed.src_top;
-        data.vertical[0] = make_plan(request, custom);
+        data.vertical_requests[0] = request;
+        data.has_vertical_request[0] = true;
         if (data.num_planes > 1 && data.subsampling_h > 0) {
             const auto chroma_source = data.source_height >> data.subsampling_h;
             request.source_size = chroma_source;
@@ -391,17 +401,42 @@ void build_filter_plans(FilterData &data, const ParsedArguments &parsed,
             request.active_length = parsed.src_height
                 * static_cast<double>(chroma_source)
                 / static_cast<double>(data.source_height);
-            data.vertical[1] = make_plan(request, custom);
+            data.vertical_requests[1] = request;
+            data.has_vertical_request[1] = true;
         }
     }
+}
 
-    for (const auto &plan : data.horizontal) {
-        if (plan) data.executor.prepare(*plan);
-    }
-    for (const auto &plan : data.vertical) {
-        if (plan) data.executor.prepare(*plan);
-    }
-    data.executor.seal();
+void ensure_filter_plans(FilterData &data, const VSAPI *vsapi) {
+    std::call_once(data.planning_once, [&] {
+        try {
+            for (std::size_t index = 0; index < 2U; ++index) {
+                if (data.has_horizontal_request[index]) {
+                    data.horizontal[index] = make_plan(
+                        data.horizontal_requests[index], data.custom_callback);
+                }
+                if (data.has_vertical_request[index]) {
+                    data.vertical[index] = make_plan(
+                        data.vertical_requests[index], data.custom_callback);
+                }
+            }
+            for (const auto &plan : data.horizontal) {
+                if (plan) data.executor.prepare(plan);
+            }
+            for (const auto &plan : data.vertical) {
+                if (plan) data.executor.prepare(plan);
+            }
+            data.executor.seal();
+        } catch (...) {
+            data.planning_error = std::current_exception();
+        }
+        data.custom_callback = {};
+        if (data.custom_kernel) {
+            vsapi->freeFunc(data.custom_kernel);
+            data.custom_kernel = nullptr;
+        }
+    });
+    if (data.planning_error) std::rethrow_exception(data.planning_error);
 }
 
 void VS_CC filter_init(VSMap *, VSMap *, void **instance_data, VSNode *node,
@@ -425,6 +460,7 @@ const VSFrameRef *VS_CC filter_get_frame(
     VSFrameRef *intermediate = nullptr;
     VSFrameRef *destination = nullptr;
     try {
+        ensure_filter_plans(*data, vsapi);
         if (data->process_horizontal && data->process_vertical) {
             intermediate = vsapi->newVideoFrame(
                 data->vi.format, data->destination_width, data->source_height,
@@ -492,6 +528,7 @@ const VSFrameRef *VS_CC filter_get_frame(
 
 void VS_CC filter_free(void *instance_data, VSCore *, const VSAPI *vsapi) {
     auto *data = static_cast<FilterData *>(instance_data);
+    if (data->custom_kernel) vsapi->freeFunc(data->custom_kernel);
     if (data->node) vsapi->freeNode(data->node);
     delete data;
 }
@@ -560,15 +597,12 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         data->process_vertical = process_vertical;
         data->vi.width = parsed.width;
         data->vi.height = parsed.height;
-        CustomKernel callback;
+        prepare_filter_requests(*data, parsed);
         if (custom) {
-            callback = [custom, core, vsapi](double x) {
+            data->custom_callback = [custom, core, vsapi](double x) {
                 return call_custom_kernel(custom, x, core, vsapi);
             };
-        }
-        build_filter_plans(*data, parsed, callback);
-        if (custom) {
-            vsapi->freeFunc(custom);
+            data->custom_kernel = custom;
             custom = nullptr;
         }
 
