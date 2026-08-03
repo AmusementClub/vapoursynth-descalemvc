@@ -25,13 +25,22 @@ source = rgb.resize.Point(format=vs.GRAYS, matrix_s="709")
 source = core.std.Loop(source, times=int(frames))
 arguments = descale_args(1920, 1080, 951.5 * 16 / 9, 951.5, 1000)
 namespace = core.dsmvc if implementation == "new" else core.descale
-if case == "bicubic_0_7_0_6":
+backend = {"backend": "cpu"} if implementation == "new" else {}
+if case in ("bilinear", "bilinear_b1"):
+    output = namespace.Debilinear(source, **arguments, **backend)
+elif case == "bicubic_0_7_0_6":
     output = namespace.Debicubic(
-        source, b=0.7, c=0.6, **arguments,
-        **({"backend": "cpu"} if implementation == "new" else {}))
+        source, b=0.7, c=0.6, **arguments, **backend)
+elif case in ("bicubic_0_1", "bicubic_b3"):
+    output = namespace.Debicubic(
+        source, b=0.0, c=1.0, **arguments, **backend)
+elif case == "lanczos3_b5":
+    output = namespace.Delanczos(source, taps=3, **arguments, **backend)
+elif case == "spline36_b5":
+    output = namespace.Despline36(source, **arguments, **backend)
+elif case == "spline64_b7":
+    output = namespace.Despline64(source, **arguments, **backend)
 else:
-    output = namespace.Debicubic(
-        source, b=0.0, c=1.0, **arguments,
-        **({"backend": "cpu"} if implementation == "new" else {}))
+    raise ValueError(f"unknown benchmark case: {case}")
 
 output.set_output(0)
