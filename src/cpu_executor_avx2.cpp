@@ -825,6 +825,89 @@ void solve_columns_vector(const AxisPlan &plan,
     }
 }
 
+void solve_columns_pair(const AxisPlan &plan,
+                        const detail::PackedCpuPlan &packed,
+                        const float *input, std::ptrdiff_t input_stride,
+                        float *output, std::ptrdiff_t output_stride,
+                        std::int32_t vector_columns) noexcept {
+    const auto paired_columns = vector_columns & ~15;
+    constexpr std::int32_t l2_column_tile = 32;
+    constexpr std::int32_t frame_parallel_threshold = 1024;
+    const auto column_tile = paired_columns >= frame_parallel_threshold
+        ? l2_column_tile : paired_columns;
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(
+        packed.padded_destination_size);
+
+    for (std::int32_t tile = 0; tile < paired_columns; tile += column_tile) {
+        const auto tile_end = std::min(tile + column_tile, paired_columns);
+        for (std::int32_t i = 0; i < n; ++i) {
+            const auto index = static_cast<std::size_t>(i);
+            const auto available = std::min(plan.half_bandwidth, i);
+            for (std::int32_t column = tile; column < tile_end; column += 16) {
+                __m256 value0;
+                __m256 value1;
+                multiply_columns_pair(
+                    packed, input, input_stride, i, column, value0, value1);
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    const __m256 lower = _mm256_set1_ps(packed.lower_ld[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + index]);
+                    const auto *previous = output
+                        + static_cast<std::ptrdiff_t>(i - distance)
+                            * output_stride + column;
+                    value0 = _mm256_fnmadd_ps(
+                        lower, _mm256_loadu_ps(previous), value0);
+                    value1 = _mm256_fnmadd_ps(
+                        lower, _mm256_loadu_ps(previous + 8), value1);
+                }
+                const __m256 inverse = _mm256_set1_ps(
+                    packed.inverse_diagonal[index]);
+                value0 = _mm256_mul_ps(value0, inverse);
+                value1 = _mm256_mul_ps(value1, inverse);
+                auto *destination = output
+                    + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+                _mm256_storeu_ps(destination, value0);
+                _mm256_storeu_ps(destination + 8, value1);
+            }
+        }
+
+        for (std::int32_t i = n - 2; i >= 0; --i) {
+            const auto index = static_cast<std::size_t>(i);
+            const auto available = std::min(plan.half_bandwidth, n - i - 1);
+            for (std::int32_t column = tile; column < tile_end; column += 16) {
+                auto *destination = output
+                    + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+                __m256 value0 = _mm256_loadu_ps(destination);
+                __m256 value1 = _mm256_loadu_ps(destination + 8);
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    const __m256 upper = _mm256_set1_ps(packed.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + index]);
+                    const auto *next = output
+                        + static_cast<std::ptrdiff_t>(i + distance)
+                            * output_stride + column;
+                    value0 = _mm256_fnmadd_ps(
+                        upper, _mm256_loadu_ps(next), value0);
+                    value1 = _mm256_fnmadd_ps(
+                        upper, _mm256_loadu_ps(next + 8), value1);
+                }
+                _mm256_storeu_ps(destination, value0);
+                _mm256_storeu_ps(destination + 8, value1);
+            }
+        }
+    }
+
+    if (paired_columns != vector_columns) {
+        solve_columns_vector<0>(
+            plan, packed, input + paired_columns, input_stride,
+            output + paired_columns, output_stride,
+            vector_columns - paired_columns);
+    }
+}
+
 } // namespace
 
 void inverse_rows_avx2(const AxisPlan &plan,
@@ -881,6 +964,9 @@ void inverse_columns_avx2(const AxisPlan &plan,
     } else if (plan.half_bandwidth == 3) {
         solve_columns_b3(plan, packed, input, input_row_stride, output,
                          output_row_stride, vector_columns);
+    } else if (plan.half_bandwidth == 7) {
+        solve_columns_pair(plan, packed, input, input_row_stride, output,
+                           output_row_stride, vector_columns);
     } else {
         solve_columns_vector<0>(plan, packed, input, input_row_stride, output,
                                 output_row_stride, vector_columns);
