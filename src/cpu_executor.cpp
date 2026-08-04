@@ -162,7 +162,7 @@ struct CpuExecutor::Impl {
 
     mutable std::mutex mutex;
     mutable std::vector<std::shared_ptr<const detail::PackedCpuPlan>> plans;
-    mutable bool sealed = false;
+    mutable std::atomic<bool> sealed{false};
     std::shared_ptr<WorkerPool> workers;
 
     [[nodiscard]] auto find(const AxisPlan &plan) const {
@@ -172,24 +172,23 @@ struct CpuExecutor::Impl {
             });
     }
 
-    [[nodiscard]] const detail::PackedCpuPlan &get(
+    [[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> get(
         const AxisPlan &plan) const {
-        if (sealed) {
+        if (sealed.load(std::memory_order_acquire)) {
             const auto found = find(plan);
-            if (found == plans.end()) {
-                throw std::logic_error("sealed CPU plan cache is missing an axis");
-            }
-            return **found;
+            if (found != plans.end()) return *found;
+        } else {
+            const std::scoped_lock lock(mutex);
+            const auto found = find(plan);
+            if (found != plans.end()) return *found;
         }
-        const std::scoped_lock lock(mutex);
-        auto found = find(plan);
-        if (found == plans.end()) {
-            auto owned = std::make_shared<const AxisPlan>(plan);
-            plans.push_back(std::make_shared<const detail::PackedCpuPlan>(
-                detail::pack_cpu_plan(std::move(owned), &plan)));
-            found = std::prev(plans.end());
-        }
-        return **found;
+
+        // Borrowed plans are intentionally invocation-local. The caller may
+        // reassign or destroy one after this call, so its address is not a
+        // stable cache key.
+        auto owned = std::make_shared<const AxisPlan>(plan);
+        return std::make_shared<const detail::PackedCpuPlan>(
+            detail::pack_cpu_plan(std::move(owned), &plan));
     }
 };
 
@@ -333,11 +332,11 @@ void CpuExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
         throw std::invalid_argument("cannot prepare an invalid CPU axis plan");
     }
     const std::scoped_lock lock(impl_->mutex);
+    if (impl_->sealed.load(std::memory_order_relaxed)) {
+        throw std::logic_error("cannot add an axis to a sealed CPU plan cache");
+    }
     const auto found = impl_->find(*plan);
     if (found == impl_->plans.end()) {
-        if (impl_->sealed) {
-            throw std::logic_error("cannot add an axis to a sealed CPU plan cache");
-        }
         impl_->plans.push_back(acquire_packed_plan(plan));
     }
 }
@@ -345,7 +344,7 @@ void CpuExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
 void CpuExecutor::seal() const {
     if (path_ != CpuPath::avx2) return;
     const std::scoped_lock lock(impl_->mutex);
-    impl_->sealed = true;
+    impl_->sealed.store(true, std::memory_order_release);
 }
 
 void CpuExecutor::inverse_rows(const AxisPlan &plan,
@@ -358,7 +357,7 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
     }
 #if defined(DSMVC_HAS_AVX2_OBJECT)
     if (path_ == CpuPath::avx2) {
-        const auto &packed = impl_->get(plan);
+        const auto packed = impl_->get(plan);
         const auto complete_groups = static_cast<std::size_t>(row_count / 8);
         const auto task_count = std::min(
             impl_->workers->parallelism(), complete_groups);
@@ -372,7 +371,7 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
                     const auto task_rows = static_cast<std::int32_t>(
                         (last_group - first_group) * 8U);
                     inverse_rows_avx2(
-                        plan, packed,
+                        plan, *packed,
                         input + static_cast<std::ptrdiff_t>(first_row) * input_row_stride,
                         input_row_stride,
                         output + static_cast<std::ptrdiff_t>(first_row) * output_row_stride,
@@ -381,7 +380,7 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
             if ((row_count & 7) != 0) {
                 const auto first_row = row_count - 8;
                 inverse_rows_avx2(
-                    plan, packed,
+                    plan, *packed,
                     input + static_cast<std::ptrdiff_t>(first_row) * input_row_stride,
                     input_row_stride,
                     output + static_cast<std::ptrdiff_t>(first_row) * output_row_stride,
@@ -389,7 +388,7 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
             }
             return;
         }
-        inverse_rows_avx2(plan, packed, input, input_row_stride, output,
+        inverse_rows_avx2(plan, *packed, input, input_row_stride, output,
                           output_row_stride, row_count);
         return;
     }
@@ -411,7 +410,7 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
     }
 #if defined(DSMVC_HAS_AVX2_OBJECT)
     if (path_ == CpuPath::avx2) {
-        const auto &packed = impl_->get(plan);
+        const auto packed = impl_->get(plan);
         const auto padded_columns = (column_count + 7) & ~7;
         const auto vector_columns = input_row_stride >= padded_columns
                 && output_row_stride >= padded_columns
@@ -429,7 +428,7 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
                     const auto task_columns = static_cast<std::int32_t>(
                         (last_group - first_group) * 8U);
                     inverse_columns_avx2(
-                        plan, packed, input + first_column, input_row_stride,
+                        plan, *packed, input + first_column, input_row_stride,
                         output + first_column, output_row_stride, task_columns);
                 })) {
             for (std::int32_t column = vector_columns;
@@ -440,7 +439,7 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
             }
             return;
         }
-        inverse_columns_avx2(plan, packed, input, input_row_stride, output,
+        inverse_columns_avx2(plan, *packed, input, input_row_stride, output,
                              output_row_stride, column_count);
         return;
     }

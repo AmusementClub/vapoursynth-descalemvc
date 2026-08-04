@@ -711,13 +711,42 @@ bool AxisPlan::valid() const noexcept {
     }
     const auto destination = static_cast<std::size_t>(destination_size);
     const auto factors = static_cast<std::size_t>(half_bandwidth) * destination;
-    return transpose_offsets.size() == destination + 1U
-        && transpose_indices.size() == transpose_weights.size()
-        && !transpose_offsets.empty()
-        && transpose_offsets.back() == transpose_indices.size()
-        && lower_ld.size() == factors
-        && upper_l.size() == factors
-        && inverse_diagonal.size() == destination;
+    if (transpose_offsets.size() != destination + 1U
+        || transpose_indices.size() != transpose_weights.size()
+        || transpose_offsets.empty() || transpose_offsets.front() != 0U
+        || transpose_offsets.back() != transpose_indices.size()
+        || lower_ld.size() != factors || upper_l.size() != factors
+        || inverse_diagonal.size() != destination) {
+        return false;
+    }
+
+    const auto nonzeros = transpose_indices.size();
+    for (std::size_t row = 0; row < destination; ++row) {
+        const auto begin = static_cast<std::size_t>(transpose_offsets[row]);
+        const auto end = static_cast<std::size_t>(transpose_offsets[row + 1U]);
+        if (begin > end || end > nonzeros) return false;
+
+        std::int32_t previous = -1;
+        for (auto offset = begin; offset < end; ++offset) {
+            const auto source = transpose_indices[offset];
+            if (source < 0 || source >= source_size || source <= previous
+                || !std::isfinite(transpose_weights[offset])) {
+                return false;
+            }
+            previous = source;
+        }
+    }
+
+    return std::all_of(lower_ld.begin(), lower_ld.end(), [](float value) {
+               return std::isfinite(value);
+           })
+        && std::all_of(upper_l.begin(), upper_l.end(), [](float value) {
+               return std::isfinite(value);
+           })
+        && std::all_of(
+            inverse_diagonal.begin(), inverse_diagonal.end(), [](float value) {
+                return std::isfinite(value);
+            });
 }
 
 std::size_t AxisPlan::storage_bytes() const noexcept {
