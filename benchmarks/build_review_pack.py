@@ -728,6 +728,20 @@ def copy_pmu_event_config(current_dir: Path, pack: Path) -> dict[str, Any] | Non
     }
 
 
+def copy_review_prompt(root: Path, pack: Path) -> dict[str, Any] | None:
+    source = root / "benchmarks" / "deep_performance_review_prompt.md"
+    if not source.is_file():
+        return None
+    target = pack / "deep_performance_review_prompt.md"
+    shutil.copy2(source, target)
+    return {
+        "path": target.relative_to(pack).as_posix(),
+        "source": relpath(source),
+        "bytes": target.stat().st_size,
+        "sha256": sha256_file(target),
+    }
+
+
 def write_throughput_csv(path: Path, cases: list[dict[str, Any]]) -> None:
     fields = ["case", "old_fps_median", "new_fps_median", "old_fps_mad", "new_fps_mad", "speedup"]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -808,6 +822,7 @@ def main() -> int:
     wpa_manifest["_path"] = str(wpa_manifest_path)
     wpa = compact_wpa(completion, wpa_manifest)
     pmu_event_config = copy_pmu_event_config(current_dir, pack)
+    review_prompt = copy_review_prompt(ROOT, pack)
     if pmu_event_config is not None:
         current["pmu_event_config"] = pmu_event_config
     conclusions = build_conclusions(throughput, current, previous_etw, wpa, ibs)
@@ -833,6 +848,7 @@ def main() -> int:
         "pack_id": "dsmvc-review-pack-20260803",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "scope": "Fact-only consolidation for external expert review; no profiler or benchmark was run while building this pack.",
+        "review_prompt": review_prompt,
         "identity": identity,
         "throughput": {"environment": environment, "cases": throughput},
         "profiles": {
@@ -846,7 +862,7 @@ def main() -> int:
         "conclusions": conclusions,
         "provenance": provenance,
         "delivery_policy": {
-            "included": ["analyzed JSON/CSV/Markdown facts", "environment and SHA-256 metadata", "source snapshot", "exact tested dsmvc.dll and dsmvc.pdb"],
+            "included": ["analyzed JSON/CSV/Markdown facts", "environment and SHA-256 metadata", "source snapshot", "exact tested dsmvc.dll and dsmvc.pdb", "static deep performance review prompt"],
             "excluded": ["ETL", "WPAProfile", "WPA exported raw CSV", "uProf cpu.db/callstack.db", "PCM raw session directories", "raw images and output images", "old baseline DLL from the VS installation"],
         },
     }
@@ -899,7 +915,8 @@ def main() -> int:
             "4. `profiles/previous-pmu-pcm-facts.md` preserves the earlier PMU/PCM/TBP round for cross-round review.",
             "5. `profiles/round-comparison.md` checks cross-round consistency without claiming causal A/B deltas.",
             "6. `profiles/previous-etw-facts.md` and `wpa/wpa-facts.md` contain separately sourced ETW/WPA facts.",
-            "7. `code/dsmvc-review-source.zip` is the source snapshot; `binary/` contains the exact tested current DLL/PDB.",
+            "7. `deep_performance_review_prompt.md` is the ready-to-paste expert review prompt.",
+            "8. `code/dsmvc-review-source.zip` is the source snapshot; `binary/` contains the exact tested current DLL/PDB.",
             "",
             "## Identity",
             "",

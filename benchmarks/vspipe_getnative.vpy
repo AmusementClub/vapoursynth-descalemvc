@@ -117,7 +117,11 @@ elif not hasattr(core, "descale"):
     core.std.LoadPlugin(path=old_plugin)
 
 namespace = core.dsmvc if implementation == "new" else core.descale
-source = core.imwri.Read(image).resize.Point(format=vs.GRAYS, matrix_s="709")
+if globals().get("synthetic", "0") == "1":
+    source = core.std.BlankClip(
+        width=1920, height=1080, format=vs.GRAYS, color=[0.5], keep=True)
+else:
+    source = core.imwri.Read(image).resize.Point(format=vs.GRAYS, matrix_s="709")
 
 if case == "getfnative":
     heights = repeated_arange(700, 980, 0.1)
