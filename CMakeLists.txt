@@ -23,6 +23,27 @@ set(DSMVC_CUDA_ARCHITECTURES
     "Native SM targets embedded in the CUDA fatbin")
 set(DSMVC_CUDA_PTX_ARCHITECTURES "75;121" CACHE STRING
     "Virtual compute targets embedded as CUDA PTX fallbacks")
+option(DSMVC_BUILD_BENCHMARKS "Build the fixed-recipe CPU benchmark" OFF)
+
+set(DSMVC_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES _dsmvc_osx_arch_count)
+    if(NOT _dsmvc_osx_arch_count EQUAL 1)
+        message(FATAL_ERROR
+            "Universal macOS builds require separate arm64 and x86_64 builds")
+    endif()
+    list(GET CMAKE_OSX_ARCHITECTURES 0 DSMVC_TARGET_PROCESSOR)
+endif()
+string(TOLOWER "${DSMVC_TARGET_PROCESSOR}" DSMVC_TARGET_PROCESSOR)
+
+if(APPLE AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    add_compile_options(
+        "$<$<CONFIG:Release>:-O3;-flto=full>"
+        "$<$<CONFIG:RelWithDebInfo>:-O3;-flto=full>")
+    add_link_options(
+        "$<$<CONFIG:Release>:-flto=full>"
+        "$<$<CONFIG:RelWithDebInfo>:-flto=full>")
+endif()
 
 if(DSMVC_VAPOURSYNTH_SDK)
     set(_dsmvc_vs_hints "${DSMVC_VAPOURSYNTH_SDK}/include")
@@ -45,9 +66,13 @@ set(DSMVC_ENGINE_SOURCES
 )
 
 set(DSMVC_CAN_BUILD_AVX2 OFF)
-if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+set(DSMVC_CAN_BUILD_NEON OFF)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND DSMVC_TARGET_PROCESSOR MATCHES "^(amd64|x86_64)$")
     set(DSMVC_CAN_BUILD_AVX2 ON)
     list(APPEND DSMVC_ENGINE_SOURCES src/cpu_executor_avx2.cpp)
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    set(DSMVC_CAN_BUILD_NEON ON)
+    list(APPEND DSMVC_ENGINE_SOURCES src/cpu_executor_neon.cpp)
 endif()
 
 if(DSMVC_ENABLE_CUDA)
@@ -191,6 +216,8 @@ if(DSMVC_CAN_BUILD_AVX2)
     else()
         set_source_files_properties(src/cpu_executor_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
     endif()
+elseif(DSMVC_CAN_BUILD_NEON)
+    target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_NEON_OBJECT=1)
 endif()
 
 add_library(dsmvc MODULE src/vs_plugin.cpp)
@@ -201,6 +228,9 @@ set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
 if(DSMVC_ENABLE_CUDA AND WIN32)
     target_sources(dsmvc PRIVATE "${_dsmvc_cuda_resource}")
     add_dependencies(dsmvc dsmvc_cuda_fatbin)
+endif()
+if(DSMVC_CAN_BUILD_NEON)
+    target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_NEON_OBJECT=1)
 endif()
 
 foreach(_target dsmvc_engine dsmvc)
@@ -262,5 +292,21 @@ if(BUILD_TESTING)
                 ${_dsmvc_vs_integration_args}
         )
         set_tests_properties(dsmvc_vs_integration PROPERTIES TIMEOUT 60)
+    endif()
+endif()
+
+if(DSMVC_BUILD_BENCHMARKS)
+    add_executable(dsmvc_cpu_profile_benchmark
+        benchmarks/cpu_profile_benchmark.cpp)
+    target_compile_features(dsmvc_cpu_profile_benchmark PRIVATE cxx_std_23)
+    target_link_libraries(dsmvc_cpu_profile_benchmark PRIVATE dsmvc_engine)
+    if(MSVC)
+        target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
+            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_definitions(dsmvc_cpu_profile_benchmark PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off)
     endif()
 endif()

@@ -283,8 +283,13 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     parsed.force_h = get_int(in, "force_h", parsed.force, vsapi);
     parsed.force_v = get_int(in, "force_v", parsed.force, vsapi);
     parsed.opt = get_int(in, "opt", 0, vsapi);
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    parsed.cpu_path = parsed.opt == 1 ? CpuPath::scalar
+        : parsed.opt == 2 ? CpuPath::neon : CpuPath::automatic;
+#else
     parsed.cpu_path = parsed.opt == 1 ? CpuPath::scalar
         : parsed.opt == 2 ? CpuPath::avx2 : CpuPath::automatic;
+#endif
     parsed.backend_text = get_data(in, "backend", "auto", vsapi);
     parsed.backend = dsmvc::parse_backend(parsed.backend_text);
     (void)dsmvc::resolve_backend(parsed.backend);
