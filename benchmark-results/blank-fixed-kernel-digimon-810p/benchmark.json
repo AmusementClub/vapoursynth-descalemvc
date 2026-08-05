@@ -1,0 +1,1040 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "timestamp_utc": "2026-08-05T07:02:18.892580+00:00",
+    "platform": "Linux-7.0.0-28-generic-x86_64-with-glibc2.43",
+    "processor": "",
+    "logical_cpu_count": 32,
+    "vspipe": "/home/owen/vapoursynth/bin/vspipe",
+    "input": {
+      "type": "VapourSynth std.BlankClip",
+      "width": 1920,
+      "height": 1080,
+      "format": "GRAYS",
+      "color": 0
+    },
+    "old_plugin": {
+      "path": "/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so",
+      "exists": true,
+      "size": 71736,
+      "sha256": "ca2006ae45a55dc58fa2fb96d77deaee9e7af69065dbbb4a41035e0c1a5de264"
+    },
+    "new_plugin": {
+      "path": "/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so",
+      "exists": true,
+      "size": 187272,
+      "sha256": "2e96820ca635fba881f889a65777fdcd570292fb4dc25de0d3c932c49afa2052"
+    },
+    "vpy": {
+      "path": "/home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy",
+      "exists": true,
+      "size": 1499,
+      "sha256": "c43a476c1599dd701c12bc72251af97b447d41fc8eca37b288f3e03627abde37"
+    },
+    "frames": 4000,
+    "src_height": 810.0,
+    "base_height": 1000.0,
+    "threads": [
+      1,
+      8
+    ],
+    "runs": 3,
+    "kernels": [
+      "bilinear",
+      "bicubic_b0_c0_5"
+    ],
+    "implementations": [
+      "old",
+      "new"
+    ],
+    "runner_sha256": "915278b6297b8e1cf8913b10a627ba5cf37e8ae2eb5d9b8a300ee2889b5b93ec"
+  },
+  "cases": [
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "threads": 1,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 4.498940901,
+        "mad": 0.014107581000000202,
+        "minimum": 4.479369186,
+        "maximum": 4.513048482
+      },
+      "fps": {
+        "median": 889.0981428786721,
+        "mad": 2.7792797080815035,
+        "minimum": 886.3188631705906,
+        "maximum": 892.9828808265594
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 38.71,
+          "seconds": 1.69
+        },
+        "Debicubic": {
+          "percent": 61.07,
+          "seconds": 2.68
+        }
+      }
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "threads": 8,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 4.636364846,
+        "mad": 0.0013491590000000997,
+        "minimum": 4.578036582,
+        "maximum": 4.637714005
+      },
+      "fps": {
+        "median": 862.7448729473866,
+        "mad": 0.25098141213231884,
+        "minimum": 862.4938915352543,
+        "maximum": 873.7370111298949
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 131.44,
+          "seconds": 5.85
+        },
+        "Debicubic": {
+          "percent": 667.01,
+          "seconds": 29.92
+        }
+      }
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "threads": 1,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 7.741777511,
+        "mad": 0.02181479999999958,
+        "minimum": 7.719962711,
+        "maximum": 7.790576123
+      },
+      "fps": {
+        "median": 516.6772093768583,
+        "mad": 1.460008345772735,
+        "minimum": 513.440846587823,
+        "maximum": 518.137217722631
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 5.94,
+          "seconds": 0.46
+        },
+        "Debicubic": {
+          "percent": 94.0,
+          "seconds": 7.16
+        }
+      }
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "threads": 8,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 5.035860028,
+        "mad": 0.07840149200000024,
+        "minimum": 4.957458536,
+        "maximum": 5.175093574
+      },
+      "fps": {
+        "median": 794.3032526240819,
+        "mad": 12.561791420736313,
+        "minimum": 772.9328837832527,
+        "maximum": 806.8650440448182
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 132.32,
+          "seconds": 6.49
+        },
+        "Debicubic": {
+          "percent": 666.22,
+          "seconds": 32.66
+        }
+      }
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "threads": 1,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 3.694350784,
+        "mad": 0.005147811000000058,
+        "minimum": 3.689202973,
+        "maximum": 3.704294489
+      },
+      "fps": {
+        "median": 1082.7342160695046,
+        "mad": 1.5108171462377413,
+        "minimum": 1079.827754482832,
+        "maximum": 1084.2450332157423
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 48.01,
+          "seconds": 1.71
+        },
+        "Debilinear": {
+          "percent": 51.7,
+          "seconds": 1.84
+        }
+      }
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "threads": 8,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 4.617960842,
+        "mad": 0.00841677900000004,
+        "minimum": 4.602983105,
+        "maximum": 4.626377621
+      },
+      "fps": {
+        "median": 866.183178432417,
+        "mad": 1.5758489651365153,
+        "minimum": 864.6073294672805,
+        "maximum": 869.0016688644787
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 160.86,
+          "seconds": 7.18
+        },
+        "Debilinear": {
+          "percent": 637.31,
+          "seconds": 28.5
+        }
+      }
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "threads": 1,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 4.405425954,
+        "mad": 0.002402051999999877,
+        "minimum": 4.403023902,
+        "maximum": 4.44366996
+      },
+      "fps": {
+        "median": 907.9712249772613,
+        "mad": 0.49534005389079994,
+        "minimum": 900.1568604343423,
+        "maximum": 908.4665650311521
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 9.85,
+          "seconds": 0.42
+        },
+        "Debilinear": {
+          "percent": 90.04,
+          "seconds": 3.85
+        }
+      }
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "threads": 8,
+      "runs": 3,
+      "elapsed_seconds": {
+        "median": 5.150749423,
+        "mad": 0.09523773000000002,
+        "minimum": 5.005220804,
+        "maximum": 5.245987153
+      },
+      "fps": {
+        "median": 776.5860210823928,
+        "mad": 14.0984504232581,
+        "minimum": 762.4875706591347,
+        "maximum": 799.1655426676357
+      },
+      "filter_time": {
+        "<Destroyed>": {
+          "percent": 0.0,
+          "seconds": 0.0
+        },
+        "BlankClip": {
+          "percent": 160.48,
+          "seconds": 8.05
+        },
+        "Debilinear": {
+          "percent": 637.53,
+          "seconds": 31.98
+        }
+      }
+    }
+  ],
+  "raw_samples": [
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "run": 1,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 4.405425954,
+      "fps": 907.9712249772613,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 90.04,
+          "seconds": 3.85
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 9.86,
+          "seconds": 0.42
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.28 seconds (934.60 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel        90.04       3.85\nBlankClip            parallel         9.86       0.42\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "run": 1,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 3.694350784,
+      "fps": 1082.7342160695046,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 51.7,
+          "seconds": 1.84
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 48.01,
+          "seconds": 1.71
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 3.56 seconds (1122.36 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel        51.70       1.84\nBlankClip            parallel        48.01       1.71\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "run": 2,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 4.403023902,
+      "fps": 908.4665650311521,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 90.04,
+          "seconds": 3.85
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 9.85,
+          "seconds": 0.42
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.28 seconds (934.82 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel        90.04       3.85\nBlankClip            parallel         9.85       0.42\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "run": 2,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 3.689202973,
+      "fps": 1084.2450332157423,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 51.69,
+          "seconds": 1.84
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 48.03,
+          "seconds": 1.71
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 3.56 seconds (1124.57 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel        51.69       1.84\nBlankClip            parallel        48.03       1.71\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "run": 3,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 4.44366996,
+      "fps": 900.1568604343423,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 90.49,
+          "seconds": 3.91
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 9.41,
+          "seconds": 0.41
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.32 seconds (925.57 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel        90.49       3.91\nBlankClip            parallel         9.41       0.41\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "run": 3,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 3.704294489,
+      "fps": 1079.827754482832,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 52.21,
+          "seconds": 1.87
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 47.5,
+          "seconds": 1.7
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 3.57 seconds (1119.25 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel        52.21       1.87\nBlankClip            parallel        47.50       1.70\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "run": 1,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 7.741777511,
+      "fps": 516.6772093768583,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 93.92,
+          "seconds": 7.16
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 6.02,
+          "seconds": 0.46
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 7.62 seconds (524.77 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel        93.92       7.16\nBlankClip            parallel         6.02       0.46\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "run": 1,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 4.498940901,
+      "fps": 889.0981428786721,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 61.44,
+          "seconds": 2.69
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 38.34,
+          "seconds": 1.68
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.37 seconds (915.27 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel        61.44       2.69\nBlankClip            parallel        38.34       1.68\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "run": 2,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 7.719962711,
+      "fps": 518.137217722631,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 94.0,
+          "seconds": 7.14
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 5.94,
+          "seconds": 0.45
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 7.60 seconds (526.52 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel        94.00       7.14\nBlankClip            parallel         5.94       0.45\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "run": 2,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 4.479369186,
+      "fps": 892.9828808265594,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 61.0,
+          "seconds": 2.65
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 38.78,
+          "seconds": 1.69
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.35 seconds (920.07 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel        61.00       2.65\nBlankClip            parallel        38.78       1.69\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "run": 3,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 7.790576123,
+      "fps": 513.440846587823,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 94.0,
+          "seconds": 7.2
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 5.94,
+          "seconds": 0.46
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 7.66 seconds (522.12 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel        94.00       7.20\nBlankClip            parallel         5.94       0.46\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "run": 3,
+      "frames": 4000,
+      "threads": 1,
+      "requests": 1,
+      "elapsed_seconds": 4.513048482,
+      "fps": 886.3188631705906,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 61.07,
+          "seconds": 2.68
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 38.71,
+          "seconds": 1.7
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=1 --arg src_height=810.0 --arg base_height=1000.0 --requests 1 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.38 seconds (912.65 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel        61.07       2.68\nBlankClip            parallel        38.71       1.70\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "run": 1,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 5.005220804,
+      "fps": 799.1655426676357,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 638.25,
+          "seconds": 31.11
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 159.62,
+          "seconds": 7.78
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.87 seconds (820.64 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel       638.25      31.11\nBlankClip            parallel       159.62       7.78\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "run": 1,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.626377621,
+      "fps": 864.6073294672805,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 635.91,
+          "seconds": 28.5
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 162.39,
+          "seconds": 7.28
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.48 seconds (892.39 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel       635.91      28.50\nBlankClip            parallel       162.39       7.28\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "run": 2,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 5.150749423,
+      "fps": 776.5860210823928,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 637.53,
+          "seconds": 31.98
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 160.48,
+          "seconds": 8.05
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 5.02 seconds (797.41 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel       637.53      31.98\nBlankClip            parallel       160.48       8.05\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "run": 2,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.617960842,
+      "fps": 866.183178432417,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 640.62,
+          "seconds": 28.67
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 157.76,
+          "seconds": 7.06
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.48 seconds (893.76 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel       640.62      28.67\nBlankClip            parallel       157.76       7.06\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "old",
+      "run": 3,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 5.245987153,
+      "fps": 762.4875706591347,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 634.48,
+          "seconds": 32.41
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 163.49,
+          "seconds": 8.35
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 5.11 seconds (783.11 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel       634.48      32.41\nBlankClip            parallel       163.49       8.35\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bilinear",
+      "label": "bilinear",
+      "implementation": "new",
+      "run": 3,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.602983105,
+      "fps": 869.0016688644787,
+      "filter_time": {
+        "Debilinear": {
+          "mode": "parallel",
+          "percent": 637.31,
+          "seconds": 28.43
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 160.86,
+          "seconds": 7.18
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bilinear --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.46 seconds (896.55 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebilinear           parallel       637.31      28.43\nBlankClip            parallel       160.86       7.18\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "run": 1,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 5.035860028,
+      "fps": 794.3032526240819,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 666.22,
+          "seconds": 32.66
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 132.32,
+          "seconds": 6.49
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.90 seconds (815.90 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel       666.22      32.66\nBlankClip            parallel       132.32       6.49\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "run": 1,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.578036582,
+      "fps": 873.7370111298949,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 667.01,
+          "seconds": 29.57
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 131.44,
+          "seconds": 5.83
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.43 seconds (902.21 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel       667.01      29.57\nBlankClip            parallel       131.44       5.83\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "run": 2,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 5.175093574,
+      "fps": 772.9328837832527,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 663.82,
+          "seconds": 33.46
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 134.78,
+          "seconds": 6.79
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 5.04 seconds (793.67 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel       663.82      33.46\nBlankClip            parallel       134.78       6.79\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "run": 2,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.636364846,
+      "fps": 862.7448729473866,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 668.51,
+          "seconds": 30.04
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 130.14,
+          "seconds": 5.85
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.49 seconds (890.30 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel       668.51      30.04\nBlankClip            parallel       130.14       5.85\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "old",
+      "run": 3,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.957458536,
+      "fps": 806.8650440448182,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 668.45,
+          "seconds": 32.24
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 130.08,
+          "seconds": 6.27
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=old --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.82 seconds (829.45 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel       668.45      32.24\nBlankClip            parallel       130.08       6.27\n<Destroyed>          <unknown>        0.00       0.00"
+    },
+    {
+      "kernel": "bicubic_b0_c0_5",
+      "label": "bicubic (0, 0.5)",
+      "implementation": "new",
+      "run": 3,
+      "frames": 4000,
+      "threads": 8,
+      "requests": 8,
+      "elapsed_seconds": 4.637714005,
+      "fps": 862.4938915352543,
+      "filter_time": {
+        "Debicubic": {
+          "mode": "parallel",
+          "percent": 665.79,
+          "seconds": 29.92
+        },
+        "BlankClip": {
+          "mode": "parallel",
+          "percent": 132.85,
+          "seconds": 5.97
+        },
+        "<Destroyed>": {
+          "mode": "<unknown>",
+          "percent": 0.0,
+          "seconds": 0.0
+        }
+      },
+      "command": "/home/owen/vapoursynth/bin/vspipe --arg implementation=new --arg kernel=bicubic_b0_c0_5 --arg plugin=/home/owen/dev/Descale-MVC/out/linux-release-generic-20260805/build/dsmvc.so --arg old_plugin=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so --arg frames=4000 --arg threads=8 --arg src_height=810.0 --arg base_height=1000.0 --requests 8 --start 0 --end 3999 --filter-time /home/owen/dev/Descale-MVC/benchmarks/vspipe_blank_fixed_kernel.vpy --",
+      "vspipe_output_tail": "Output 4000 frames in 4.49 seconds (890.03 fps)\nFiltername           Filter mode   Time (%)   Time (s)\nDebicubic            parallel       665.79      29.92\nBlankClip            parallel       132.85       5.97\n<Destroyed>          <unknown>        0.00       0.00"
+    }
+  ]
+}
