@@ -3,7 +3,7 @@
 ## Executive Summary
 
 This package compares the current Release build against the original descale plugin on the same Digimon source, VapourSynth runtime, decoder, geometry, and thread configurations.
-The old performance and paired error data were freshly measured in this refresh. Current Release performance is reused from the preceding new-only final-binary refresh and was not rerun here. The current plugin was built with generic x86-64 Release code and an AVX2/FMA-only executor TU.
+ The current plugin was built with generic x86-64 Release code and an AVX2/FMA-only executor TU.
 
 | Workload | Result |
 |---|---:|
