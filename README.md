@@ -1,5 +1,10 @@
 # dsmvc
 
+> **Release performance:** `dsmvc` reaches **13.13x** the original descale
+> throughput on the full `getfnative` scan at R1T1, and remains **6.45x faster**
+> at R32T32. See the [full release benchmark](docs/release-benchmark.md) for
+> E2E, fixed-kernel, BlankClip, and output-compatibility results.
+
 `dsmvc` is a VapourSynth API3 plugin compatible with the public filter API of
 Irrational-Encoding-Wizardry/descale. It registers only the `dsmvc` namespace:
 
