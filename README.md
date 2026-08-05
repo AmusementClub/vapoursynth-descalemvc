@@ -89,6 +89,12 @@ and baseline hashes, executes each implementation in separate processes, and
 writes JSON, CSV, Markdown, command lines, images, difference maps, and error
 curves outside the VapourSynth installation.
 
+For the real-video end-to-end comparison based on the supplied training HTML,
+`test_getfnative*.vpy`, and `test_selectkernel.vpy`, use
+[`benchmarks/e2e_benchmark.py`](benchmarks/e2e_benchmark.py). It accepts the
+explicit MKV, current plugin, original plugin, VapourSynth Python, and VSPipe
+paths, and writes paired performance and error reports.
+
 ## License
 
 dsmvc is MIT licensed. See [LICENSE](LICENSE) and

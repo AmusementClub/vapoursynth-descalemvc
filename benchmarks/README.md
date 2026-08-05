@@ -58,6 +58,67 @@ include plugin load, graph construction, cold frame, warm frame, VSPipe,
 full-sweep, median, MAD, p95, minimum, maximum, hashes, per-plane error,
 reconstruction error, best candidate, and rank changes.
 
+## Real-video E2E comparison
+
+`e2e_benchmark.py` runs the three supplied training recipes against a real MKV.
+It uses `vspipe_e2e.vpy` to load the selected source decoder, extract the training frame,
+convert the luma plane to `GRAYS`, descale and reconstruct every candidate. Old
+and new performance samples run in separate VSPipe processes. Error workers
+pair the two outputs and also compare each reconstruction with the source.
+
+The default `full` profile keeps the training script's kernels, ranges, and
+candidate ordering: it evaluates all 30,800 `getfnative` candidates, all 3,200
+`getfnative_v2` candidates, and all 101 `selectkernel` candidates. Use the
+explicit `--profile smoke` option for a quick check that samples the long
+height ranges. The HTML files are provenance inputs: the runner records their
+hashes and extracts the referenced training media/scripts; it does not treat
+the chat export as a video source.
+
+Example on the supplied Linux VapourSynth environment:
+
+```bash
+VS_PY=/home/owen/vapoursynth/bin/python
+VSPIPE=/home/owen/vapoursynth/bin/vspipe
+OLD_PLUGIN=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth/plugins/vsrepo/libdescale.so
+NEW_PLUGIN=/path/to/build/dsmvc.so
+SOURCE='/run/media/owen/1A16B65916B6361B/Users/lsy39/Downloads/cesh/[LoliHouse] DIGIMON BEATBREAK - 40 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv'
+TRAINING_ROOT='/run/media/owen/1A16B65916B6361B/Users/lsy39/Documents/vf'
+
+"$VS_PY" benchmarks/e2e_benchmark.py \
+  --source "$SOURCE" \
+  --old-plugin "$OLD_PLUGIN" \
+  --new-plugin "$NEW_PLUGIN" \
+  --vspipe "$VSPIPE" \
+  --python "$VS_PY" \
+  --source-filter ffms2 \
+  --html "$TRAINING_ROOT/总监培训2026_20260725.html" \
+  --html "$TRAINING_ROOT/总监培训2026_20260726.html" \
+  --script "getfnative=$TRAINING_ROOT/test_getfnative.vpy" \
+  --script "getfnative_v2=$TRAINING_ROOT/test_getfnative_v2.vpy" \
+  --script "selectkernel=$TRAINING_ROOT/test_selectkernel.vpy" \
+  --strict-provenance \
+  --profile full \
+  --output benchmark-results/e2e-digimon-full
+```
+
+The default `--source-filter lsmas` follows the supplied scripts. On Linux,
+`--source-filter ffms2` or `--source-filter bestsource` can be used when an
+LSMASHSource binary is unavailable; the selected decoder is recorded in the
+report. Add `--source-plugin /path/to/liblsmas.so` when the selected source
+plugin is not already autoloaded. Use `--profile full` for the complete ranges
+and `--runs 5` (or more) when the machine is otherwise idle. Use
+`--profile smoke` when a short validation is preferred. The report writes
+`benchmark.json`, `benchmark.md`, `performance.csv`, `errors.csv`, one
+`errors-<case>.json` per recipe, and `commands.txt` without modifying the
+VapourSynth installation. `new_speedup` is old wall time divided by new wall
+time, so values above `1.0` mean the current implementation is faster.
+
+For a full error sweep, `--error-processes 8` partitions candidates by index,
+runs the workers independently, and merges them only after checking complete
+coverage. If NumPy is available in the VapourSynth Python environment, the
+worker computes frame metrics directly from the plane memory; otherwise it
+uses the slower PlaneStats fallback.
+
 The focused whole-process benchmark reproduces the three recorded getnative
 graphs through runtime `FrameEval`, launches a fresh VSPipe process for every
 sample, and measures wall time through process exit:

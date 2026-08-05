@@ -1205,7 +1205,7 @@ def main() -> int:
             "between transposition, per-frame parallelism, and the internal worker pool."
         ),
         (
-            "For b5/b7 kernels, review the shared generic vector path; Lanczos3, Spline36, and "
+            "For b5/b7 kernels, review the shared paired-column path; Lanczos3, Spline36, and "
             "Spline64 have the same columns/horizontal hotspot structure and bandwidth range."
         ),
         (

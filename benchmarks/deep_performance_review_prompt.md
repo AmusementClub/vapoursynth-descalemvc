@@ -49,7 +49,7 @@
 - `opt=1` 表示 scalar，`opt=2` 严格要求 AVX2+FMA；默认自动选择，其他数值保持旧行为语义。请确认 API、wrapper、C++ dispatch、错误路径和测试是否完全一致。
 - planner 是 inverse-only：使用 Float64 几何/CSR/带状 LDLT 构造，执行端持有不可变 Float32 系数；不保留不需要的 GetNative forward projection 表。
 - planner 有精确 key、single-flight、带 entry/bytes 上限的 LRU，geometry cache 与完整 plan cache 分离；AVX2 packed plan 另有共享缓存。
-- AVX2 后端包含 b1、b3 的特化求解路径，并为更大带宽（例如 Lanczos3、Spline36、Spline64）使用 generic vector path；列方向有 8-lane/16-column 配对，较大输入使用列 tile 和最多 4 个 worker。
+- AVX2 后端包含 b1、b3 的特化求解路径，并为 b5/b7 使用共享的 paired-column path；其他带宽使用 generic vector fallback，较大输入使用列 tile 和最多 4 个 worker。
 - `src/vs_plugin.cpp` 延迟到首个 frame 建 plan，并使用 VS frame request 生命周期；Python wrapper 负责 RGB、GRAY、YUV、位深、subsampling、chroma conversion 和 custom alias 行为。
 
 ## 静态审核边界与自我校验
@@ -103,9 +103,9 @@
 
 重点审阅 `src/cpu_executor.cpp`、`src/cpu_executor_avx2.cpp`、`src/cpu_packed.hpp`：
 
-1. scalar `inverse_axis_f32` 是否是可靠 oracle；AVX2 b1/b3 特化与 generic b5/b7 路径是否数学等价，特别检查 forward recurrence、backward recurrence、带宽顺序、边界条件和 output reuse。
+1. scalar `inverse_axis_f32` 是否是可靠 oracle；AVX2 b1/b3 特化与 paired b5/b7 路径是否数学等价，特别检查 forward recurrence、backward recurrence、带宽顺序、边界条件和 output reuse。
 2. 逐一检查 `row_count`、`column_count`、stride、padded source/destination、非 8/16 对齐的尾部；确认 AVX2 load/store 不会越界或读写未定义 padding，确认 fallback 的最后 8 行/最后若干列不会重复或丢失数据。
-3. 检查 `inverse_rows_avx2`、`inverse_columns_avx2`、`solve_columns_b1/b3/vector` 的工作划分、列 tile、`thread_local` scratch 和 generic path 的内层循环。解释为什么固定 b1/b3 能走专用 path，而 b5/b7 的 generic path 是否仍有不必要的分支、标量广播、重复 address calculation 或 cache miss。
+3. 检查 `inverse_rows_avx2`、`inverse_columns_avx2`、`solve_columns_b1/b3/pair/vector` 的工作划分、列 tile、`thread_local` scratch 和 generic fallback 的内层循环。解释为什么固定 b1/b3 能走专用 path，以及 b5/b7 paired path 是否仍有不必要的分支、标量广播、重复 address calculation 或 cache miss。
 4. 复核 `/arch:AVX2`、FMA、`/fp:fast` 与其他目标的 `/fp:strict` 组合；分析 FMA contraction、reassociation、denormal/rounding、编译器版本和 CPU dispatch 对新旧输出一致性的风险。`opt=2` 在编译时没有 AVX2、运行时没有 AVX2/FMA、OSXSAVE/XCR0 不满足时是否都能给出确定错误。
 5. 检查 `CpuExecutor` 的 copy/move、`Impl`、packed plan identity、sealed cache、静态 weak cache 和 worker pool 的线程安全。重点寻找：静态析构顺序、barrier 永久等待、异常传播丢失、`in_use_` 导致的串行 fallback、多个 VS frame 同时调用时的 reentrancy、worker oversubscription 和 VS 自己的 thread pool 竞争。
 6. 将 profile 热点映射到代码：当前事实中 fixed r32 的 dsmvc 占比约 97-99%，columns 是最大 bucket；sweep 中 `getfnative` 的 dsmvc 比例约 16.40%、`getfnative_v2` 约 26.22%、`selectkernel` 约 40.35%，外部 kernel/VapourSynth/VC runtime 贡献很大。解释哪些优化只能提升核心 kernel，哪些能提升完整 VSPipe 吞吐。
@@ -118,7 +118,7 @@
 
 - **内存带宽和数据量**：估算每输出像素的输入读、系数读、LDLT 中间值读写和最终写回；找出重复 pass、重复转置、过宽 stride、系数复制、无效 padding 和可以消除的临时 buffer；判断 profile 的 38-40 GB/s socket-wide PCM 是否与“带宽受限”假设相容，但不要把它升级为进程级 DRAM 证明。
 - **缓存和 locality**：分析 L1D/L2/L3 的工作集、tile/reuse distance、forward/backward recurrence 是否让中间行变冷、packed plan 与 frame data 是否争用 cache、TLB/page locality、对齐、bank/port 压力、预取和 store policy；区分能由源码证明的访问模式、由 assess_ext/PCM 支持的线索和必须新测的 cache-level 结论。
-- **SIMD/计算**：分析 FMA 数量、broadcast/load 比例、依赖链、循环展开、寄存器压力、mask/tail、aliasing/alignment、编译器自动向量化和函数边界；比较 b1/b3 特化与 b5/b7 generic path 的机会；讨论 AVX2/FMA、AVX-512/AVX10 或其他 ISA 的条件性收益及频率/功耗/dispatch 风险。
+- **SIMD/计算**：分析 FMA 数量、broadcast/load 比例、依赖链、循环展开、寄存器压力、mask/tail、aliasing/alignment、编译器自动向量化和函数边界；比较 b1/b3 特化与 b5/b7 paired path 的机会；讨论 AVX2/FMA、AVX-512/AVX10 或其他 ISA 的条件性收益及频率/功耗/dispatch 风险。
 - **算法和布局**：评估融合 horizontal/vertical、避免或重排 transpose、block/banded solve、按 kernel support 生成专用 inner loop、系数压缩/量化、混合精度、plan 与 packed plan 合并，以及 direct convolution 与 inverse solve 的适用边界。
 - **并发和调度**：评估 VS core threads、内部最多 4 worker、`262144` work threshold、frame-level parallelism、barrier/atomic、oversubscription、NUMA 和跨 frame 复用；给出不会牺牲 API3 reentrancy 和尾部正确性的替代调度方式。
 - **planner/cache/frontend**：评估几何 canonicalization、`-0/+0`/NaN key、Bicubic 参数族复用、single-flight 等待、LRU bytes/entry 上限、首帧 planner cost、packed plan lifetime 和 sweep 的多 GiB working set；提出能减少分配或 retained state 的方向。
@@ -173,7 +173,7 @@
 
 - planner 数值、极端几何、border、奇偶尺寸、极小尺寸、超大 taps/support、NaN/Inf/negative zero、custom callback 异常与重复 index；
 - scalar 与 AVX2 的逐 plane 误差、尾部/stride/padding、随机输入、不同 destination/source 比率；
-- b1/b3 特化与 b5/b7 generic path 的覆盖，Spline16/36/64 和 Lanczos taps 的 coverage；
+- b1/b3 特化与 b5/b7 paired path 的覆盖，Spline16/36/64 和 Lanczos taps 的 coverage；
 - API3 signature/namespace/alias/force/backend error/AVX2 unavailable；
 - RGB/YUV/GRAY、整数/float、subsampling/chroma location、wrapper output format 和 frame properties；
 - 多线程 cache single-flight、clear/eviction、多个 filter instance、内部 pool 与 VS threads 的组合；
