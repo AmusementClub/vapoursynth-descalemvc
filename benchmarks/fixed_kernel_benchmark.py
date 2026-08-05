@@ -118,6 +118,10 @@ def run_sample(options, kernel: dict, implementation: str,
         "source_plugin": (str(Path(options.source_plugin).expanduser().resolve())
                           if options.source_plugin else ""),
         "source_filter": options.source_filter,
+        "source_decoder": options.source_decoder,
+        "source_prefer_hw": str(options.source_prefer_hw),
+        "source_ff_loglevel": str(options.source_ff_loglevel),
+        "source_rap_verification": str(options.source_rap_verification),
         "frames": str(options.frames),
         "threads": str(threads),
         "src_height": str(options.src_height),
@@ -217,6 +221,8 @@ def write_scaling_svg(cases: list[dict], kernels: list[dict],
     colors = {"old": "#64748b", "new": "#dc2626"}
     labels = {"old": "old descale", "new": "current dsmvc"}
     legend = " / ".join(labels[item] for item in implementations)
+    frames = cases[0].get("frames", "") if cases else ""
+    frame_label = f"{frames} source frames; " if frames else ""
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
         f'height="{height}" viewBox="0 0 {width} {height}" role="img" '
@@ -229,7 +235,7 @@ def write_scaling_svg(cases: list[dict], kernels: list[dict],
         'Fixed kernel scaling at 810p</text>',
         f'<text x="{width / 2:.1f}" y="52" text-anchor="middle" '
         'font-family="sans-serif" font-size="13" fill="#4b5563">'
-        '4000 source frames; FPS is external VSPipe wall-clock throughput</text>',
+        f'{frame_label}FPS is external VSPipe wall-clock throughput</text>',
     ]
     legend_width = 120 * len(implementations)
     legend_start = width / 2 - legend_width / 2
@@ -440,6 +446,12 @@ def validate_options(options) -> None:
         raise ValueError("at least one implementation is required")
     if len(set(options.implementations)) != len(options.implementations):
         raise ValueError("implementation names must be unique")
+    if options.source_prefer_hw < 0 or options.source_prefer_hw > 7:
+        raise ValueError("--source-prefer-hw must be between 0 and 7")
+    if options.source_ff_loglevel < 0 or options.source_ff_loglevel > 8:
+        raise ValueError("--source-ff-loglevel must be between 0 and 8")
+    if options.source_rap_verification not in (-1, 0, 1):
+        raise ValueError("--source-rap-verification must be -1, 0, or 1")
     unknown = [name for name in options.kernels if name not in KERNEL_BY_NAME]
     if unknown:
         raise ValueError("unknown kernels: " + ", ".join(unknown))
@@ -456,6 +468,14 @@ def main() -> int:
     parser.add_argument("--source-plugin")
     parser.add_argument("--source-filter", choices=("lsmas", "ffms2", "bestsource"),
                         default="ffms2")
+    parser.add_argument("--source-decoder", default="",
+                        help="Preferred LSMASH/libavcodec decoder name(s).")
+    parser.add_argument("--source-prefer-hw", type=int, default=0,
+                        help="LSMASH prefer_hw mode; 0 keeps software default.")
+    parser.add_argument("--source-ff-loglevel", type=int, default=0,
+                        help="LSMASH FFmpeg log level, 0 is quiet.")
+    parser.add_argument("--source-rap-verification", type=int, default=-1,
+                        help="LSMASH RAP verification; -1 keeps plugin default.")
     parser.add_argument("--output", default=str(
         root / "benchmark-results" / "fixed-kernel-digimon-810p"))
     parser.add_argument("--frames", type=int, default=4000)
@@ -511,6 +531,10 @@ def main() -> int:
         "logical_cpu_count": os.cpu_count(),
         "vspipe": version([options.vspipe, "--version"]),
         "source_filter": options.source_filter,
+        "source_decoder": options.source_decoder,
+        "source_prefer_hw": options.source_prefer_hw,
+        "source_ff_loglevel": options.source_ff_loglevel,
+        "source_rap_verification": options.source_rap_verification,
         "source": file_info(source),
         "old_plugin": file_info(old_plugin) if old_plugin else None,
         "new_plugin": file_info(new_plugin),

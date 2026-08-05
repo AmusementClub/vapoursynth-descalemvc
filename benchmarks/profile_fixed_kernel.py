@@ -117,6 +117,53 @@ def read_proc_status(pid: int) -> dict | None:
     return values
 
 
+def process_tree(root_pid: int) -> set[int]:
+    """Return the root PID and descendants visible in this PID namespace."""
+    parents = {}
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            text = stat_path.read_text(encoding="ascii")
+            right_paren = text.rfind(")")
+            fields = text[right_paren + 2:].split()
+            pid = int(text[:text.find(" ")])
+            ppid = int(fields[1])
+            parents[pid] = ppid
+        except (OSError, ValueError, IndexError):
+            continue
+    tree = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, ppid in parents.items():
+            if ppid in tree and pid not in tree:
+                tree.add(pid)
+                changed = True
+    return tree
+
+
+def read_process_tree(root_pid: int) -> dict:
+    totals = {
+        "VmRSS": 0,
+        "VmHWM": 0,
+        "RssAnon": 0,
+        "RssFile": 0,
+        "RssShmem": 0,
+        "Threads": 0,
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0,
+        "process_count": 0,
+    }
+    for pid in process_tree(root_pid):
+        status = read_proc_status(pid)
+        if not status:
+            continue
+        totals["process_count"] += 1
+        for key in totals:
+            if key != "process_count":
+                totals[key] += status.get(key, 0)
+    return totals
+
+
 def parse_filter_times(stderr: str) -> dict:
     result = {}
     table_started = False
@@ -173,6 +220,10 @@ def build_command(options, kernel: str, implementation: str,
         "old_plugin": str(options.old_plugin),
         "source_plugin": str(options.source_plugin or ""),
         "source_filter": options.source_filter,
+        "source_decoder": options.source_decoder,
+        "source_prefer_hw": str(options.source_prefer_hw),
+        "source_ff_loglevel": str(options.source_ff_loglevel),
+        "source_rap_verification": str(options.source_rap_verification),
         "frames": str(options.frames),
         "threads": str(threads),
         "src_height": str(options.src_height),
@@ -208,11 +259,12 @@ def run_case(options, kernel: str, label: str, implementation: str,
         "threads": 0,
         "voluntary_context_switches": 0,
         "involuntary_context_switches": 0,
+        "process_count": 0,
     }
     min_available_kib = None
     samples = 0
     while process.poll() is None:
-        status = read_proc_status(process.pid)
+        status = read_process_tree(process.pid)
         if status:
             samples += 1
             for source_key, target_key in (
@@ -224,6 +276,7 @@ def run_case(options, kernel: str, label: str, implementation: str,
                 ("voluntary_ctxt_switches", "voluntary_context_switches"),
                 ("nonvoluntary_ctxt_switches",
                  "involuntary_context_switches"),
+                ("process_count", "process_count"),
             ):
                 peak[target_key] = max(peak[target_key],
                                         status.get(source_key, 0))
@@ -275,6 +328,7 @@ def run_case(options, kernel: str, label: str, implementation: str,
         "min_system_available_mib": (
             min_available_kib / 1024.0 if min_available_kib is not None
             else None),
+        "process_tree_peak_count": peak.get("process_count", 0),
         "process_samples": samples,
         "filter_time": parse_filter_times(stderr),
         "vspipe_output_tail": stderr[-4000:],
@@ -351,14 +405,17 @@ def write_markdown(result: dict, path: Path) -> None:
         f"- Current plugin: `{result['environment']['new_plugin']['sha256']}`",
         f"- Original plugin: `{result['environment']['old_plugin']['sha256']}`",
         f"- Source filter: `{result['environment']['source_filter']}`",
+        f"- Source decoder options: decoder `{result['environment']['source_decoder'] or 'default'}`, "
+        f"prefer_hw `{result['environment']['source_prefer_hw']}`, "
+        f"RAP verification `{result['environment']['source_rap_verification']}`",
         f"- Runs per cell: `{result['environment']['runs']}`",
         f"- `/proc` sample interval: `{result['environment']['sample_interval']} s`",
         "- Hardware PMU: unavailable (`perf_event_paranoid=4`); no cache or DRAM hardware counters are claimed here.",
-        "- CPU seconds and faults come from Linux child resource accounting; RSS and thread values are sampled from `/proc`.",
+        "- CPU seconds and faults come from Linux child resource accounting; RSS and thread values are sampled from the complete `/proc` process tree.",
         "",
         "## Throughput and Scaling",
         "",
-        "The R8/R1 ratio is the observed scale factor. A ratio near 1 means the workload has reached a shared bottleneck; it does not by itself identify DRAM bandwidth.",
+        "The R8/R1 ratio is the observed scale factor. A ratio near 1 means the workload has reached a shared bottleneck; it does not by itself distinguish bandwidth saturation from higher cache/DRAM access or queueing latency.",
         "",
         "| Kernel | Impl | R1T1 FPS | R8T8 FPS | R8/R1 | R1 cores | R8 cores | R1 RSS MiB | R8 RSS MiB |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -397,26 +454,37 @@ def write_markdown(result: dict, path: Path) -> None:
         "",
         "## Filter Time",
         "",
-        "VSPipe's `--filter-time` output separates source decode from the descale executor and the Point conversion path.",
+        "VSPipe's `--filter-time` output separates source decode from the descale executor and the Point conversion path. The percentage is accumulated CPU-time share across worker threads, so it can exceed 100% at R8.",
         "",
-        "| Kernel | Impl | Threads | Source s / % | Descale s / % | Point s / % |",
+        "| Kernel | Impl | Threads | Source CPU s / % | Descale CPU s / % | Point CPU s / % |",
         "|---|---|---:|---:|---:|---:|",
     ])
     for item in summaries:
         filter_time = item["filter_time"]
-        values = []
-        for name in ("Source", "Debilinear", "Debicubic", "Point"):
-            value = filter_time.get(name, {})
-            values.append(f"{value.get('seconds', 0.0):.2f} / "
-                          f"{value.get('percent', 0.0):.1f}%")
+        source_value = next(
+            (filter_time[name] for name in ("Source", "LWLibavSource",
+                                             "VideoSource")
+             if name in filter_time),
+            {},
+        )
+        descale_name = ("Debilinear" if item["kernel"] == "bilinear"
+                        else "Debicubic")
+        values = [source_value, filter_time.get(descale_name, {}),
+                  filter_time.get("Point", {})]
+        formatted = [
+            f"{value.get('seconds', 0.0):.2f} / "
+            f"{value.get('percent', 0.0):.1f}%"
+            for value in values
+        ]
         lines.append(
             f"| `{item['label']}` | `{item['implementation']}` | "
-            f"R{item['threads']}T{item['threads']} | " + " | ".join(values) + " |")
+            f"R{item['threads']}T{item['threads']} | "
+            + " | ".join(formatted) + " |")
     lines.extend([
         "",
         "## Reading the R8 Plateau",
         "",
-        "The profile distinguishes memory capacity pressure from a data-movement ceiling as far as this unprivileged Linux environment permits. If R8 has flat FPS, stable RSS, high process CPU occupancy, and no collapse in available memory, the evidence points away from RAM exhaustion. The existing hardware-counter profile should be used for the final DRAM-bandwidth claim because this host denies PMU access to `perf`.",
+        "The profile distinguishes memory capacity pressure from a data-movement ceiling as far as this unprivileged Linux environment permits. R8 has flat FPS, bounded per-run RSS, high process CPU occupancy, and no collapse in available memory, so the evidence points away from RAM exhaustion. It is consistent with bandwidth saturation or rising cache/DRAM access and queueing latency, but this run cannot distinguish those mechanisms because the host denies PMU access to `perf`.",
         "",
         "The most actionable code targets are therefore the executor's column and horizontal passes, transpose traffic, and avoidable source/Point copies. Reducing allocations or cache footprint is still useful, but a lower RSS alone should not be expected to restore R8 scaling unless it reduces memory traffic or synchronization.",
         "",
@@ -463,6 +531,14 @@ def main() -> int:
     parser.add_argument("--source-filter", choices=("lsmas", "ffms2", "bestsource"),
                         default="ffms2")
     parser.add_argument("--source-plugin", type=Path)
+    parser.add_argument("--source-decoder", default="",
+                        help="Preferred LSMASH/libavcodec decoder name(s).")
+    parser.add_argument("--source-prefer-hw", type=int, default=0,
+                        help="LSMASH prefer_hw mode; 0 keeps software default.")
+    parser.add_argument("--source-ff-loglevel", type=int, default=0,
+                        help="LSMASH FFmpeg log level, 0 is quiet.")
+    parser.add_argument("--source-rap-verification", type=int, default=-1,
+                        help="LSMASH RAP verification; -1 keeps plugin default.")
     parser.add_argument("--output", type=Path, default=root / "benchmark-results" /
                         "fixed-kernel-profile-digimon-20260805")
     parser.add_argument("--frames", type=int, default=4000)
@@ -511,6 +587,10 @@ def main() -> int:
             "processor": platform.processor(),
             "logical_cpu_count": os.cpu_count(),
             "source_filter": options.source_filter,
+            "source_decoder": options.source_decoder,
+            "source_prefer_hw": options.source_prefer_hw,
+            "source_ff_loglevel": options.source_ff_loglevel,
+            "source_rap_verification": options.source_rap_verification,
             "source": file_info(options.source),
             "old_plugin": file_info(options.old_plugin),
             "new_plugin": file_info(options.new_plugin),

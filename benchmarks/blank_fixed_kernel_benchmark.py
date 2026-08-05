@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare old and current descale on an in-memory blank 4000-frame clip."""
+"""Compare old and current descale on an in-memory blank clip."""
 
 from __future__ import annotations
 
@@ -20,8 +20,28 @@ from pathlib import Path
 KERNELS = {
     "bilinear": "bilinear",
     "bicubic_b0_c0_5": "bicubic (0, 0.5)",
+    "lanczos2": "lanczos2",
+    "lanczos3": "lanczos3",
+    "lanczos4": "lanczos4",
+    "lanczos5": "lanczos5",
+    "lanczos6": "lanczos6",
+    "spline16": "spline16",
+    "spline36": "spline36",
+    "spline64": "spline64",
 }
-DEFAULT_THREADS = (1, 8)
+DESCALE_FILTERS = {
+    "bilinear": "Debilinear",
+    "bicubic_b0_c0_5": "Debicubic",
+    "lanczos2": "Delanczos",
+    "lanczos3": "Delanczos",
+    "lanczos4": "Delanczos",
+    "lanczos5": "Delanczos",
+    "lanczos6": "Delanczos",
+    "spline16": "Despline16",
+    "spline36": "Despline36",
+    "spline64": "Despline64",
+}
+DEFAULT_THREADS = (1, 8, 16, 32)
 IMPLEMENTATIONS = ("old", "new")
 
 
@@ -206,7 +226,8 @@ def write_markdown(result: dict, path: Path) -> None:
         "# Blank fixed-kernel benchmark",
         "",
         "This compares old descale and current dsmvc without a decoder or "
-        "source clip. Each run processes 4,000 frames from an in-memory "
+        f"source clip. Each run processes {result['environment']['frames']:,} "
+        "frames from an in-memory "
         "1920x1080 GRAYS `std.BlankClip` at fixed 810p geometry.",
         "",
         "## Throughput",
@@ -234,8 +255,7 @@ def write_markdown(result: dict, path: Path) -> None:
         "|---|---|---:|---:|---:|",
     ])
     for case in cases:
-        descale_name = ("Debilinear" if case["kernel"] == "bilinear"
-                        else "Debicubic")
+        descale_name = DESCALE_FILTERS[case["kernel"]]
         blank = filter_value(case, "BlankClip")
         descale = filter_value(case, descale_name)
         lines.append(
@@ -264,7 +284,7 @@ def main() -> int:
     parser.add_argument("--vspipe", required=True, type=Path)
     parser.add_argument("--output", type=Path, default=root / "benchmark-results" /
                         "blank-fixed-kernel-digimon-810p")
-    parser.add_argument("--frames", type=int, default=4000)
+    parser.add_argument("--frames", type=int, default=8000)
     parser.add_argument("--src-height", type=float, default=810.0)
     parser.add_argument("--base-height", type=float, default=1000.0)
     parser.add_argument("--threads", nargs="*", type=int,

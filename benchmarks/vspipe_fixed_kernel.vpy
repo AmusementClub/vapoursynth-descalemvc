@@ -24,7 +24,16 @@ FUNCTIONS = {
 
 def open_source(path):
     if source_filter == "lsmas":
-        return core.lsmas.LWLibavSource(path)
+        kwargs = {}
+        if source_decoder:
+            kwargs["decoder"] = source_decoder
+        if source_prefer_hw:
+            kwargs["prefer_hw"] = int(source_prefer_hw)
+        if source_ff_loglevel:
+            kwargs["ff_loglevel"] = int(source_ff_loglevel)
+        if source_rap_verification >= 0:
+            kwargs["rap_verification"] = int(source_rap_verification)
+        return core.lsmas.LWLibavSource(path, **kwargs)
     if source_filter == "ffms2":
         return core.ffms2.Source(path)
     if source_filter == "bestsource":
@@ -63,6 +72,11 @@ def descale(source, kernel_name, arguments):
 
 core = vs.core
 core.num_threads = int(threads)
+source_decoder = globals().get("source_decoder", "")
+source_prefer_hw = int(globals().get("source_prefer_hw", "0") or 0)
+source_ff_loglevel = int(globals().get("source_ff_loglevel", "0") or 0)
+source_rap_verification = int(
+    globals().get("source_rap_verification", "-1") or -1)
 
 source_namespace = {"lsmas": "lsmas", "ffms2": "ffms2",
                     "bestsource": "bs"}[source_filter]

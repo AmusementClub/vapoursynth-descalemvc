@@ -205,6 +205,195 @@ ErrorStats compare_columns(const dsmvc::CpuExecutor &optimized_executor,
     return stats;
 }
 
+ErrorStats compare_2d(dsmvc::CpuPath path, dsmvc::KernelKind kind,
+                      std::int32_t source_width,
+                      std::int32_t destination_width,
+                      std::int32_t source_height,
+                      std::int32_t destination_height,
+                      bool padded_output, std::string_view label) {
+    auto horizontal = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        kind, source_width, destination_width,
+        static_cast<double>(destination_width) - 0.25, 0.125));
+    auto vertical = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        kind, source_height, destination_height,
+        static_cast<double>(destination_height) - 0.5, 0.25));
+    const auto input_stride = (source_width + 7) & ~7;
+    const auto intermediate_stride = (destination_width + 7) & ~7;
+    const auto output_stride = padded_output
+        ? intermediate_stride : destination_width;
+
+    GuardedFloats input(
+        static_cast<std::size_t>(source_height)
+            * static_cast<std::size_t>(input_stride),
+        0.0F);
+    GuardedFloats intermediate(
+        static_cast<std::size_t>(source_height)
+            * static_cast<std::size_t>(intermediate_stride),
+        output_fill);
+    GuardedFloats legacy(
+        static_cast<std::size_t>(destination_height)
+            * static_cast<std::size_t>(output_stride),
+        output_fill);
+    GuardedFloats streamed(
+        static_cast<std::size_t>(destination_height)
+            * static_cast<std::size_t>(output_stride),
+        output_fill);
+    fill_deterministic(input.data(), input.size(), 0xa5a50000U
+        + static_cast<std::uint32_t>(kind)
+        + static_cast<std::uint32_t>(source_height));
+
+    dsmvc::CpuExecutor executor(path);
+    executor.prepare(horizontal);
+    executor.prepare(vertical);
+    executor.seal();
+    executor.inverse_rows(
+        *horizontal, input.data(), input_stride,
+        intermediate.data(), intermediate_stride, source_height);
+    executor.inverse_columns(
+        *vertical, intermediate.data(), intermediate_stride,
+        legacy.data(), output_stride, destination_width);
+    executor.inverse_2d(
+        *horizontal, *vertical, input.data(), input_stride,
+        streamed.data(), output_stride);
+
+    require(input.guards_intact(), std::string(label) + " changed input guards");
+    require(intermediate.guards_intact(),
+            std::string(label) + " changed intermediate guards");
+    require(legacy.guards_intact(), std::string(label) + " changed legacy guards");
+    require(streamed.guards_intact(),
+            std::string(label) + " changed streamed guards");
+    const auto stats = compare_matrix(
+        legacy.data(), streamed.data(), destination_height,
+        destination_width, output_stride);
+    require_agreement(stats, label);
+
+    std::size_t different = 0U;
+    for (std::int32_t row = 0; row < destination_height; ++row) {
+        for (std::int32_t column = 0; column < destination_width; ++column) {
+            const auto index = static_cast<std::ptrdiff_t>(row)
+                * output_stride + column;
+            different += legacy.data()[index] != streamed.data()[index];
+        }
+    }
+    std::cout << label << ": bit_differences=" << different << '\n';
+    require(different == 0U,
+            std::string(label) + " is not bit-exact with the legacy two-pass path");
+    return stats;
+}
+
+template <class Sample>
+void compare_integer_2d(
+    dsmvc::CpuPath path, dsmvc::KernelKind kind,
+    const dsmvc::IntegerConversion &conversion,
+    std::string_view label) {
+    constexpr std::int32_t source_width = 97;
+    constexpr std::int32_t destination_width = 67;
+    constexpr std::int32_t source_height = 73;
+    constexpr std::int32_t destination_height = 51;
+    constexpr std::int32_t input_stride = 104;
+    constexpr std::int32_t float_output_stride = 72;
+    constexpr std::int32_t integer_output_stride = 73;
+    auto horizontal = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        kind, source_width, destination_width, 66.75, 0.125));
+    auto vertical = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        kind, source_height, destination_height, 50.5, 0.25));
+
+    std::vector<Sample> integer_input(
+        static_cast<std::size_t>(source_height)
+            * static_cast<std::size_t>(input_stride));
+    for (std::size_t index = 0; index < integer_input.size(); ++index) {
+        auto bits = static_cast<std::uint32_t>(index) + 0x31415926U;
+        bits ^= bits >> 16U;
+        bits *= 0x7feb352dU;
+        bits ^= bits >> 15U;
+        integer_input[index] = static_cast<Sample>(
+            bits % (conversion.output_maximum + 1U));
+    }
+    std::vector<float> float_input(integer_input.size());
+    for (std::size_t index = 0; index < integer_input.size(); ++index) {
+        float_input[index] =
+            (static_cast<float>(integer_input[index]) - conversion.input_offset)
+            * conversion.input_scale;
+    }
+    std::vector<float> float_output(
+        static_cast<std::size_t>(destination_height)
+            * static_cast<std::size_t>(float_output_stride),
+        output_fill);
+    std::vector<Sample> reference(
+        static_cast<std::size_t>(destination_height)
+            * static_cast<std::size_t>(integer_output_stride));
+    std::vector<Sample> candidate(reference.size());
+    std::vector<Sample> streamed(reference.size());
+
+    dsmvc::CpuExecutor executor(path);
+    executor.prepare(horizontal);
+    executor.prepare(vertical);
+    executor.seal();
+    executor.inverse_2d(
+        *horizontal, *vertical, float_input.data(), input_stride,
+        float_output.data(), float_output_stride);
+    for (std::int32_t row = 0; row < destination_height; ++row) {
+        for (std::int32_t column = 0; column < destination_width; ++column) {
+            const auto float_index = static_cast<std::ptrdiff_t>(row)
+                * float_output_stride + column;
+            const auto integer_index = static_cast<std::ptrdiff_t>(row)
+                * integer_output_stride + column;
+            const auto scaled = std::clamp(
+                float_output[float_index] * conversion.output_scale
+                    + conversion.output_offset,
+                0.0F, static_cast<float>(conversion.output_maximum));
+            reference[integer_index] =
+                static_cast<Sample>(std::nearbyint(scaled));
+        }
+    }
+    if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+        executor.inverse_2d_u8(
+            *horizontal, *vertical, integer_input.data(), input_stride,
+            candidate.data(), integer_output_stride, conversion);
+        executor.inverse_2d_u8_streamed(
+            *horizontal, *vertical, integer_input.data(), input_stride,
+            streamed.data(), integer_output_stride, conversion);
+    } else {
+        executor.inverse_2d_u16(
+            *horizontal, *vertical, integer_input.data(), input_stride,
+            candidate.data(), integer_output_stride, conversion);
+        executor.inverse_2d_u16_streamed(
+            *horizontal, *vertical, integer_input.data(), input_stride,
+            streamed.data(), integer_output_stride, conversion);
+    }
+
+    std::size_t different = 0U;
+    std::size_t streamed_different = 0U;
+    std::uint32_t maximum_error = 0U;
+    std::uint32_t streamed_maximum_error = 0U;
+    for (std::int32_t row = 0; row < destination_height; ++row) {
+        for (std::int32_t column = 0; column < destination_width; ++column) {
+            const auto index = static_cast<std::ptrdiff_t>(row)
+                * integer_output_stride + column;
+            const auto left = static_cast<std::uint32_t>(reference[index]);
+            const auto right = static_cast<std::uint32_t>(candidate[index]);
+            const auto streamed_right = static_cast<std::uint32_t>(streamed[index]);
+            different += left != right;
+            streamed_different += left != streamed_right;
+            maximum_error = std::max(
+                maximum_error, left > right ? left - right : right - left);
+            streamed_maximum_error = std::max(
+                streamed_maximum_error,
+                left > streamed_right ? left - streamed_right
+                                      : streamed_right - left);
+        }
+    }
+    std::cout << label << ": integer_differences=" << different
+              << " max_error=" << maximum_error
+              << " streamed_differences=" << streamed_different
+              << " streamed_max_error=" << streamed_maximum_error << '\n';
+    require(different == 0U,
+            std::string(label) + " differs from the Float32 Point reference");
+    require(streamed_different == 0U,
+            std::string(label)
+                + " streamed path differs from the Float32 Point reference");
+}
+
 void test_backend_selection() {
     require(dsmvc::parse_backend("AUTO") == dsmvc::BackendKind::automatic,
             "backend parsing failed");
@@ -455,6 +644,71 @@ void test_b5_b7_executor_agreement() {
     }
 }
 
+void test_streamed_2d_executor_agreement() {
+    const struct {
+        dsmvc::KernelKind kind;
+        const char *name;
+    } kernels[] = {
+        {dsmvc::KernelKind::bilinear, "b1"},
+        {dsmvc::KernelKind::bicubic, "b3"},
+        {dsmvc::KernelKind::lanczos, "b5"},
+        {dsmvc::KernelKind::spline64, "b7"},
+    };
+    for (const auto &kernel : kernels) {
+        for (const auto path : {dsmvc::CpuPath::scalar,
+                                dsmvc::CpuPath::automatic}) {
+            const std::string prefix = std::string("streamed 2D ")
+                + kernel.name
+                + (path == dsmvc::CpuPath::scalar ? " scalar" : " automatic");
+            (void)compare_2d(
+                path, kernel.kind, 97, 67, 73, 51, true,
+                prefix + " padded vectors and odd rows");
+            (void)compare_2d(
+                path, kernel.kind, 97, 67, 73, 51, false,
+                prefix + " scalar column tail");
+        }
+    }
+
+    if (dsmvc::cpu_avx2_available()) {
+        (void)compare_2d(
+            dsmvc::CpuPath::avx2, dsmvc::KernelKind::spline64,
+            800, 640, 600, 480, true,
+            "streamed 2D b7 parallel destination bands");
+    }
+}
+
+void test_integer_2d_executor_agreement() {
+    const dsmvc::IntegerConversion limited_luma_u8{
+        16.0F, 1.0F / 219.0F, 219.0F, 16.0F, 255U};
+    const dsmvc::IntegerConversion limited_chroma_u10{
+        512.0F, 1.0F / 896.0F, 896.0F, 512.0F, 1023U};
+    const dsmvc::IntegerConversion full_luma_u16{
+        0.0F, 1.0F / 65535.0F, 65535.0F, 0.0F, 65535U};
+    const struct {
+        dsmvc::KernelKind kind;
+        const char *name;
+    } kernels[] = {
+        {dsmvc::KernelKind::bilinear, "b1"},
+        {dsmvc::KernelKind::bicubic, "b3"},
+        {dsmvc::KernelKind::lanczos, "b5"},
+        {dsmvc::KernelKind::spline64, "b7"},
+    };
+    for (const auto &kernel : kernels) {
+        compare_integer_2d<std::uint8_t>(
+            dsmvc::CpuPath::automatic, kernel.kind, limited_luma_u8,
+            std::string("integer u8 limited luma ") + kernel.name);
+    }
+    compare_integer_2d<std::uint16_t>(
+        dsmvc::CpuPath::automatic, dsmvc::KernelKind::spline64,
+        limited_chroma_u10, "integer u10 limited chroma b7");
+    compare_integer_2d<std::uint16_t>(
+        dsmvc::CpuPath::automatic, dsmvc::KernelKind::bicubic,
+        full_luma_u16, "integer u16 full luma b3");
+    compare_integer_2d<std::uint8_t>(
+        dsmvc::CpuPath::scalar, dsmvc::KernelKind::lanczos,
+        limited_luma_u8, "integer u8 scalar b5");
+}
+
 void test_executor_plan_ownership() {
     if (!dsmvc::cpu_avx2_available()) return;
 
@@ -574,6 +828,8 @@ int main() {
         test_large_support_compatibility();
         test_axis_plan_validation();
         test_b5_b7_executor_agreement();
+        test_streamed_2d_executor_agreement();
+        test_integer_2d_executor_agreement();
         test_executor_plan_ownership();
         test_concurrent_prepare_and_seal();
         std::cout << "dsmvc engine tests passed\n";

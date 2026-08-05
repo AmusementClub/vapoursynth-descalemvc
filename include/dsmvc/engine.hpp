@@ -96,6 +96,14 @@ struct BackendCapability {
     bool device_available = false;
 };
 
+struct IntegerConversion {
+    float input_offset = 0.0F;
+    float input_scale = 1.0F;
+    float output_scale = 1.0F;
+    float output_offset = 0.0F;
+    std::uint32_t output_maximum = 255U;
+};
+
 [[nodiscard]] AxisPlan build_axis_plan(
     const AxisRequest &request, const CustomKernel &custom_kernel = {});
 [[nodiscard]] std::shared_ptr<const AxisPlan> get_or_build_axis_plan(
@@ -150,10 +158,52 @@ public:
                          float *output, std::ptrdiff_t output_row_stride,
                          std::int32_t column_count) const;
 
+    void inverse_2d(const AxisPlan &horizontal, const AxisPlan &vertical,
+                    const float *input, std::ptrdiff_t input_row_stride,
+                    float *output, std::ptrdiff_t output_row_stride) const;
+
+    void inverse_2d_u8(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+        std::uint8_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion) const;
+
+    void inverse_2d_u16(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+        std::uint16_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion) const;
+
+    void inverse_2d_u8_streamed(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+        std::uint8_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion) const;
+
+    void inverse_2d_u16_streamed(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+        std::uint16_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion) const;
+
 private:
     struct Impl;
     CpuPath path_ = CpuPath::scalar;
     std::shared_ptr<Impl> impl_;
+
+    template <class Sample>
+    void inverse_2d_integer(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const Sample *input, std::ptrdiff_t input_row_stride,
+        Sample *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion) const;
+
+    template <class Sample>
+    void inverse_2d_integer_streamed(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const Sample *input, std::ptrdiff_t input_row_stride,
+        Sample *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion) const;
 };
 
 } // namespace dsmvc

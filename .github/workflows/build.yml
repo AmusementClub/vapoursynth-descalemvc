@@ -1,0 +1,81 @@
+name: Build plugins
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            artifact: dsmvc-windows-x64
+            cmake-architecture: -A x64
+          - os: macos-15
+            artifact: dsmvc-macos-arm64
+            cmake-architecture: -DCMAKE_OSX_ARCHITECTURES=arm64
+          - os: ubuntu-24.04
+            artifact: dsmvc-linux-x64
+            cmake-architecture: ""
+
+    steps:
+      - name: Check out dsmvc
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out VapourSynth R57 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: vapoursynth/vapoursynth
+          ref: 325756ed04588b31840fdb74479537cddcba4bf7
+          path: dependencies/vapoursynth
+          sparse-checkout: include
+          persist-credentials: false
+
+      - name: Check out GetNative-VF
+        uses: actions/checkout@v4
+        with:
+          repository: MysteryDove/GetNative-VF
+          ref: d64af6caa6c18d670eda1f25ee69fb47f5313b69
+          path: dependencies/getnative-vf
+          persist-credentials: false
+
+      - name: Configure
+        shell: bash
+        run: >-
+          cmake -S . -B build
+          ${{ matrix.cmake-architecture }}
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
+          -DDSMVC_VAPOURSYNTH_SDK="${{ github.workspace }}/dependencies/vapoursynth"
+          -DDSMVC_GETNATIVE_SOURCE_DIR="${{ github.workspace }}/dependencies/getnative-vf"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Stage plugin package
+        run: cmake --install build --config Release --prefix package
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/
+          if-no-files-found: error
+          retention-days: 14

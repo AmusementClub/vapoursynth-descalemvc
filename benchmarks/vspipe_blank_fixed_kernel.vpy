@@ -6,6 +6,14 @@ import vapoursynth as vs
 FUNCTIONS = {
     "bilinear": "Debilinear",
     "bicubic_b0_c0_5": "Debicubic",
+    "lanczos2": "Delanczos",
+    "lanczos3": "Delanczos",
+    "lanczos4": "Delanczos",
+    "lanczos5": "Delanczos",
+    "lanczos6": "Delanczos",
+    "spline16": "Despline16",
+    "spline36": "Despline36",
+    "spline64": "Despline64",
 }
 
 
@@ -49,5 +57,9 @@ arguments = fixed_geometry(
     source.width, source.height, float(src_height), float(base_height))
 if kernel == "bicubic_b0_c0_5":
     arguments.update(b=0.0, c=0.5)
+elif kernel.startswith("lanczos"):
+    arguments["taps"] = int(kernel.removeprefix("lanczos"))
+if implementation == "new":
+    arguments["backend"] = "cpu"
 output = getattr(namespace, FUNCTIONS[kernel])(source, **arguments)
 output.set_output(0)

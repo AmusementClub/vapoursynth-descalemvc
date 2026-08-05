@@ -3,9 +3,11 @@
 #include "cpu_packed.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <immintrin.h>
+#include <type_traits>
 #include <vector>
 
 namespace dsmvc {
@@ -14,8 +16,10 @@ namespace {
 
 #if defined(_MSC_VER)
 #define DSMVC_FORCE_INLINE __forceinline
+#define DSMVC_FLATTEN
 #else
 #define DSMVC_FORCE_INLINE inline __attribute__((always_inline))
+#define DSMVC_FLATTEN __attribute__((flatten))
 #endif
 
 struct alignas(32) ScratchVector {
@@ -61,6 +65,48 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
         __m256 x5 = _mm256_loadu_ps(input + 5 * stride + column);
         __m256 x6 = _mm256_loadu_ps(input + 6 * stride + column);
         __m256 x7 = _mm256_loadu_ps(input + 7 * stride + column);
+        transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 0) * 8U, x0);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 1) * 8U, x1);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 2) * 8U, x2);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 3) * 8U, x3);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 4) * 8U, x4);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 5) * 8U, x5);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 6) * 8U, x6);
+        _mm256_store_ps(scratch + static_cast<std::size_t>(column + 7) * 8U, x7);
+    }
+}
+
+template <class Sample>
+void transpose_integer_source(
+    const Sample *input, std::ptrdiff_t stride,
+    std::int32_t padded_width, float input_offset,
+    float input_scale, float *scratch) noexcept {
+    const __m256 offset = _mm256_set1_ps(input_offset);
+    const __m256 scale = _mm256_set1_ps(input_scale);
+    for (std::int32_t column = 0; column < padded_width; column += 8) {
+        const auto load_row = [&](std::int32_t row) {
+            const auto *source = input
+                + static_cast<std::ptrdiff_t>(row) * stride + column;
+            __m256i integers;
+            if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+                integers = _mm256_cvtepu8_epi32(
+                    _mm_loadl_epi64(reinterpret_cast<const __m128i *>(source)));
+            } else {
+                integers = _mm256_cvtepu16_epi32(
+                    _mm_loadu_si128(reinterpret_cast<const __m128i *>(source)));
+            }
+            return _mm256_mul_ps(
+                _mm256_sub_ps(_mm256_cvtepi32_ps(integers), offset), scale);
+        };
+        __m256 x0 = load_row(0);
+        __m256 x1 = load_row(1);
+        __m256 x2 = load_row(2);
+        __m256 x3 = load_row(3);
+        __m256 x4 = load_row(4);
+        __m256 x5 = load_row(5);
+        __m256 x6 = load_row(6);
+        __m256 x7 = load_row(7);
         transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
         _mm256_store_ps(scratch + static_cast<std::size_t>(column + 0) * 8U, x0);
         _mm256_store_ps(scratch + static_cast<std::size_t>(column + 1) * 8U, x1);
@@ -326,12 +372,31 @@ void solve_horizontal_generic(const AxisPlan &plan,
     }
 }
 
-void solve_horizontal_block(const AxisPlan &plan,
-                            const detail::PackedCpuPlan &packed,
-                            const float *input, std::ptrdiff_t input_stride,
-                            float *output, std::ptrdiff_t output_stride,
-                            float *scratch) noexcept {
+DSMVC_FLATTEN void solve_horizontal_block(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    const float *input, std::ptrdiff_t input_stride,
+    float *output, std::ptrdiff_t output_stride,
+    float *scratch) noexcept {
     transpose_source(input, input_stride, packed.padded_source_size, scratch);
+    if (plan.half_bandwidth == 1) {
+        solve_horizontal_b1(packed, scratch, output, output_stride);
+    } else if (plan.half_bandwidth == 3) {
+        solve_horizontal_b3(packed, scratch, output, output_stride);
+    } else {
+        solve_horizontal_generic(plan, packed, scratch, output, output_stride);
+    }
+}
+
+template <class Sample>
+void solve_horizontal_integer_block(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    const Sample *input, std::ptrdiff_t input_stride,
+    float input_offset, float input_scale,
+    float *output, std::ptrdiff_t output_stride,
+    float *scratch) noexcept {
+    transpose_integer_source(
+        input, input_stride, packed.padded_source_size,
+        input_offset, input_scale, scratch);
     if (plan.half_bandwidth == 1) {
         solve_horizontal_b1(packed, scratch, output, output_stride);
     } else if (plan.half_bandwidth == 3) {
@@ -460,6 +525,7 @@ DSMVC_FORCE_INLINE __m256 multiply_columns_single(
     return value;
 }
 
+template <bool RhsOnly>
 void solve_columns_b3_pair(const detail::PackedCpuPlan &packed,
                            const float *input, std::ptrdiff_t input_stride,
                            float *output, std::ptrdiff_t output_stride,
@@ -477,8 +543,15 @@ void solve_columns_b3_pair(const detail::PackedCpuPlan &packed,
     for (std::int32_t i = 0; i < destination_size; ++i) {
         __m256 value0;
         __m256 value1;
-        multiply_columns_pair(
-            packed, input, input_stride, i, column, value0, value1);
+        if constexpr (RhsOnly) {
+            const auto *rhs = output + static_cast<std::ptrdiff_t>(i)
+                * output_stride + column;
+            value0 = _mm256_loadu_ps(rhs);
+            value1 = _mm256_loadu_ps(rhs + 8);
+        } else {
+            multiply_columns_pair(
+                packed, input, input_stride, i, column, value0, value1);
+        }
         const auto index = static_cast<std::size_t>(i);
         if (i >= 3) {
             const __m256 lower3 = _mm256_set1_ps(
@@ -553,6 +626,7 @@ void solve_columns_b3_pair(const detail::PackedCpuPlan &packed,
     }
 }
 
+template <bool RhsOnly>
 void solve_columns_b3_single(const detail::PackedCpuPlan &packed,
                              const float *input, std::ptrdiff_t input_stride,
                              float *output, std::ptrdiff_t output_stride,
@@ -564,8 +638,15 @@ void solve_columns_b3_single(const detail::PackedCpuPlan &packed,
     __m256 previous2 = _mm256_setzero_ps();
     __m256 previous3 = _mm256_setzero_ps();
     for (std::int32_t i = 0; i < destination_size; ++i) {
-        __m256 value = multiply_columns_single(
-            packed, input, input_stride, i, column);
+        __m256 value;
+        if constexpr (RhsOnly) {
+            value = _mm256_loadu_ps(
+                output + static_cast<std::ptrdiff_t>(i)
+                    * output_stride + column);
+        } else {
+            value = multiply_columns_single(
+                packed, input, input_stride, i, column);
+        }
         const auto index = static_cast<std::size_t>(i);
         if (i >= 3) {
             value = _mm256_fnmadd_ps(
@@ -627,12 +708,12 @@ void solve_columns_b3(const AxisPlan &plan,
                       std::int32_t vector_columns) noexcept {
     const auto paired_columns = vector_columns & ~15;
     for (std::int32_t column = 0; column < paired_columns; column += 16) {
-        solve_columns_b3_pair(
+        solve_columns_b3_pair<false>(
             packed, input, input_stride, output, output_stride,
             column, plan.destination_size);
     }
     if (paired_columns != vector_columns) {
-        solve_columns_b3_single(
+        solve_columns_b3_single<false>(
             packed, input, input_stride, output, output_stride,
             paired_columns, plan.destination_size);
     }
@@ -908,7 +989,824 @@ void solve_columns_pair(const AxisPlan &plan,
     }
 }
 
+[[nodiscard]] bool source_reaches_destination_band(
+    const detail::PackedCpuPlan &packed, std::int32_t source_row,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row) noexcept {
+    const auto begin = packed.source_offsets[static_cast<std::size_t>(source_row)];
+    const auto end = packed.source_offsets[static_cast<std::size_t>(source_row) + 1U];
+    const auto first = packed.source_destinations.begin()
+        + static_cast<std::ptrdiff_t>(begin);
+    const auto last = packed.source_destinations.begin()
+        + static_cast<std::ptrdiff_t>(end);
+    const auto found = std::lower_bound(first, last, first_destination_row);
+    return found != last && *found < last_destination_row;
+}
+
+void accumulate_horizontal_block(
+    const detail::PackedCpuPlan &packed_vertical,
+    const float *horizontal_rows, std::ptrdiff_t horizontal_stride,
+    std::int32_t block_row, std::int32_t first_source_row,
+    std::int32_t last_source_row, float *output,
+    std::ptrdiff_t output_stride, std::int32_t vector_columns,
+    std::int32_t columns, std::int32_t first_destination_row,
+    std::int32_t last_destination_row) noexcept {
+    for (std::int32_t source_row = first_source_row;
+         source_row < last_source_row; ++source_row) {
+        const auto begin = packed_vertical.source_offsets[
+            static_cast<std::size_t>(source_row)];
+        const auto end = packed_vertical.source_offsets[
+            static_cast<std::size_t>(source_row) + 1U];
+        auto offset = static_cast<std::uint32_t>(std::lower_bound(
+            packed_vertical.source_destinations.begin()
+                + static_cast<std::ptrdiff_t>(begin),
+            packed_vertical.source_destinations.begin()
+                + static_cast<std::ptrdiff_t>(end),
+            first_destination_row)
+            - packed_vertical.source_destinations.begin());
+        const auto *horizontal = horizontal_rows
+            + static_cast<std::ptrdiff_t>(source_row - block_row)
+                * horizontal_stride;
+        for (; offset < end; ++offset) {
+            const auto destination_row =
+                packed_vertical.source_destinations[offset];
+            if (destination_row >= last_destination_row) break;
+            auto *rhs = output
+                + static_cast<std::ptrdiff_t>(destination_row) * output_stride;
+            const __m256 weight = _mm256_set1_ps(
+                packed_vertical.source_weights[offset]);
+            for (std::int32_t column = 0;
+                 column < vector_columns; column += 8) {
+                _mm256_storeu_ps(
+                    rhs + column,
+                    _mm256_fmadd_ps(
+                        weight, _mm256_loadu_ps(horizontal + column),
+                        _mm256_loadu_ps(rhs + column)));
+            }
+            const auto scalar_weight = packed_vertical.source_weights[offset];
+            for (std::int32_t column = vector_columns;
+                 column < columns; ++column) {
+                rhs[column] += scalar_weight * horizontal[column];
+            }
+        }
+    }
+}
+
+void solve_rhs_vectors(const AxisPlan &plan,
+                       const detail::PackedCpuPlan &packed,
+                       float *output, std::ptrdiff_t output_stride,
+                       std::int32_t vector_columns) noexcept {
+    if (plan.half_bandwidth == 3) {
+        const auto paired_columns = vector_columns & ~15;
+        for (std::int32_t column = 0;
+             column < paired_columns; column += 16) {
+            solve_columns_b3_pair<true>(
+                packed, output, output_stride, output, output_stride,
+                column, plan.destination_size);
+        }
+        if (paired_columns != vector_columns) {
+            solve_columns_b3_single<true>(
+                packed, output, output_stride, output, output_stride,
+                paired_columns, plan.destination_size);
+        }
+        return;
+    }
+    const auto paired_columns = vector_columns & ~15;
+    constexpr std::int32_t l2_column_tile = 32;
+    constexpr std::int32_t frame_parallel_threshold = 1024;
+    const auto column_tile = paired_columns >= frame_parallel_threshold
+        ? l2_column_tile : std::max(paired_columns, 16);
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(
+        packed.padded_destination_size);
+
+    for (std::int32_t tile = 0; tile < paired_columns; tile += column_tile) {
+        const auto tile_end = std::min(tile + column_tile, paired_columns);
+        for (std::int32_t i = 0; i < n; ++i) {
+            const auto index = static_cast<std::size_t>(i);
+            const auto available = std::min(plan.half_bandwidth, i);
+            for (std::int32_t column = tile; column < tile_end; column += 16) {
+                auto *destination = output
+                    + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+                __m256 value0 = _mm256_loadu_ps(destination);
+                __m256 value1 = _mm256_loadu_ps(destination + 8);
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    const __m256 lower = _mm256_set1_ps(packed.lower_ld[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + index]);
+                    const auto *previous = output
+                        + static_cast<std::ptrdiff_t>(i - distance)
+                            * output_stride + column;
+                    value0 = _mm256_fnmadd_ps(
+                        lower, _mm256_loadu_ps(previous), value0);
+                    value1 = _mm256_fnmadd_ps(
+                        lower, _mm256_loadu_ps(previous + 8), value1);
+                }
+                const __m256 inverse = _mm256_set1_ps(
+                    packed.inverse_diagonal[index]);
+                _mm256_storeu_ps(destination, _mm256_mul_ps(value0, inverse));
+                _mm256_storeu_ps(
+                    destination + 8, _mm256_mul_ps(value1, inverse));
+            }
+        }
+        for (std::int32_t i = n - 2; i >= 0; --i) {
+            const auto index = static_cast<std::size_t>(i);
+            const auto available = std::min(plan.half_bandwidth, n - i - 1);
+            for (std::int32_t column = tile; column < tile_end; column += 16) {
+                auto *destination = output
+                    + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+                __m256 value0 = _mm256_loadu_ps(destination);
+                __m256 value1 = _mm256_loadu_ps(destination + 8);
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    const __m256 upper = _mm256_set1_ps(packed.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + index]);
+                    const auto *next = output
+                        + static_cast<std::ptrdiff_t>(i + distance)
+                            * output_stride + column;
+                    value0 = _mm256_fnmadd_ps(
+                        upper, _mm256_loadu_ps(next), value0);
+                    value1 = _mm256_fnmadd_ps(
+                        upper, _mm256_loadu_ps(next + 8), value1);
+                }
+                _mm256_storeu_ps(destination, value0);
+                _mm256_storeu_ps(destination + 8, value1);
+            }
+        }
+    }
+
+    if (paired_columns == vector_columns) return;
+    const auto column = paired_columns;
+    for (std::int32_t i = 0; i < n; ++i) {
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+        __m256 value = _mm256_loadu_ps(destination);
+        const auto index = static_cast<std::size_t>(i);
+        const auto available = std::min(plan.half_bandwidth, i);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            value = _mm256_fnmadd_ps(
+                _mm256_set1_ps(packed.lower_ld[
+                    static_cast<std::size_t>(distance - 1) * factor_stride
+                    + index]),
+                _mm256_loadu_ps(output
+                    + static_cast<std::ptrdiff_t>(i - distance) * output_stride
+                    + column), value);
+        }
+        _mm256_storeu_ps(
+            destination,
+            _mm256_mul_ps(value, _mm256_set1_ps(
+                packed.inverse_diagonal[index])));
+    }
+    for (std::int32_t i = n - 2; i >= 0; --i) {
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+        __m256 value = _mm256_loadu_ps(destination);
+        const auto index = static_cast<std::size_t>(i);
+        const auto available = std::min(plan.half_bandwidth, n - i - 1);
+        if (plan.half_bandwidth == 3) {
+            for (std::int32_t distance = 1; distance <= available; ++distance) {
+                value = _mm256_fnmadd_ps(
+                    _mm256_set1_ps(packed.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + index]),
+                    _mm256_loadu_ps(output
+                        + static_cast<std::ptrdiff_t>(i + distance)
+                            * output_stride + column), value);
+            }
+        } else {
+            for (std::int32_t distance = available; distance >= 1; --distance) {
+                value = _mm256_fnmadd_ps(
+                    _mm256_set1_ps(packed.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + index]),
+                    _mm256_loadu_ps(output
+                        + static_cast<std::ptrdiff_t>(i + distance)
+                            * output_stride + column), value);
+            }
+        }
+        _mm256_storeu_ps(destination, value);
+    }
+}
+
+template <class Sample>
+void accumulate_2d_integer_rhs_impl(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const Sample *input, std::ptrdiff_t input_row_stride,
+    float input_offset, float input_scale,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row) {
+    const auto columns = horizontal.destination_size;
+    const auto padded_columns = packed_horizontal.padded_destination_size;
+    for (std::int32_t row = first_destination_row;
+         row < last_destination_row; ++row) {
+        std::fill_n(output + static_cast<std::ptrdiff_t>(row) * output_row_stride,
+                    padded_columns, 0.0F);
+    }
+
+    thread_local std::vector<ScratchVector> transpose_scratch;
+    thread_local std::vector<ScratchVector> horizontal_scratch;
+    transpose_scratch.resize(
+        static_cast<std::size_t>(packed_horizontal.padded_source_size));
+    horizontal_scratch.resize(static_cast<std::size_t>(padded_columns));
+    auto *transpose_data = transpose_scratch.front().lanes;
+    auto *horizontal_rows = horizontal_scratch.front().lanes;
+
+    const auto process_block = [&](std::int32_t block_row,
+                                   std::int32_t first_source_row,
+                                   std::int32_t last_source_row) {
+        bool needed = false;
+        for (std::int32_t source_row = first_source_row;
+             source_row < last_source_row; ++source_row) {
+            if (source_reaches_destination_band(
+                    packed_vertical, source_row,
+                    first_destination_row, last_destination_row)) {
+                needed = true;
+                break;
+            }
+        }
+        if (!needed) return;
+        solve_horizontal_integer_block(
+            horizontal, packed_horizontal,
+            input + static_cast<std::ptrdiff_t>(block_row) * input_row_stride,
+            input_row_stride, input_offset, input_scale,
+            horizontal_rows, padded_columns, transpose_data);
+        accumulate_horizontal_block(
+            packed_vertical, horizontal_rows, padded_columns,
+            block_row, first_source_row, last_source_row,
+            output, output_row_stride, padded_columns, columns,
+            first_destination_row, last_destination_row);
+    };
+
+    const auto source_rows = packed_vertical.axis->source_size;
+    const auto complete_rows = source_rows & ~7;
+    const auto tail_row = complete_rows == source_rows
+        ? source_rows : source_rows - 8;
+    for (std::int32_t row = 0; row < complete_rows; row += 8) {
+        const auto last_source_row = std::min(row + 8, tail_row);
+        if (row < last_source_row) {
+            process_block(row, row, last_source_row);
+        }
+    }
+    if (complete_rows != source_rows) {
+        process_block(tail_row, tail_row, source_rows);
+    }
+}
+
+template <class Sample>
+DSMVC_FLATTEN void forward_2d_rhs_destination_impl(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const Sample *input, std::ptrdiff_t input_row_stride,
+    float input_offset, float input_scale,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns) {
+    const auto padded_columns = packed_horizontal.padded_destination_size;
+    const auto vector_columns = output_row_stride >= padded_columns
+        ? padded_columns : (columns & ~7);
+    const auto cache_blocks = static_cast<std::size_t>(
+        std::max(packed_vertical.streaming_cache_blocks, 1));
+
+    thread_local std::vector<ScratchVector> transpose_scratch;
+    thread_local std::vector<ScratchVector> horizontal_cache;
+    thread_local std::vector<std::int32_t> cache_rows;
+    thread_local std::vector<std::uint64_t> cache_ages;
+    thread_local std::vector<const float *> source_rows;
+    transpose_scratch.resize(
+        static_cast<std::size_t>(packed_horizontal.padded_source_size));
+    horizontal_cache.resize(
+        cache_blocks * static_cast<std::size_t>(padded_columns));
+    cache_rows.assign(cache_blocks, -1);
+    cache_ages.assign(cache_blocks, 0U);
+    auto *transpose_data = transpose_scratch.front().lanes;
+    std::uint64_t age = 0U;
+
+    const auto tail_block = vertical.source_size & 7
+        ? vertical.source_size - 8 : vertical.source_size;
+    const auto source_block = [&](std::int32_t source) noexcept {
+        return source >= tail_block ? tail_block : source & ~7;
+    };
+    const auto get_source_row = [&](std::int32_t source) -> const float * {
+        const auto block_row = source_block(source);
+        std::size_t slot = cache_blocks;
+        for (std::size_t candidate = 0;
+             candidate < cache_blocks; ++candidate) {
+            if (cache_rows[candidate] == block_row) {
+                slot = candidate;
+                break;
+            }
+        }
+        if (slot == cache_blocks) {
+            slot = 0U;
+            for (std::size_t candidate = 0;
+                 candidate < cache_blocks; ++candidate) {
+                if (cache_rows[candidate] < 0) {
+                    slot = candidate;
+                    break;
+                }
+                if (cache_ages[candidate] < cache_ages[slot]) slot = candidate;
+            }
+            auto *horizontal_rows = horizontal_cache[
+                slot * static_cast<std::size_t>(padded_columns)].lanes;
+            if constexpr (std::is_same_v<Sample, float>) {
+                solve_horizontal_block(
+                    horizontal, packed_horizontal,
+                    input + static_cast<std::ptrdiff_t>(block_row)
+                        * input_row_stride,
+                    input_row_stride, horizontal_rows, padded_columns,
+                    transpose_data);
+            } else {
+                solve_horizontal_integer_block(
+                    horizontal, packed_horizontal,
+                    input + static_cast<std::ptrdiff_t>(block_row)
+                        * input_row_stride,
+                    input_row_stride, input_offset, input_scale,
+                    horizontal_rows, padded_columns, transpose_data);
+            }
+            cache_rows[slot] = block_row;
+        }
+        cache_ages[slot] = ++age;
+        return horizontal_cache[
+            slot * static_cast<std::size_t>(padded_columns)].lanes
+            + static_cast<std::ptrdiff_t>(source - block_row) * padded_columns;
+    };
+
+    const auto factor_stride = static_cast<std::size_t>(
+        packed_vertical.padded_destination_size);
+    for (std::int32_t row = 0; row < vertical.destination_size; ++row) {
+        const auto begin = vertical.transpose_offsets[
+            static_cast<std::size_t>(row)];
+        const auto end = vertical.transpose_offsets[
+            static_cast<std::size_t>(row) + 1U];
+        source_rows.resize(static_cast<std::size_t>(end - begin));
+        for (auto offset = begin; offset < end; ++offset) {
+            source_rows[static_cast<std::size_t>(offset - begin)] =
+                get_source_row(vertical.transpose_indices[offset]);
+        }
+
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(row) * output_row_stride;
+        const auto available = std::min(vertical.half_bandwidth, row);
+        for (std::int32_t column = 0;
+             column < vector_columns; column += 8) {
+            __m256 value = _mm256_setzero_ps();
+            for (auto offset = begin; offset < end; ++offset) {
+                value = _mm256_fmadd_ps(
+                    _mm256_set1_ps(vertical.transpose_weights[offset]),
+                    _mm256_loadu_ps(source_rows[
+                        static_cast<std::size_t>(offset - begin)] + column),
+                    value);
+            }
+            for (std::int32_t distance = available;
+                 distance >= 1; --distance) {
+                value = _mm256_fnmadd_ps(
+                    _mm256_set1_ps(packed_vertical.lower_ld[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + static_cast<std::size_t>(row)]),
+                    _mm256_loadu_ps(output
+                        + static_cast<std::ptrdiff_t>(row - distance)
+                            * output_row_stride + column),
+                    value);
+            }
+            _mm256_storeu_ps(
+                destination + column,
+                _mm256_mul_ps(value, _mm256_set1_ps(
+                    packed_vertical.inverse_diagonal[
+                        static_cast<std::size_t>(row)])));
+        }
+        for (std::int32_t column = vector_columns;
+             column < columns; ++column) {
+            float value = 0.0F;
+            for (auto offset = begin; offset < end; ++offset) {
+                value += vertical.transpose_weights[offset]
+                    * source_rows[static_cast<std::size_t>(offset - begin)][column];
+            }
+            for (std::int32_t distance = available;
+                 distance >= 1; --distance) {
+                value -= vertical.lower_ld[
+                    static_cast<std::size_t>(distance - 1)
+                        * static_cast<std::size_t>(vertical.destination_size)
+                    + static_cast<std::size_t>(row)]
+                    * output[static_cast<std::ptrdiff_t>(row - distance)
+                        * output_row_stride + column];
+            }
+            destination[column] = value * vertical.inverse_diagonal[
+                static_cast<std::size_t>(row)];
+        }
+    }
+}
+
+template <class Sample>
+DSMVC_FORCE_INLINE void store_integer_vector(
+    __m256 value, Sample *destination,
+    const __m256 &scale, const __m256 &offset,
+    const __m256 &minimum, const __m256 &maximum) noexcept {
+    value = _mm256_add_ps(_mm256_mul_ps(value, scale), offset);
+    value = _mm256_min_ps(_mm256_max_ps(value, minimum), maximum);
+    const __m256i integers = _mm256_cvtps_epi32(value);
+    const __m128i packed = _mm_packus_epi32(
+        _mm256_castsi256_si128(integers),
+        _mm256_extracti128_si256(integers, 1));
+    if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+        const __m128i bytes = _mm_packus_epi16(packed, _mm_setzero_si128());
+        _mm_storel_epi64(reinterpret_cast<__m128i *>(destination), bytes);
+    } else {
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(destination), packed);
+    }
+}
+
+template <class Sample>
+DSMVC_FLATTEN void backward_rhs_impl(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *input, std::ptrdiff_t input_row_stride,
+    Sample *integer_output, std::ptrdiff_t integer_output_row_stride,
+    std::int32_t columns, const IntegerConversion *conversion) noexcept {
+    const auto padded_columns = (columns + 7) & ~7;
+    const auto vector_columns = [&] {
+        if constexpr (std::is_same_v<Sample, float>) {
+            return input_row_stride >= padded_columns
+                ? padded_columns : (columns & ~7);
+        } else {
+            return columns & ~7;
+        }
+    }();
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(
+        packed.padded_destination_size);
+    const __m256 scale = _mm256_set1_ps(
+        conversion ? conversion->output_scale : 1.0F);
+    const __m256 offset = _mm256_set1_ps(
+        conversion ? conversion->output_offset : 0.0F);
+    const __m256 minimum = _mm256_setzero_ps();
+    const __m256 maximum = _mm256_set1_ps(static_cast<float>(
+        conversion ? conversion->output_maximum : 0U));
+
+    if constexpr (!std::is_same_v<Sample, float>) {
+        const auto *last = input
+            + static_cast<std::ptrdiff_t>(n - 1) * input_row_stride;
+        auto *last_output = integer_output
+            + static_cast<std::ptrdiff_t>(n - 1) * integer_output_row_stride;
+        for (std::int32_t column = 0;
+             column < vector_columns; column += 8) {
+            store_integer_vector(
+                _mm256_loadu_ps(last + column), last_output + column,
+                scale, offset, minimum, maximum);
+        }
+        for (std::int32_t column = vector_columns;
+             column < columns; ++column) {
+            const auto scaled = std::clamp(
+                last[column] * conversion->output_scale
+                    + conversion->output_offset,
+                0.0F, static_cast<float>(conversion->output_maximum));
+            last_output[column] = static_cast<Sample>(std::nearbyint(scaled));
+        }
+    }
+
+    for (std::int32_t row = n - 2; row >= 0; --row) {
+        auto *destination = input
+            + static_cast<std::ptrdiff_t>(row) * input_row_stride;
+        auto *integer_destination = [&]() -> Sample * {
+            if constexpr (std::is_same_v<Sample, float>) {
+                return nullptr;
+            } else {
+                return integer_output
+                    + static_cast<std::ptrdiff_t>(row)
+                        * integer_output_row_stride;
+            }
+        }();
+        const auto available = std::min(plan.half_bandwidth, n - row - 1);
+        for (std::int32_t column = 0;
+             column < vector_columns; column += 8) {
+            __m256 value = _mm256_loadu_ps(destination + column);
+            if (plan.half_bandwidth == 3) {
+                for (std::int32_t distance = 1;
+                     distance <= available; ++distance) {
+                    value = _mm256_fnmadd_ps(
+                        _mm256_set1_ps(packed.upper_l[
+                            static_cast<std::size_t>(distance - 1) * factor_stride
+                            + static_cast<std::size_t>(row)]),
+                        _mm256_loadu_ps(input
+                            + static_cast<std::ptrdiff_t>(row + distance)
+                                * input_row_stride + column),
+                        value);
+                }
+            } else {
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    value = _mm256_fnmadd_ps(
+                        _mm256_set1_ps(packed.upper_l[
+                            static_cast<std::size_t>(distance - 1) * factor_stride
+                            + static_cast<std::size_t>(row)]),
+                        _mm256_loadu_ps(input
+                            + static_cast<std::ptrdiff_t>(row + distance)
+                                * input_row_stride + column),
+                        value);
+                }
+            }
+            _mm256_storeu_ps(destination + column, value);
+            if constexpr (!std::is_same_v<Sample, float>) {
+                store_integer_vector(
+                    value, integer_destination + column,
+                    scale, offset, minimum, maximum);
+            }
+        }
+        for (std::int32_t column = vector_columns;
+             column < columns; ++column) {
+            float sum = 0.0F;
+            if (plan.half_bandwidth == 3) {
+                for (std::int32_t distance = 1;
+                     distance <= available; ++distance) {
+                    sum += plan.upper_l[
+                        static_cast<std::size_t>(distance - 1)
+                            * static_cast<std::size_t>(n)
+                        + static_cast<std::size_t>(row)]
+                        * input[static_cast<std::ptrdiff_t>(row + distance)
+                            * input_row_stride + column];
+                }
+            } else {
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    sum += plan.upper_l[
+                        static_cast<std::size_t>(distance - 1)
+                            * static_cast<std::size_t>(n)
+                        + static_cast<std::size_t>(row)]
+                        * input[static_cast<std::ptrdiff_t>(row + distance)
+                            * input_row_stride + column];
+                }
+            }
+            destination[column] -= sum;
+            if constexpr (!std::is_same_v<Sample, float>) {
+                const auto scaled = std::clamp(
+                    destination[column] * conversion->output_scale
+                        + conversion->output_offset,
+                    0.0F, static_cast<float>(conversion->output_maximum));
+                integer_destination[column] =
+                    static_cast<Sample>(std::nearbyint(scaled));
+            }
+        }
+    }
+}
+
+template <class Sample>
+void convert_rhs_to_integer_impl(
+    const float *input, std::ptrdiff_t input_row_stride,
+    Sample *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion) noexcept {
+    const __m256 scale = _mm256_set1_ps(conversion.output_scale);
+    const __m256 offset = _mm256_set1_ps(conversion.output_offset);
+    const __m256 minimum = _mm256_setzero_ps();
+    const __m256 maximum = _mm256_set1_ps(
+        static_cast<float>(conversion.output_maximum));
+    const auto vector_columns = columns & ~7;
+    for (std::int32_t row = 0; row < rows; ++row) {
+        const auto *source = input
+            + static_cast<std::ptrdiff_t>(row) * input_row_stride;
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(row) * output_row_stride;
+        for (std::int32_t column = 0;
+             column < vector_columns; column += 8) {
+            __m256 value = _mm256_add_ps(
+                _mm256_mul_ps(_mm256_loadu_ps(source + column), scale),
+                offset);
+            value = _mm256_min_ps(_mm256_max_ps(value, minimum), maximum);
+            const __m256i integers = _mm256_cvtps_epi32(value);
+            const __m128i packed = _mm_packus_epi32(
+                _mm256_castsi256_si128(integers),
+                _mm256_extracti128_si256(integers, 1));
+            if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+                const __m128i bytes = _mm_packus_epi16(
+                    packed, _mm_setzero_si128());
+                _mm_storel_epi64(
+                    reinterpret_cast<__m128i *>(destination + column), bytes);
+            } else {
+                _mm_storeu_si128(
+                    reinterpret_cast<__m128i *>(destination + column), packed);
+            }
+        }
+        for (std::int32_t column = vector_columns;
+             column < columns; ++column) {
+            const auto scaled = std::clamp(
+                source[column] * conversion.output_scale
+                    + conversion.output_offset,
+                0.0F, static_cast<float>(conversion.output_maximum));
+            destination[column] = static_cast<Sample>(std::nearbyint(scaled));
+        }
+    }
+}
+
 } // namespace
+
+void forward_2d_rhs_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns) {
+    forward_2d_rhs_destination_impl(
+        horizontal, packed_horizontal, vertical, packed_vertical,
+        input, input_row_stride, 0.0F, 1.0F,
+        output, output_row_stride, columns);
+}
+
+void forward_2d_rhs_u8_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns) {
+    forward_2d_rhs_destination_impl(
+        horizontal, packed_horizontal, vertical, packed_vertical,
+        input, input_row_stride,
+        conversion.input_offset, conversion.input_scale,
+        output, output_row_stride, columns);
+}
+
+void forward_2d_rhs_u16_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns) {
+    forward_2d_rhs_destination_impl(
+        horizontal, packed_horizontal, vertical, packed_vertical,
+        input, input_row_stride,
+        conversion.input_offset, conversion.input_scale,
+        output, output_row_stride, columns);
+}
+
+void backward_rhs_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns) {
+    backward_rhs_impl<float>(
+        plan, packed, output, output_row_stride,
+        nullptr, 0, columns, nullptr);
+}
+
+void backward_rhs_to_u8_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns, const IntegerConversion &conversion) {
+    backward_rhs_impl(
+        plan, packed, input, input_row_stride,
+        output, output_row_stride, columns, &conversion);
+}
+
+void backward_rhs_to_u16_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns, const IntegerConversion &conversion) {
+    backward_rhs_impl(
+        plan, packed, input, input_row_stride,
+        output, output_row_stride, columns, &conversion);
+}
+
+void accumulate_2d_rhs_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row) {
+    const auto columns = horizontal.destination_size;
+    const auto padded_columns = packed_horizontal.padded_destination_size;
+    const auto vector_columns = output_row_stride >= padded_columns
+        ? padded_columns : (columns & ~7);
+    const auto clear_columns = std::max(columns, vector_columns);
+    for (std::int32_t row = first_destination_row;
+         row < last_destination_row; ++row) {
+        std::fill_n(output + static_cast<std::ptrdiff_t>(row) * output_row_stride,
+                    clear_columns, 0.0F);
+    }
+
+    thread_local std::vector<ScratchVector> transpose_scratch;
+    thread_local std::vector<ScratchVector> horizontal_scratch;
+    transpose_scratch.resize(
+        static_cast<std::size_t>(packed_horizontal.padded_source_size));
+    horizontal_scratch.resize(static_cast<std::size_t>(padded_columns));
+    auto *transpose_data = transpose_scratch.front().lanes;
+    auto *horizontal_rows = horizontal_scratch.front().lanes;
+
+    const auto process_block = [&](std::int32_t block_row,
+                                   std::int32_t first_source_row,
+                                   std::int32_t last_source_row) {
+        bool needed = false;
+        for (std::int32_t source_row = first_source_row;
+             source_row < last_source_row; ++source_row) {
+            if (source_reaches_destination_band(
+                    packed_vertical, source_row,
+                    first_destination_row, last_destination_row)) {
+                needed = true;
+                break;
+            }
+        }
+        if (!needed) return;
+        solve_horizontal_block(
+            horizontal, packed_horizontal,
+            input + static_cast<std::ptrdiff_t>(block_row) * input_row_stride,
+            input_row_stride, horizontal_rows, padded_columns,
+            transpose_data);
+        accumulate_horizontal_block(
+            packed_vertical, horizontal_rows, padded_columns,
+            block_row, first_source_row, last_source_row,
+            output, output_row_stride, vector_columns, columns,
+            first_destination_row, last_destination_row);
+    };
+
+    const auto source_rows = packed_vertical.axis->source_size;
+    const auto complete_rows = source_rows & ~7;
+    const auto tail_row = complete_rows == source_rows
+        ? source_rows : source_rows - 8;
+    for (std::int32_t row = 0; row < complete_rows; row += 8) {
+        const auto last_source_row = std::min(row + 8, tail_row);
+        if (row < last_source_row) {
+            process_block(row, row, last_source_row);
+        }
+    }
+    if (complete_rows != source_rows) {
+        process_block(tail_row, tail_row, source_rows);
+    }
+}
+
+void accumulate_2d_rhs_u8_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row) {
+    accumulate_2d_integer_rhs_impl(
+        horizontal, packed_horizontal, packed_vertical,
+        input, input_row_stride,
+        conversion.input_offset, conversion.input_scale,
+        output, output_row_stride,
+        first_destination_row, last_destination_row);
+}
+
+void accumulate_2d_rhs_u16_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row) {
+    accumulate_2d_integer_rhs_impl(
+        horizontal, packed_horizontal, packed_vertical,
+        input, input_row_stride,
+        conversion.input_offset, conversion.input_scale,
+        output, output_row_stride,
+        first_destination_row, last_destination_row);
+}
+
+void convert_rhs_to_u8_avx2(
+    const float *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion) {
+    convert_rhs_to_integer_impl(
+        input, input_row_stride, output, output_row_stride,
+        rows, columns, conversion);
+}
+
+void convert_rhs_to_u16_avx2(
+    const float *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion) {
+    convert_rhs_to_integer_impl(
+        input, input_row_stride, output, output_row_stride,
+        rows, columns, conversion);
+}
+
+void solve_rhs_columns_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t vector_columns) {
+    solve_rhs_vectors(
+        plan, packed, output, output_row_stride, vector_columns);
+}
 
 void inverse_rows_avx2(const AxisPlan &plan,
                        const detail::PackedCpuPlan &packed,
@@ -980,3 +1878,4 @@ void inverse_columns_avx2(const AxisPlan &plan,
 } // namespace dsmvc
 
 #undef DSMVC_FORCE_INLINE
+#undef DSMVC_FLATTEN

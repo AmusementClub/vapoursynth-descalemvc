@@ -5,12 +5,15 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <cmath>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -154,6 +157,86 @@ void inverse_columns_avx2(const AxisPlan &plan,
                           const float *input, std::ptrdiff_t input_row_stride,
                           float *output, std::ptrdiff_t output_row_stride,
                           std::int32_t column_count);
+void accumulate_2d_rhs_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row);
+void solve_rhs_columns_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t vector_columns);
+void forward_2d_rhs_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns);
+void backward_rhs_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns);
+void accumulate_2d_rhs_u8_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row);
+void accumulate_2d_rhs_u16_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t first_destination_row,
+    std::int32_t last_destination_row);
+void convert_rhs_to_u8_avx2(
+    const float *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion);
+void convert_rhs_to_u16_avx2(
+    const float *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion);
+void forward_2d_rhs_u8_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns);
+void forward_2d_rhs_u16_avx2(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns);
+void backward_rhs_to_u8_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns, const IntegerConversion &conversion);
+void backward_rhs_to_u16_avx2(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    float *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns, const IntegerConversion &conversion);
 #endif
 
 struct CpuExecutor::Impl {
@@ -219,6 +302,25 @@ PackedCpuPlan pack_cpu_plan(
         packed.weights_right[static_cast<std::size_t>(row)] = last;
         packed.weights_columns = std::max(packed.weights_columns, last - first);
     }
+    const auto tail_block = plan.source_size >= 8 && (plan.source_size & 7)
+        ? plan.source_size - 8 : plan.source_size;
+    for (std::int32_t row = 0; row < n; ++row) {
+        const auto begin = plan.transpose_offsets[static_cast<std::size_t>(row)];
+        const auto end = plan.transpose_offsets[static_cast<std::size_t>(row) + 1U];
+        std::int32_t previous_block = -1;
+        std::int32_t block_count = 0;
+        for (auto offset = begin; offset < end; ++offset) {
+            const auto source = plan.transpose_indices[offset];
+            const auto block = source >= tail_block
+                ? tail_block : source & ~7;
+            if (block != previous_block) {
+                previous_block = block;
+                ++block_count;
+            }
+        }
+        packed.streaming_cache_blocks = std::max(
+            packed.streaming_cache_blocks, block_count);
+    }
     packed.weights.assign(padded_n
                               * static_cast<std::size_t>(packed.weights_columns),
                           0.0F);
@@ -232,6 +334,28 @@ PackedCpuPlan pack_cpu_plan(
                                * static_cast<std::size_t>(packed.weights_columns)
                            + static_cast<std::size_t>(column - left)] =
                 plan.transpose_weights[offset];
+        }
+    }
+
+    packed.source_offsets.assign(
+        static_cast<std::size_t>(plan.source_size) + 1U, 0U);
+    for (const auto source : plan.transpose_indices) {
+        ++packed.source_offsets[static_cast<std::size_t>(source) + 1U];
+    }
+    for (std::size_t source = 1; source < packed.source_offsets.size(); ++source) {
+        packed.source_offsets[source] += packed.source_offsets[source - 1U];
+    }
+    packed.source_destinations.resize(plan.transpose_indices.size());
+    packed.source_weights.resize(plan.transpose_weights.size());
+    auto source_cursors = packed.source_offsets;
+    for (std::int32_t row = 0; row < n; ++row) {
+        const auto begin = plan.transpose_offsets[static_cast<std::size_t>(row)];
+        const auto end = plan.transpose_offsets[static_cast<std::size_t>(row) + 1U];
+        for (auto offset = begin; offset < end; ++offset) {
+            const auto source = plan.transpose_indices[offset];
+            const auto destination = source_cursors[static_cast<std::size_t>(source)]++;
+            packed.source_destinations[destination] = row;
+            packed.source_weights[destination] = plan.transpose_weights[offset];
         }
     }
 
@@ -327,7 +451,6 @@ const char *CpuExecutor::name() const noexcept {
 }
 
 void CpuExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
-    if (path_ != CpuPath::avx2) return;
     if (!plan || !plan->valid()) {
         throw std::invalid_argument("cannot prepare an invalid CPU axis plan");
     }
@@ -342,7 +465,6 @@ void CpuExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
 }
 
 void CpuExecutor::seal() const {
-    if (path_ != CpuPath::avx2) return;
     const std::scoped_lock lock(impl_->mutex);
     impl_->sealed.store(true, std::memory_order_release);
 }
@@ -448,6 +570,588 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
         dsmvc::inverse_axis_f32(plan, input + column, input_row_stride,
                                output + column, output_row_stride);
     }
+}
+
+namespace {
+
+void solve_rhs_scalar(const AxisPlan &plan, float *values,
+                      std::ptrdiff_t stride) noexcept {
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(n);
+    for (std::int32_t i = 0; i < n; ++i) {
+        float value = values[static_cast<std::ptrdiff_t>(i) * stride];
+        const auto available = std::min(plan.half_bandwidth, i);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            value -= plan.lower_ld[
+                static_cast<std::size_t>(distance - 1) * factor_stride
+                + static_cast<std::size_t>(i)]
+                * values[static_cast<std::ptrdiff_t>(i - distance) * stride];
+        }
+        values[static_cast<std::ptrdiff_t>(i) * stride] = value
+            * plan.inverse_diagonal[static_cast<std::size_t>(i)];
+    }
+    for (std::int32_t i = n - 2; i >= 0; --i) {
+        float sum = 0.0F;
+        const auto available = std::min(plan.half_bandwidth, n - i - 1);
+        if (plan.half_bandwidth == 3) {
+            for (std::int32_t distance = 1; distance <= available; ++distance) {
+                sum += plan.upper_l[
+                    static_cast<std::size_t>(distance - 1) * factor_stride
+                    + static_cast<std::size_t>(i)]
+                    * values[static_cast<std::ptrdiff_t>(i + distance) * stride];
+            }
+        } else {
+            for (std::int32_t distance = available; distance >= 1; --distance) {
+                sum += plan.upper_l[
+                    static_cast<std::size_t>(distance - 1) * factor_stride
+                    + static_cast<std::size_t>(i)]
+                    * values[static_cast<std::ptrdiff_t>(i + distance) * stride];
+            }
+        }
+        values[static_cast<std::ptrdiff_t>(i) * stride] -= sum;
+    }
+}
+
+void backward_rhs_scalar(const AxisPlan &plan, float *values,
+                         std::ptrdiff_t stride) noexcept {
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(n);
+    for (std::int32_t i = n - 2; i >= 0; --i) {
+        float sum = 0.0F;
+        const auto available = std::min(plan.half_bandwidth, n - i - 1);
+        if (plan.half_bandwidth == 3) {
+            for (std::int32_t distance = 1; distance <= available; ++distance) {
+                sum += plan.upper_l[
+                    static_cast<std::size_t>(distance - 1) * factor_stride
+                    + static_cast<std::size_t>(i)]
+                    * values[static_cast<std::ptrdiff_t>(i + distance) * stride];
+            }
+        } else {
+            for (std::int32_t distance = available; distance >= 1; --distance) {
+                sum += plan.upper_l[
+                    static_cast<std::size_t>(distance - 1) * factor_stride
+                    + static_cast<std::size_t>(i)]
+                    * values[static_cast<std::ptrdiff_t>(i + distance) * stride];
+            }
+        }
+        values[static_cast<std::ptrdiff_t>(i) * stride] -= sum;
+    }
+}
+
+template <class Sample>
+void forward_2d_rhs_scalar(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const Sample *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion *conversion,
+    float *output, std::ptrdiff_t output_row_stride) {
+    const auto columns = horizontal.destination_size;
+    const auto cache_rows = static_cast<std::size_t>(
+        std::max(packed_vertical.weights_columns, 1));
+
+    thread_local std::vector<float> horizontal_cache;
+    thread_local std::vector<float> source_scratch;
+    thread_local std::vector<std::int32_t> cache_sources;
+    thread_local std::vector<std::uint64_t> cache_ages;
+    thread_local std::vector<const float *> source_rows;
+    horizontal_cache.resize(cache_rows * static_cast<std::size_t>(columns));
+    source_scratch.resize(static_cast<std::size_t>(horizontal.source_size));
+    cache_sources.assign(cache_rows, -1);
+    cache_ages.assign(cache_rows, 0U);
+    std::uint64_t age = 0U;
+
+    const auto get_source_row = [&](std::int32_t source) -> const float * {
+        std::size_t slot = cache_rows;
+        for (std::size_t candidate = 0; candidate < cache_rows; ++candidate) {
+            if (cache_sources[candidate] == source) {
+                slot = candidate;
+                break;
+            }
+        }
+        if (slot == cache_rows) {
+            slot = 0U;
+            for (std::size_t candidate = 0; candidate < cache_rows; ++candidate) {
+                if (cache_sources[candidate] < 0) {
+                    slot = candidate;
+                    break;
+                }
+                if (cache_ages[candidate] < cache_ages[slot]) slot = candidate;
+            }
+            const float *horizontal_input = nullptr;
+            if constexpr (std::is_same_v<Sample, float>) {
+                horizontal_input = input
+                    + static_cast<std::ptrdiff_t>(source) * input_row_stride;
+            } else {
+                const auto *integer_row = input
+                    + static_cast<std::ptrdiff_t>(source) * input_row_stride;
+                for (std::int32_t column = 0;
+                     column < horizontal.source_size; ++column) {
+                    source_scratch[static_cast<std::size_t>(column)] =
+                        (static_cast<float>(integer_row[column])
+                         - conversion->input_offset)
+                        * conversion->input_scale;
+                }
+                horizontal_input = source_scratch.data();
+            }
+            auto *horizontal_output = horizontal_cache.data()
+                + slot * static_cast<std::size_t>(columns);
+            inverse_axis_f32(
+                horizontal, horizontal_input, 1, horizontal_output, 1);
+            cache_sources[slot] = source;
+        }
+        cache_ages[slot] = ++age;
+        return horizontal_cache.data()
+            + slot * static_cast<std::size_t>(columns);
+    };
+
+    const auto &vertical = *packed_vertical.axis;
+    const auto factor_stride = static_cast<std::size_t>(
+        vertical.destination_size);
+    for (std::int32_t row = 0; row < vertical.destination_size; ++row) {
+        const auto begin = vertical.transpose_offsets[
+            static_cast<std::size_t>(row)];
+        const auto end = vertical.transpose_offsets[
+            static_cast<std::size_t>(row) + 1U];
+        source_rows.resize(static_cast<std::size_t>(end - begin));
+        for (auto offset = begin; offset < end; ++offset) {
+            source_rows[static_cast<std::size_t>(offset - begin)] =
+                get_source_row(vertical.transpose_indices[offset]);
+        }
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(row) * output_row_stride;
+        for (std::int32_t column = 0; column < columns; ++column) {
+            float value = 0.0F;
+            for (auto offset = begin; offset < end; ++offset) {
+                value += vertical.transpose_weights[offset]
+                    * source_rows[static_cast<std::size_t>(offset - begin)][column];
+            }
+            const auto available = std::min(vertical.half_bandwidth, row);
+            for (std::int32_t distance = available;
+                 distance >= 1; --distance) {
+                value -= vertical.lower_ld[
+                    static_cast<std::size_t>(distance - 1) * factor_stride
+                    + static_cast<std::size_t>(row)]
+                    * output[static_cast<std::ptrdiff_t>(row - distance)
+                        * output_row_stride + column];
+            }
+            destination[column] = value * vertical.inverse_diagonal[
+                static_cast<std::size_t>(row)];
+        }
+    }
+}
+
+template <class Sample>
+void backward_rhs_to_integer_scalar(
+    const AxisPlan &plan, float *input, std::ptrdiff_t input_row_stride,
+    Sample *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns, const IntegerConversion &conversion) noexcept {
+    const auto convert = [&](float value) noexcept {
+        const auto scaled = std::clamp(
+            value * conversion.output_scale + conversion.output_offset,
+            0.0F, static_cast<float>(conversion.output_maximum));
+        return static_cast<Sample>(std::nearbyint(scaled));
+    };
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(n);
+    for (std::int32_t column = 0; column < columns; ++column) {
+        output[static_cast<std::ptrdiff_t>(n - 1) * output_row_stride + column] =
+            convert(input[static_cast<std::ptrdiff_t>(n - 1)
+                * input_row_stride + column]);
+        for (std::int32_t row = n - 2; row >= 0; --row) {
+            auto *value_ptr = input
+                + static_cast<std::ptrdiff_t>(row) * input_row_stride + column;
+            float sum = 0.0F;
+            const auto available = std::min(plan.half_bandwidth, n - row - 1);
+            if (plan.half_bandwidth == 3) {
+                for (std::int32_t distance = 1;
+                     distance <= available; ++distance) {
+                    sum += plan.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + static_cast<std::size_t>(row)]
+                        * input[static_cast<std::ptrdiff_t>(row + distance)
+                            * input_row_stride + column];
+                }
+            } else {
+                for (std::int32_t distance = available;
+                     distance >= 1; --distance) {
+                    sum += plan.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + static_cast<std::size_t>(row)]
+                        * input[static_cast<std::ptrdiff_t>(row + distance)
+                            * input_row_stride + column];
+                }
+            }
+            *value_ptr -= sum;
+            output[static_cast<std::ptrdiff_t>(row) * output_row_stride + column]
+                = convert(*value_ptr);
+        }
+    }
+}
+
+template <class Sample>
+void accumulate_2d_integer_rhs_scalar(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_vertical,
+    const Sample *input, std::ptrdiff_t input_row_stride,
+    const IntegerConversion &conversion,
+    float *output, std::ptrdiff_t output_row_stride) {
+    const auto source_columns = horizontal.source_size;
+    const auto destination_columns = horizontal.destination_size;
+    const auto destination_rows = packed_vertical.axis->destination_size;
+    for (std::int32_t row = 0; row < destination_rows; ++row) {
+        std::fill_n(output + static_cast<std::ptrdiff_t>(row) * output_row_stride,
+                    destination_columns, 0.0F);
+    }
+
+    std::vector<float> source_row(static_cast<std::size_t>(source_columns));
+    std::vector<float> horizontal_row(
+        static_cast<std::size_t>(destination_columns));
+    for (std::int32_t source_row_index = 0;
+         source_row_index < packed_vertical.axis->source_size;
+         ++source_row_index) {
+        const auto *integer_row = input
+            + static_cast<std::ptrdiff_t>(source_row_index) * input_row_stride;
+        for (std::int32_t column = 0; column < source_columns; ++column) {
+            source_row[static_cast<std::size_t>(column)] =
+                (static_cast<float>(integer_row[column]) - conversion.input_offset)
+                * conversion.input_scale;
+        }
+        inverse_axis_f32(
+            horizontal, source_row.data(), 1, horizontal_row.data(), 1);
+        const auto begin = packed_vertical.source_offsets[
+            static_cast<std::size_t>(source_row_index)];
+        const auto end = packed_vertical.source_offsets[
+            static_cast<std::size_t>(source_row_index) + 1U];
+        for (auto offset = begin; offset < end; ++offset) {
+            auto *rhs = output
+                + static_cast<std::ptrdiff_t>(
+                    packed_vertical.source_destinations[offset])
+                    * output_row_stride;
+            const auto weight = packed_vertical.source_weights[offset];
+            for (std::int32_t column = 0;
+                 column < destination_columns; ++column) {
+                rhs[column] += weight
+                    * horizontal_row[static_cast<std::size_t>(column)];
+            }
+        }
+    }
+}
+
+template <class Sample>
+void convert_rhs_to_integer_scalar(
+    const float *input, std::ptrdiff_t input_row_stride,
+    Sample *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion) noexcept {
+    for (std::int32_t row = 0; row < rows; ++row) {
+        const auto *source = input
+            + static_cast<std::ptrdiff_t>(row) * input_row_stride;
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(row) * output_row_stride;
+        for (std::int32_t column = 0; column < columns; ++column) {
+            const auto scaled = std::clamp(
+                source[column] * conversion.output_scale
+                    + conversion.output_offset,
+                0.0F, static_cast<float>(conversion.output_maximum));
+            destination[column] = static_cast<Sample>(std::nearbyint(scaled));
+        }
+    }
+}
+
+} // namespace
+
+void CpuExecutor::inverse_2d(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride) const {
+    if (!horizontal.valid() || !vertical.valid() || !input || !output
+        || input_row_stride < horizontal.source_size
+        || output_row_stride < horizontal.destination_size
+        || vertical.source_size < 1 || vertical.destination_size < 1) {
+        throw std::invalid_argument("invalid 2D executor arguments");
+    }
+
+    const auto packed_vertical = impl_->get(vertical);
+#if defined(DSMVC_HAS_AVX2_OBJECT)
+    if (path_ == CpuPath::avx2) {
+        const auto packed_horizontal = impl_->get(horizontal);
+        if (vertical.source_size >= 8
+            && input_row_stride >= packed_horizontal->padded_source_size) {
+            forward_2d_rhs_avx2(
+                horizontal, *packed_horizontal, vertical, *packed_vertical,
+                input, input_row_stride, output, output_row_stride,
+                horizontal.destination_size);
+            backward_rhs_avx2(
+                vertical, *packed_vertical, output, output_row_stride,
+                horizontal.destination_size);
+            return;
+        }
+    }
+#endif
+
+    forward_2d_rhs_scalar(
+        horizontal, *packed_vertical, input, input_row_stride,
+        static_cast<const IntegerConversion *>(nullptr),
+        output, output_row_stride);
+    for (std::int32_t column = 0;
+         column < horizontal.destination_size; ++column) {
+        backward_rhs_scalar(vertical, output + column, output_row_stride);
+    }
+}
+
+template <class Sample>
+void CpuExecutor::inverse_2d_integer(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const Sample *input, std::ptrdiff_t input_row_stride,
+    Sample *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion) const {
+    if (!horizontal.valid() || !vertical.valid() || !input || !output
+        || input_row_stride < horizontal.source_size
+        || output_row_stride < horizontal.destination_size
+        || vertical.source_size < 1 || vertical.destination_size < 1
+        || !(conversion.input_scale > 0.0F)
+        || !(conversion.output_scale > 0.0F)
+        || !std::isfinite(conversion.input_offset)
+        || !std::isfinite(conversion.input_scale)
+        || !std::isfinite(conversion.output_scale)
+        || !std::isfinite(conversion.output_offset)
+        || conversion.output_maximum == 0U
+        || conversion.output_maximum
+            > static_cast<std::uint32_t>(std::numeric_limits<Sample>::max())) {
+        throw std::invalid_argument("invalid integer 2D executor arguments");
+    }
+
+    const auto packed_vertical = impl_->get(vertical);
+    const auto padded_columns = (horizontal.destination_size + 7) & ~7;
+    thread_local std::vector<float> rhs;
+    rhs.resize(static_cast<std::size_t>(vertical.destination_size)
+               * static_cast<std::size_t>(padded_columns));
+    auto *rhs_data = rhs.data();
+
+#if defined(DSMVC_HAS_AVX2_OBJECT)
+    if (path_ == CpuPath::avx2) {
+        const auto packed_horizontal = impl_->get(horizontal);
+        if (vertical.source_size >= 8
+            && input_row_stride >= packed_horizontal->padded_source_size) {
+            const auto enough_work =
+                static_cast<std::size_t>(horizontal.destination_size)
+                    * static_cast<std::size_t>(vertical.source_size) >= 262144U;
+            const auto row_tasks = std::min<std::size_t>(
+                impl_->workers->parallelism(),
+                static_cast<std::size_t>(vertical.destination_size));
+            const auto accumulate_rows = [&](std::int32_t first_row,
+                                             std::int32_t last_row) {
+                if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+                    accumulate_2d_rhs_u8_avx2(
+                        horizontal, *packed_horizontal, *packed_vertical,
+                        input, input_row_stride, conversion,
+                        rhs_data, padded_columns, first_row, last_row);
+                } else {
+                    accumulate_2d_rhs_u16_avx2(
+                        horizontal, *packed_horizontal, *packed_vertical,
+                        input, input_row_stride, conversion,
+                        rhs_data, padded_columns, first_row, last_row);
+                }
+            };
+            const auto accumulated_in_parallel = enough_work
+                && impl_->workers->try_run(row_tasks, [&](std::size_t task) {
+                    const auto first_row = static_cast<std::int32_t>(
+                        static_cast<std::size_t>(vertical.destination_size)
+                            * task / row_tasks);
+                    const auto last_row = static_cast<std::int32_t>(
+                        static_cast<std::size_t>(vertical.destination_size)
+                            * (task + 1U) / row_tasks);
+                    accumulate_rows(first_row, last_row);
+                });
+            if (!accumulated_in_parallel) {
+                accumulate_rows(0, vertical.destination_size);
+            }
+
+            const auto column_groups =
+                static_cast<std::size_t>(padded_columns / 8);
+            const auto column_tasks = std::min(
+                impl_->workers->parallelism(), column_groups);
+            const auto solved_in_parallel = enough_work
+                && impl_->workers->try_run(
+                    column_tasks, [&](std::size_t task) {
+                        const auto first_group = column_groups * task / column_tasks;
+                        const auto last_group =
+                            column_groups * (task + 1U) / column_tasks;
+                        const auto first_column = static_cast<std::int32_t>(
+                            first_group * 8U);
+                        const auto task_columns = static_cast<std::int32_t>(
+                            (last_group - first_group) * 8U);
+                        solve_rhs_columns_avx2(
+                            vertical, *packed_vertical,
+                            rhs_data + first_column,
+                            padded_columns, task_columns);
+                    });
+            if (!solved_in_parallel) {
+                solve_rhs_columns_avx2(
+                    vertical, *packed_vertical, rhs_data,
+                    padded_columns, padded_columns);
+            }
+
+            const auto convert_rows = [&](std::int32_t first_row,
+                                          std::int32_t last_row) {
+                const auto count = last_row - first_row;
+                if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+                    convert_rhs_to_u8_avx2(
+                        rhs_data + static_cast<std::ptrdiff_t>(first_row)
+                            * padded_columns,
+                        padded_columns,
+                        output + static_cast<std::ptrdiff_t>(first_row)
+                            * output_row_stride,
+                        output_row_stride, count,
+                        horizontal.destination_size, conversion);
+                } else {
+                    convert_rhs_to_u16_avx2(
+                        rhs_data + static_cast<std::ptrdiff_t>(first_row)
+                            * padded_columns,
+                        padded_columns,
+                        output + static_cast<std::ptrdiff_t>(first_row)
+                            * output_row_stride,
+                        output_row_stride, count,
+                        horizontal.destination_size, conversion);
+                }
+            };
+            const auto converted_in_parallel = enough_work
+                && impl_->workers->try_run(row_tasks, [&](std::size_t task) {
+                    const auto first_row = static_cast<std::int32_t>(
+                        static_cast<std::size_t>(vertical.destination_size)
+                            * task / row_tasks);
+                    const auto last_row = static_cast<std::int32_t>(
+                        static_cast<std::size_t>(vertical.destination_size)
+                            * (task + 1U) / row_tasks);
+                    convert_rows(first_row, last_row);
+                });
+            if (!converted_in_parallel) {
+                convert_rows(0, vertical.destination_size);
+            }
+            return;
+        }
+    }
+#endif
+
+    accumulate_2d_integer_rhs_scalar(
+        horizontal, *packed_vertical, input, input_row_stride,
+        conversion, rhs_data, padded_columns);
+    for (std::int32_t column = 0;
+         column < horizontal.destination_size; ++column) {
+        solve_rhs_scalar(vertical, rhs_data + column, padded_columns);
+    }
+    convert_rhs_to_integer_scalar(
+        rhs_data, padded_columns, output, output_row_stride,
+        vertical.destination_size, horizontal.destination_size, conversion);
+}
+
+template <class Sample>
+void CpuExecutor::inverse_2d_integer_streamed(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const Sample *input, std::ptrdiff_t input_row_stride,
+    Sample *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion) const {
+    if (!horizontal.valid() || !vertical.valid() || !input || !output
+        || input_row_stride < horizontal.source_size
+        || output_row_stride < horizontal.destination_size
+        || vertical.source_size < 1 || vertical.destination_size < 1
+        || !(conversion.input_scale > 0.0F)
+        || !(conversion.output_scale > 0.0F)
+        || !std::isfinite(conversion.input_offset)
+        || !std::isfinite(conversion.input_scale)
+        || !std::isfinite(conversion.output_scale)
+        || !std::isfinite(conversion.output_offset)
+        || conversion.output_maximum == 0U
+        || conversion.output_maximum
+            > static_cast<std::uint32_t>(std::numeric_limits<Sample>::max())) {
+        throw std::invalid_argument("invalid streamed integer 2D arguments");
+    }
+
+    const auto packed_vertical = impl_->get(vertical);
+    const auto padded_columns = (horizontal.destination_size + 7) & ~7;
+    thread_local std::vector<float> rhs;
+    rhs.resize(static_cast<std::size_t>(vertical.destination_size)
+               * static_cast<std::size_t>(padded_columns));
+    auto *rhs_data = rhs.data();
+
+#if defined(DSMVC_HAS_AVX2_OBJECT)
+    if (path_ == CpuPath::avx2) {
+        const auto packed_horizontal = impl_->get(horizontal);
+        if (vertical.source_size >= 8
+            && input_row_stride >= packed_horizontal->padded_source_size) {
+            if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+                forward_2d_rhs_u8_avx2(
+                    horizontal, *packed_horizontal,
+                    vertical, *packed_vertical,
+                    input, input_row_stride, conversion,
+                    rhs_data, padded_columns, horizontal.destination_size);
+                backward_rhs_to_u8_avx2(
+                    vertical, *packed_vertical, rhs_data, padded_columns,
+                    output, output_row_stride,
+                    horizontal.destination_size, conversion);
+            } else {
+                forward_2d_rhs_u16_avx2(
+                    horizontal, *packed_horizontal,
+                    vertical, *packed_vertical,
+                    input, input_row_stride, conversion,
+                    rhs_data, padded_columns, horizontal.destination_size);
+                backward_rhs_to_u16_avx2(
+                    vertical, *packed_vertical, rhs_data, padded_columns,
+                    output, output_row_stride,
+                    horizontal.destination_size, conversion);
+            }
+            return;
+        }
+    }
+#endif
+
+    forward_2d_rhs_scalar(
+        horizontal, *packed_vertical, input, input_row_stride,
+        &conversion, rhs_data, padded_columns);
+    backward_rhs_to_integer_scalar(
+        vertical, rhs_data, padded_columns,
+        output, output_row_stride,
+        horizontal.destination_size, conversion);
+}
+
+void CpuExecutor::inverse_2d_u8(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion) const {
+    inverse_2d_integer(
+        horizontal, vertical, input, input_row_stride,
+        output, output_row_stride, conversion);
+}
+
+void CpuExecutor::inverse_2d_u16(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion) const {
+    inverse_2d_integer(
+        horizontal, vertical, input, input_row_stride,
+        output, output_row_stride, conversion);
+}
+
+void CpuExecutor::inverse_2d_u8_streamed(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion) const {
+    inverse_2d_integer_streamed(
+        horizontal, vertical, input, input_row_stride,
+        output, output_row_stride, conversion);
+}
+
+void CpuExecutor::inverse_2d_u16_streamed(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion) const {
+    inverse_2d_integer_streamed(
+        horizontal, vertical, input, input_row_stride,
+        output, output_row_stride, conversion);
 }
 
 } // namespace dsmvc

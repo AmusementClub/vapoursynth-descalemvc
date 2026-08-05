@@ -4,13 +4,19 @@
 #include <VSHelper.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <charconv>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -20,6 +26,7 @@ using dsmvc::BackendKind;
 using dsmvc::CpuExecutor;
 using dsmvc::CpuPath;
 using dsmvc::CustomKernel;
+using dsmvc::IntegerConversion;
 using dsmvc::KernelKind;
 using dsmvc::KernelSpec;
 
@@ -58,8 +65,13 @@ struct FilterData {
     int subsampling_w = 0;
     int subsampling_h = 0;
     int num_planes = 0;
+    int color_family = cmGray;
+    int bits_per_sample = 32;
+    int bytes_per_sample = 4;
+    int core_threads = 1;
     bool process_horizontal = false;
     bool process_vertical = false;
+    bool fused_integer = false;
     AxisRequest horizontal_requests[2];
     AxisRequest vertical_requests[2];
     bool has_horizontal_request[2]{};
@@ -71,6 +83,107 @@ struct FilterData {
     VSFuncRef *custom_kernel = nullptr;
     CustomKernel custom_callback;
     CpuExecutor executor{};
+    std::atomic<std::uint32_t> active_2d_frames{0};
+};
+
+class ActiveFrameGuard {
+public:
+    explicit ActiveFrameGuard(std::atomic<std::uint32_t> *counter) noexcept
+        : counter_(counter), first_(
+              !counter || counter->fetch_add(1, std::memory_order_relaxed) == 0) {}
+
+    ~ActiveFrameGuard() {
+        if (counter_) counter_->fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    ActiveFrameGuard(const ActiveFrameGuard &) = delete;
+    ActiveFrameGuard &operator=(const ActiveFrameGuard &) = delete;
+
+    [[nodiscard]] bool first() const noexcept { return first_; }
+
+private:
+    std::atomic<std::uint32_t> *counter_ = nullptr;
+    bool first_ = true;
+};
+
+struct MemoryPhaseConfig {
+    std::size_t limit = 0U;
+    bool all_kernels = false;
+};
+
+const MemoryPhaseConfig &memory_phase_config() noexcept {
+    static const MemoryPhaseConfig config = [] {
+        const auto hardware = std::max(
+            std::thread::hardware_concurrency(), 1U);
+        MemoryPhaseConfig result{
+            std::clamp<std::size_t>(hardware / 2U, 1U, 32U), false};
+        const char *environment = std::getenv("DSMVC_MEMORY_CONCURRENCY");
+        if (!environment) return result;
+
+        const std::string_view text(environment);
+        std::size_t parsed = 0U;
+        const auto conversion = std::from_chars(
+            text.data(), text.data() + text.size(), parsed);
+        if (conversion.ec != std::errc{}
+            || conversion.ptr != text.data() + text.size()) {
+            return result;
+        }
+        result.limit = parsed == 0U
+            ? 0U : std::min<std::size_t>(parsed, hardware);
+        result.all_kernels = true;
+        return result;
+    }();
+    return config;
+}
+
+class MemoryPhaseLimiter {
+public:
+    explicit MemoryPhaseLimiter(std::size_t limit) noexcept : limit_(limit) {}
+
+    [[nodiscard]] bool acquire() {
+        if (limit_ == 0U) return false;
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [&] { return active_ < limit_; });
+        ++active_;
+        return true;
+    }
+
+    void release() noexcept {
+        {
+            const std::scoped_lock lock(mutex_);
+            --active_;
+        }
+        ready_.notify_one();
+    }
+
+private:
+    std::size_t limit_ = 0U;
+    std::size_t active_ = 0U;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+};
+
+MemoryPhaseLimiter &shared_memory_phase_limiter() {
+    static MemoryPhaseLimiter limiter(memory_phase_config().limit);
+    return limiter;
+}
+
+class MemoryPhaseGuard {
+public:
+    explicit MemoryPhaseGuard(bool enabled)
+        : limiter_(enabled ? &shared_memory_phase_limiter() : nullptr),
+          acquired_(limiter_ && limiter_->acquire()) {}
+
+    ~MemoryPhaseGuard() {
+        if (acquired_) limiter_->release();
+    }
+
+    MemoryPhaseGuard(const MemoryPhaseGuard &) = delete;
+    MemoryPhaseGuard &operator=(const MemoryPhaseGuard &) = delete;
+
+private:
+    MemoryPhaseLimiter *limiter_ = nullptr;
+    bool acquired_ = false;
 };
 
 std::string lower_copy(const char *value) {
@@ -439,6 +552,39 @@ void ensure_filter_plans(FilterData &data, const VSAPI *vsapi) {
     if (data.planning_error) std::rethrow_exception(data.planning_error);
 }
 
+int frame_range(const VSFrameRef *frame, int color_family,
+                const VSAPI *vsapi) noexcept {
+    const auto *properties = vsapi->getFramePropsRO(frame);
+    for (const auto *name : {"_Range", "_ColorRange"}) {
+        int error = 0;
+        const auto value = vsapi->propGetInt(properties, name, 0, &error);
+        if (!error) return value == 1 ? 1 : 0;
+    }
+    return color_family == cmRGB ? 1 : 0;
+}
+
+IntegerConversion integer_conversion(const FilterData &data, int plane,
+                                     int range) noexcept {
+    const auto maximum = (1U << data.bits_per_sample) - 1U;
+    const bool chroma = data.color_family == cmYUV && plane != 0;
+    std::uint32_t offset = 0U;
+    std::uint32_t scale = maximum;
+    if (range == 0) {
+        const auto depth_scale = 1U << (data.bits_per_sample - 8);
+        offset = (chroma ? 128U : 16U) * depth_scale;
+        scale = (chroma ? 224U : 219U) * depth_scale;
+    } else if (chroma) {
+        offset = 1U << (data.bits_per_sample - 1);
+    }
+    return {
+        static_cast<float>(offset),
+        1.0F / static_cast<float>(scale),
+        static_cast<float>(scale),
+        static_cast<float>(offset),
+        maximum,
+    };
+}
+
 void VS_CC filter_init(VSMap *, VSMap *, void **instance_data, VSNode *node,
                        VSCore *, const VSAPI *vsapi) {
     auto *data = static_cast<FilterData *>(*instance_data);
@@ -457,11 +603,33 @@ const VSFrameRef *VS_CC filter_get_frame(
 
     const VSFrameRef *source = vsapi->getFrameFilter(
         frame_number, data->node, frame_context);
+    const bool adaptive_2d =
+        data->process_horizontal && data->process_vertical;
     VSFrameRef *intermediate = nullptr;
     VSFrameRef *destination = nullptr;
     try {
         ensure_filter_plans(*data, vsapi);
-        if (data->process_horizontal && data->process_vertical) {
+        const auto &memory_config = memory_phase_config();
+        const bool wide_kernel = adaptive_2d
+            && data->vertical[0]->half_bandwidth >= 5;
+        MemoryPhaseGuard memory_phase(
+            adaptive_2d && memory_config.limit > 0U
+            && static_cast<std::size_t>(data->core_threads) > memory_config.limit
+            && (wide_kernel || memory_config.all_kernels));
+        const bool allow_streamed_integer = !data->fused_integer
+            || data->vertical[0]->half_bandwidth < 7
+            || data->core_threads > 8;
+        const bool track_overlapping_frames = adaptive_2d
+            && data->core_threads > 1 && allow_streamed_integer;
+        ActiveFrameGuard active_frame(track_overlapping_frames
+            ? &data->active_2d_frames : nullptr);
+        // Keep the internally parallel path for a sole frame. Overlapping
+        // frames use destination-ordered RHS generation to reduce traffic.
+        const bool first_2d_frame = adaptive_2d
+            && (!track_overlapping_frames || active_frame.first());
+        const bool buffered_float_2d =
+            !data->fused_integer && first_2d_frame;
+        if (buffered_float_2d) {
             intermediate = vsapi->newVideoFrame(
                 data->vi.format, data->destination_width, data->source_height,
                 nullptr, core);
@@ -470,7 +638,64 @@ const VSFrameRef *VS_CC filter_get_frame(
             data->vi.format, data->destination_width, data->destination_height,
             source, core);
 
+        const auto range = data->fused_integer
+            ? frame_range(source, data->color_family, vsapi) : 0;
+        if (data->fused_integer) {
+            vsapi->propSetInt(
+                vsapi->getFramePropsRW(destination), "_Range",
+                range, paReplace);
+        }
+
         for (int plane = 0; plane < data->num_planes; ++plane) {
+            const int horizontal_index = plane != 0 && data->subsampling_w > 0;
+            const int vertical_index = plane != 0 && data->subsampling_h > 0;
+            if (data->fused_integer) {
+                const auto conversion = integer_conversion(*data, plane, range);
+                const auto source_stride = vsapi->getStride(source, plane)
+                    / data->bytes_per_sample;
+                const auto destination_stride = vsapi->getStride(destination, plane)
+                    / data->bytes_per_sample;
+                if (data->bytes_per_sample == 1) {
+                    if (first_2d_frame) {
+                        data->executor.inverse_2d_u8(
+                            *data->horizontal[horizontal_index],
+                            *data->vertical[vertical_index],
+                            vsapi->getReadPtr(source, plane), source_stride,
+                            vsapi->getWritePtr(destination, plane),
+                            destination_stride, conversion);
+                    } else {
+                        data->executor.inverse_2d_u8_streamed(
+                            *data->horizontal[horizontal_index],
+                            *data->vertical[vertical_index],
+                            vsapi->getReadPtr(source, plane), source_stride,
+                            vsapi->getWritePtr(destination, plane),
+                            destination_stride, conversion);
+                    }
+                } else {
+                    if (first_2d_frame) {
+                        data->executor.inverse_2d_u16(
+                            *data->horizontal[horizontal_index],
+                            *data->vertical[vertical_index],
+                            reinterpret_cast<const std::uint16_t *>(
+                                vsapi->getReadPtr(source, plane)),
+                            source_stride,
+                            reinterpret_cast<std::uint16_t *>(
+                                vsapi->getWritePtr(destination, plane)),
+                            destination_stride, conversion);
+                    } else {
+                        data->executor.inverse_2d_u16_streamed(
+                            *data->horizontal[horizontal_index],
+                            *data->vertical[vertical_index],
+                            reinterpret_cast<const std::uint16_t *>(
+                                vsapi->getReadPtr(source, plane)),
+                            source_stride,
+                            reinterpret_cast<std::uint16_t *>(
+                                vsapi->getWritePtr(destination, plane)),
+                            destination_stride, conversion);
+                    }
+                }
+                continue;
+            }
             const auto source_stride = vsapi->getStride(source, plane)
                 / static_cast<int>(sizeof(float));
             const auto destination_stride = vsapi->getStride(destination, plane)
@@ -479,25 +704,32 @@ const VSFrameRef *VS_CC filter_get_frame(
                 vsapi->getReadPtr(source, plane));
             auto *destination_ptr = reinterpret_cast<float *>(
                 vsapi->getWritePtr(destination, plane));
-            const int horizontal_index = plane != 0 && data->subsampling_w > 0;
-            const int vertical_index = plane != 0 && data->subsampling_h > 0;
-
             if (data->process_horizontal && data->process_vertical) {
-                const auto intermediate_stride = vsapi->getStride(intermediate, plane)
-                    / static_cast<int>(sizeof(float));
-                auto *intermediate_ptr = reinterpret_cast<float *>(
-                    vsapi->getWritePtr(intermediate, plane));
-                const auto row_count = data->source_height
-                    >> (plane != 0 ? data->subsampling_h : 0);
-                data->executor.inverse_rows(
-                    *data->horizontal[horizontal_index], source_ptr, source_stride,
-                    intermediate_ptr, intermediate_stride, row_count);
-                const auto column_count = data->destination_width
-                    >> (plane != 0 ? data->subsampling_w : 0);
-                data->executor.inverse_columns(
-                    *data->vertical[vertical_index], intermediate_ptr,
-                    intermediate_stride, destination_ptr, destination_stride,
-                    column_count);
+                if (buffered_float_2d) {
+                    const auto intermediate_stride =
+                        vsapi->getStride(intermediate, plane)
+                        / static_cast<int>(sizeof(float));
+                    auto *intermediate_ptr = reinterpret_cast<float *>(
+                        vsapi->getWritePtr(intermediate, plane));
+                    const auto row_count = data->source_height
+                        >> (plane != 0 ? data->subsampling_h : 0);
+                    data->executor.inverse_rows(
+                        *data->horizontal[horizontal_index],
+                        source_ptr, source_stride,
+                        intermediate_ptr, intermediate_stride, row_count);
+                    const auto column_count = data->destination_width
+                        >> (plane != 0 ? data->subsampling_w : 0);
+                    data->executor.inverse_columns(
+                        *data->vertical[vertical_index],
+                        intermediate_ptr, intermediate_stride,
+                        destination_ptr, destination_stride, column_count);
+                } else {
+                    data->executor.inverse_2d(
+                        *data->horizontal[horizontal_index],
+                        *data->vertical[vertical_index],
+                        source_ptr, source_stride,
+                        destination_ptr, destination_stride);
+                }
             } else if (data->process_horizontal) {
                 const auto row_count = data->source_height
                     >> (plane != 0 ? data->subsampling_h : 0);
@@ -574,8 +806,16 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             return;
         }
 
-        if (source_info->format->sampleType != stFloat
-            || source_info->format->bitsPerSample != 32) {
+        const bool fused_integer =
+            source_info->format->sampleType == stInteger
+            && source_info->format->bitsPerSample >= 8
+            && source_info->format->bitsPerSample <= 16
+            && (source_info->format->bytesPerSample == 1
+                || source_info->format->bytesPerSample == 2)
+            && process_horizontal && process_vertical;
+        if (!fused_integer
+            && (source_info->format->sampleType != stFloat
+                || source_info->format->bitsPerSample != 32)) {
             convert_and_invoke(source, *source_info, parsed, out, core, vsapi);
             if (custom) vsapi->freeFunc(custom);
             vsapi->freeNode(source);
@@ -593,8 +833,15 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         data->subsampling_w = source_info->format->subSamplingW;
         data->subsampling_h = source_info->format->subSamplingH;
         data->num_planes = source_info->format->numPlanes;
+        data->color_family = source_info->format->colorFamily;
+        data->bits_per_sample = source_info->format->bitsPerSample;
+        data->bytes_per_sample = source_info->format->bytesPerSample;
+        VSCoreInfo core_info{};
+        vsapi->getCoreInfo2(core, &core_info);
+        data->core_threads = std::max(core_info.numThreads, 1);
         data->process_horizontal = process_horizontal;
         data->process_vertical = process_vertical;
+        data->fused_integer = fused_integer;
         data->vi.width = parsed.width;
         data->vi.height = parsed.height;
         prepare_filter_requests(*data, parsed);

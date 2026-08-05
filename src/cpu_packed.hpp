@@ -20,6 +20,10 @@ struct PackedCpuPlan {
     std::vector<float> lower_ld;
     std::vector<float> upper_l;
     std::vector<float> inverse_diagonal;
+    std::vector<std::uint32_t> source_offsets;
+    std::vector<std::int32_t> source_destinations;
+    std::vector<float> source_weights;
+    std::int32_t streaming_cache_blocks = 1;
 };
 
 [[nodiscard]] PackedCpuPlan pack_cpu_plan(

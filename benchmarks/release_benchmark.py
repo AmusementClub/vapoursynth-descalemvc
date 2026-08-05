@@ -13,9 +13,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fixed_kernel_benchmark as fixed_report
+
 
 THREADS = (1, 8, 16, 32)
 CASES = ("getfnative", "getfnative_v2", "selectkernel")
+IMPLEMENTATIONS = ("old", "new")
 KERNELS = (
     ("bilinear", "bilinear"),
     ("bicubic_b0_c0_5", "bicubic (0, 0.5)"),
@@ -28,6 +31,114 @@ KERNELS = (
     ("spline36", "spline36"),
     ("spline64", "spline64"),
 )
+CASE_REPORTS = (
+    {
+        "case": "getfnative",
+        "scenario": "Full non-vertical GetNative candidate scan",
+        "reference": "muf.getnative(src, rescaler, src_heights=arange(700, 980, 0.1), base_height=1000)",
+        "benchmark": "frame 12493; 11 scalers x 2,800 heights = 30,800 candidates",
+    },
+    {
+        "case": "getfnative_v2",
+        "scenario": "Vertical-only GetNative candidate scan",
+        "reference": "muf.getnative(src, rescaler, src_heights=arange(840, 880, 0.1), base_height=1000, vertical_only=True)",
+        "benchmark": "frame 358; 8 scalers x 400 heights = 3,200 candidates",
+    },
+    {
+        "case": "selectkernel",
+        "scenario": "Kernel-parameter selection at a fixed height",
+        "reference": "muf.getnative(src, src_heights=719.8, base_height=1000, ex_thr=0.012, rescalers=...)",
+        "benchmark": "frame 1111; bilinear + 10x10 Bicubic b/c grid = 101 candidates",
+    },
+)
+
+
+def redact_plugin_hashes(value, plugin_context: bool = False):
+    """Keep report provenance while omitting old/current plugin hashes."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in ("old_plugin_sha256", "new_plugin_sha256"):
+                continue
+            if plugin_context and key == "sha256":
+                continue
+            result[key] = redact_plugin_hashes(
+                item, key in ("old_plugin", "new_plugin"))
+        return result
+    if isinstance(value, list):
+        return [redact_plugin_hashes(item, plugin_context)
+                for item in value]
+    return value
+
+
+def system_configuration(vspipe_environment: dict) -> dict:
+    cpu_model = platform.processor() or "unknown CPU"
+    physical_cores = None
+    sockets = set()
+
+    def sysctl(name: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["sysctl", "-n", name], capture_output=True, text=True,
+                errors="replace", check=False)
+        except OSError:
+            return ""
+        return completed.stdout.strip() if completed.returncode == 0 else ""
+
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text(encoding="ascii")
+        for line in cpuinfo.splitlines():
+            if line.startswith("model name") and cpu_model == "unknown CPU":
+                cpu_model = line.split(":", 1)[1].strip()
+            elif line.startswith("cpu cores") and physical_cores is None:
+                physical_cores = int(line.split(":", 1)[1].strip())
+            elif line.startswith("physical id"):
+                sockets.add(line.split(":", 1)[1].strip())
+    except (OSError, ValueError, IndexError):
+        pass
+    if cpu_model in ("", "unknown CPU", "i386", "arm"):
+        cpu_model = (sysctl("machdep.cpu.brand_string")
+                     or sysctl("hw.model") or cpu_model)
+    if physical_cores is None:
+        raw_physical = sysctl("hw.physicalcpu")
+        try:
+            physical_cores = int(raw_physical)
+        except ValueError:
+            physical_cores = None
+    logical_cpus = (vspipe_environment.get("logical_cpu_count")
+                    or os.cpu_count() or "unknown")
+    socket_count = len(sockets) or 1
+    core_text = (f"{physical_cores * socket_count}C/{logical_cpus}T"
+                 if physical_cores is not None else f"{logical_cpus} logical CPUs")
+
+    memory_text = "unknown"
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="ascii")
+        total_kib = next(
+            int(line.split()[1]) for line in meminfo.splitlines()
+            if line.startswith("MemTotal:"))
+        memory_text = f"{total_kib / 1024 / 1024:.1f} GiB"
+    except (OSError, ValueError, StopIteration):
+        pass
+    if memory_text == "unknown":
+        raw_memory = sysctl("hw.memsize")
+        try:
+            memory_text = f"{int(raw_memory) / 1024 / 1024 / 1024:.1f} GiB"
+        except ValueError:
+            pass
+
+    version_lines = []
+    for line in str(vspipe_environment.get("vspipe", "")).splitlines():
+        line = line.strip()
+        if line.startswith("Core ") or line.startswith("API "):
+            version_lines.append(line)
+    return {
+        "cpu": f"{cpu_model} ({core_text})",
+        "os": f"{platform.system()} {platform.release()} {platform.machine()}",
+        "libc": " ".join(platform.libc_ver()) or "unknown",
+        "memory": memory_text,
+        "vapoursynth": "; ".join(version_lines) or "unknown",
+    }
 
 
 def run(command: list[str], label: str) -> None:
@@ -48,6 +159,9 @@ def e2e_args(options, output: Path, threads: int,
         "--vspipe", str(options.vspipe),
         "--python", str(options.vs_python),
         "--source-filter", options.source_filter,
+        "--source-prefer-hw", str(options.source_prefer_hw),
+        "--source-ff-loglevel", str(options.source_ff_loglevel),
+        "--source-rap-verification", str(options.source_rap_verification),
         "--profile", "full",
         "--cases", *CASES,
         "--implementations", "old", "new",
@@ -56,6 +170,10 @@ def e2e_args(options, output: Path, threads: int,
         "--threads", str(threads),
         "--output", str(output),
     ]
+    if options.source_plugin:
+        command.extend(["--source-plugin", str(options.source_plugin)])
+    if options.source_decoder:
+        command.extend(["--source-decoder", options.source_decoder])
     for path in options.html:
         command.extend(["--html", str(path)])
     for case, path in options.scripts.items():
@@ -174,32 +292,144 @@ def fixed_table(fixed: dict) -> dict:
     return result
 
 
+def blank_paired_cases(blank: dict) -> list[dict]:
+    """Normalize blank benchmark summaries for the fixed-kernel chart helper."""
+    by_key = {
+        (item["kernel"], item["threads"], item["implementation"]): item
+        for item in blank["cases"]
+    }
+    frames = blank["environment"]["frames"]
+    cases = []
+    for name, label in KERNELS:
+        for thread in THREADS:
+            old = by_key[(name, thread, "old")]
+            new = by_key[(name, thread, "new")]
+            cases.append({
+                "kernel": name,
+                "label": label,
+                "frames": frames,
+                "threads": thread,
+                "requests": thread,
+                "old": {"fps": {"median": old["fps"]["median"]}},
+                "new": {"fps": {"median": new["fps"]["median"]}},
+            })
+    return cases
+
+
+def blank_table(blank: dict) -> dict:
+    result = {}
+    for item in blank_paired_cases(blank):
+        result.setdefault(item["kernel"], {})[item["threads"]] = {
+            implementation: item[implementation]["fps"]["median"]
+            for implementation in IMPLEMENTATIONS
+        }
+    return result
+
+
+def write_blank_scaling(blank: dict, path: Path) -> None:
+    fixed_report.write_scaling_svg(
+        blank_paired_cases(blank),
+        [{"name": name, "label": label} for name, label in KERNELS],
+        IMPLEMENTATIONS,
+        path,
+    )
+
+
+def consolidated_algorithm_minima(error_result: dict) -> list[dict]:
+    """Collapse parameterized scaler names into comparable algorithm families."""
+    result = []
+    for item in error_result["errors"]["summaries"]:
+        grouped = {}
+        for scaler, values in item["algorithm_summary"].items():
+            family = "bicubic" if scaler.startswith("bicubic_") else scaler
+            group = grouped.setdefault(family, {
+                "candidate_count": 0,
+                "scalers": [],
+                "old_best": None,
+                "new_best": None,
+            })
+            group["candidate_count"] += values["candidate_count"]
+            group["scalers"].append(scaler)
+            if (group["old_best"] is None
+                    or values["old_best"]["mae"]
+                    < group["old_best"]["mae"]):
+                group["old_best"] = values["old_best"]
+            if (group["new_best"] is None
+                    or values["new_best"]["mae"]
+                    < group["new_best"]["mae"]):
+                group["new_best"] = values["new_best"]
+        for family in sorted(grouped):
+            group = grouped[family]
+            old_best = group["old_best"]
+            new_best = group["new_best"]
+            result.append({
+                "case": item["case"],
+                "algorithm": family,
+                "candidate_count": group["candidate_count"],
+                "scalers": sorted(group["scalers"]),
+                "old_best": old_best,
+                "new_best": new_best,
+                "mae_delta": new_best["mae"] - old_best["mae"],
+                "height_delta": new_best["height"] - old_best["height"],
+                "best_candidate_changed": (
+                    old_best["id"] != new_best["id"]),
+                "best_height_changed": (
+                    old_best["height"] != new_best["height"]),
+            })
+    return result
+
+
 def merge_report(options, output: Path, perf_results: dict[int, dict],
-                 error_result: dict, fixed_result: dict) -> None:
+                 error_result: dict, fixed_result: dict,
+                 blank_result: dict) -> None:
     e2e_rows = e2e_summary(perf_results)
     fixed_values = fixed_table(fixed_result)
+    blank_values = blank_table(blank_result)
+    algorithm_minima = consolidated_algorithm_minima(error_result)
+    system = system_configuration(
+        perf_results[THREADS[0]]["environment"])
+    geometry = fixed_result["geometry"]
+    error_environment = error_result.get("environment", {})
+    e2e_by_case = {row["case"]: row for row in e2e_rows}
+    r1 = {case: e2e_by_case[case]["threads"]["1"] for case in CASES}
+    r32 = {case: e2e_by_case[case]["threads"]["32"] for case in CASES}
     output.mkdir(parents=True, exist_ok=True)
     write_e2e_scaling(e2e_rows, output / "e2e-scaling.svg")
+    write_blank_scaling(
+        blank_result, output / "blank-fixed-kernel-scaling.svg")
     merged = {
         "schema_version": 1,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "environment": {
             "platform": platform.platform(),
             "logical_cpu_count": os.cpu_count(),
+            "system": system,
             "source": str(options.source),
             "source_sha256": fixed_result["environment"]["source"]["sha256"],
             "source_filter": options.source_filter,
-            "old_plugin": fixed_result["environment"]["old_plugin"],
-            "new_plugin": fixed_result["environment"]["new_plugin"],
+            "source_plugin": (str(options.source_plugin)
+                              if options.source_plugin else None),
+            "source_decoder": options.source_decoder,
+            "source_prefer_hw": options.source_prefer_hw,
+            "source_ff_loglevel": options.source_ff_loglevel,
+            "source_rap_verification": options.source_rap_verification,
+            "old_plugin": redact_plugin_hashes(
+                fixed_result["environment"]["old_plugin"], True),
+            "new_plugin": redact_plugin_hashes(
+                fixed_result["environment"]["new_plugin"], True),
             "threads": list(THREADS),
             "frames": fixed_result["environment"]["frames"],
         },
         "e2e_performance": e2e_rows,
-        "e2e_errors": error_result["errors"],
-        "fixed_kernel": fixed_result,
+        "e2e_errors": redact_plugin_hashes(error_result["errors"]),
+        "e2e_error_algorithm_minima": algorithm_minima,
+        "fixed_kernel": redact_plugin_hashes(fixed_result),
+        "blank_clip": redact_plugin_hashes(blank_result),
         "artifacts": {
             "e2e_scaling": "e2e-scaling.svg",
             "fixed_scaling": "../fixed-kernel-digimon-810p-release/scaling.svg",
+            "blank_scaling": "blank-fixed-kernel-scaling.svg",
+            "blank_clip_report": "../blank-fixed-kernel-digimon-810p-release-20260805/benchmark.json",
         },
     }
     (output / "release-benchmark.json").write_text(
@@ -217,16 +447,53 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "| Workload | Result |",
         "|---|---:|",
         f"| E2E getfnative candidates | {e2e_rows[0]['threads']['32']['new']['candidates_per_second']['median']:.3f} candidates/s at R32T32 |",
-        f"| Fixed kernel coverage | {len(fixed_result['cases'])} algorithm/thread/implementation cases, 4,000 frames each |",
+        f"| Fixed kernel coverage | {len(fixed_result['cases'])} algorithm/thread/implementation cases, {fixed_result['environment']['frames']:,} frames each |",
+        f"| BlankClip kernel coverage | {len(blank_result['cases'])} implementation/thread/kernel cases, {blank_result['environment']['frames']:,} frames each |",
         f"| Error coverage | {sum(item['candidate_count'] for item in error_result['errors']['summaries']):,} candidates across three recipes |",
+        "",
+        f"At R1T1, the current Release is substantially faster on the complete candidate scans: `getfnative` {r1['getfnative']['old']['candidates_per_second']['median']:.3f} -> {r1['getfnative']['new']['candidates_per_second']['median']:.3f} candidates/s ({r1['getfnative']['new_speedup']:.2f}x), `getfnative_v2` {r1['getfnative_v2']['new_speedup']:.2f}x, and `selectkernel` {r1['selectkernel']['new_speedup']:.2f}x.",
+        f"At R32T32, the gains narrow to {r32['getfnative_v2']['new_speedup']:.2f}x-{r32['getfnative']['new_speedup']:.2f}x because the workload reaches this machine's shared memory data-movement ceiling. The fixed-kernel R8-R32 results show the same convergence: available memory stays high, so the bottleneck is local memory bandwidth and/or cache/DRAM access and queueing latency rather than capacity.",
+        "A DDR5 platform is therefore expected to improve the high-thread results by raising the memory-system ceiling, especially when channel configuration and timings are favorable. The gain should be treated as an upper-bound improvement opportunity, not a guaranteed linear speedup, because the graph still contains planner, synchronization, and frame-movement overhead.",
+        "",
+        "## Test System and Run Configuration",
+        "",
+        "| Item | Configuration |",
+        "|---|---|",
+        f"| CPU | `{system['cpu']}` |",
+        f"| OS | `{system['os']}`, `{system['libc']}` |",
+        f"| Memory | `{system['memory']}` physical memory at report generation |",
+        f"| VapourSynth | `{system['vapoursynth']}` |",
+        f"| Input | `{Path(options.source).name}`, {int(geometry['source_width'])}x{int(geometry['source_height'])}; supplied Digimon 1080p HEVC-10bit MKV |",
+        f"| Source filter | `{options.source_filter}` |",
+        f"| Source decoder options | decoder `{options.source_decoder or 'default'}`, prefer_hw `{options.source_prefer_hw}`, RAP verification `{options.source_rap_verification}` |",
+        f"| Descale geometry | base `{int(geometry['base_width'])}x{int(geometry['base_height'])}`, native target `{int(geometry['native_width'])}x{int(geometry['native_height'])}` |",
+        f"| Thread sweep | `R1T1`, `R8T8`, `R16T16`, `R32T32`; each cell uses `core.num_threads=N` and `--requests N` |",
+        "| Performance repetition | One fresh VSPipe process per implementation/case/thread cell; wall time includes decode, graph setup, filtering, PlaneStats, and shutdown |",
+        f"| BlankClip throughput | In-memory `std.BlankClip`, 1920x1080 GRAYS, fixed 810p geometry, {blank_result['environment']['frames']:,} frames per cell; no decoder or source filter |",
+        f"| Error sweep | R32T32 recipe, `{error_environment.get('error_processes', 'n/a')}` worker processes, `{error_environment.get('error_worker_threads', 'n/a')}` worker thread per process |",
+        "",
+        "The reference scripts are the three supplied `.vpy` files. They use `core.lsmas.LWLibavSource` and `muf.getnative`; the release benchmark uses the explicitly supplied Digimon MKV and the source filter shown above, then expands the same descale/reconstruction/statistics graph so old and current plugin namespaces can be selected independently.",
+        "",
+        "## E2E Case Definitions",
+        "",
+        "The measured graph starts with `source -> ShufflePlanes(plane=0, GRAY) -> resize.Point(format=GRAYS)`. For each candidate it calls the old namespace (`core.descale`) or current namespace (`core.dsmvc`, `backend=cpu`) through `Debilinear`, `Debicubic`, `Delanczos`, `Despline16`, or `Despline36`, reconstructs with the matching `core.resize.*` kernel, then applies `std.Expr`, a 5-pixel border crop, and `PlaneStats`. The output is statistics, not an encoded video stream.",
+        "",
+        "| Case | Scenario | Reference call shape | Measured candidate space |",
+        "|---|---|---|---|",
+    ]
+    for case in CASE_REPORTS:
+        lines.append(
+            f"| `{case['case']}` | {case['scenario']} | "
+            f"`{case['reference']}` | {case['benchmark']} |")
+    lines.extend([
+        "",
+        "`getfnative` is the broad normal search: it scans both height and scaler family on a non-vertical geometry. `getfnative_v2` is the narrower vertical-only search. `selectkernel` holds height at 719.8 and scans kernel parameters, so it isolates kernel-selection cost from height search.",
         "",
         "## Build and Provenance",
         "",
-        f"- Current plugin: `{fixed_result['environment']['new_plugin']['sha256']}`",
-        f"- Original plugin: `{fixed_result['environment']['old_plugin']['sha256']}`",
         f"- Source SHA-256: `{fixed_result['environment']['source']['sha256']}`",
         f"- Source filter: `{options.source_filter}`",
-        "- Build: `Release`, `-O3 -DNDEBUG`, generic `x86-64`, AVX2/FMA isolated to `cpu_executor_avx2.cpp`",
+        "- Build: `Release`, CMake platform defaults, with AVX2/FMA isolated to `cpu_executor_avx2.cpp` when the target is x86_64",
         "- Link: version-script export of `VapourSynthPluginInit`, RELRO, NOW, and pthread",
         "- No LTO, PGO, native CPU tuning, or fast-math flags",
         "",
@@ -238,7 +505,7 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "",
         "| Case | R1T1 old -> new | R8T8 old -> new | R16T16 old -> new | R32T32 old -> new |",
         "|---|---:|---:|---:|---:|",
-    ]
+    ])
     for row in e2e_rows:
         cells = []
         for thread in THREADS:
@@ -266,23 +533,30 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
             f"{item['max_reconstruction_max_abs']:.6g} |")
     lines.extend([
         "",
-        "### Per-algorithm error minima",
+        "### Consolidated per-algorithm minima",
         "",
-        "| Case | Algorithm | Old best height / MAE | Current best height / MAE | Height changed |",
-        "|---|---|---:|---:|---|",
+        "Each row groups all parameter variants of one algorithm family and keeps the best old/current candidate within that family. For example, the 100 Bicubic variants in `selectkernel` become one row. `Delta MAE` and `Delta height` are `current - old`; a negative MAE is an improvement.",
+        "",
+        "| Case | Algorithm family | Candidates | Old best (candidate; height / MAE) | Current best (candidate; height / MAE) | Delta MAE | Delta height | Candidate changed | Height changed |",
+        "|---|---|---:|---|---|---:|---:|---|---|",
     ])
-    for item in error_result["errors"]["summaries"]:
-        for algorithm, values in item["algorithm_summary"].items():
-            lines.append(
-                f"| `{item['case']}` | `{algorithm}` | "
-                f"{values['old_best']['height']:.1f} / {values['old_best']['mae']:.6g} | "
-                f"{values['new_best']['height']:.1f} / {values['new_best']['mae']:.6g} | "
-                f"{values['best_height_changed']} |")
+    for item in algorithm_minima:
+        old_best = item["old_best"]
+        new_best = item["new_best"]
+        lines.append(
+            f"| `{item['case']}` | `{item['algorithm']}` | "
+            f"{item['candidate_count']:,} | "
+            f"`{old_best['id']}`; {old_best['height']:.1f} / "
+            f"{old_best['mae']:.6g} | `{new_best['id']}`; "
+            f"{new_best['height']:.1f} / {new_best['mae']:.6g} | "
+            f"{item['mae_delta']:+.6g} | {item['height_delta']:+.1f} | "
+            f"{item['best_candidate_changed']} | "
+            f"{item['best_height_changed']} |")
     lines.extend([
         "",
         "## Fixed Kernel Throughput",
         "",
-        "Each cell is `old FPS -> current Release FPS (speedup)` for the first 4,000 frames at fixed 810p geometry.",
+        f"Each cell is `old FPS -> current Release FPS (speedup)` for the first {fixed_result['environment']['frames']:,} frames at fixed 810p geometry.",
         "",
         "[Open the full fixed-kernel scaling chart](../fixed-kernel-digimon-810p-release/scaling.svg)",
         "",
@@ -293,6 +567,25 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         cells = []
         for thread in THREADS:
             values = fixed_values[name][thread]
+            old = values["old"]
+            new = values["new"]
+            cells.append(f"{old:.3f} -> {new:.3f} ({new / old:.2f}x)")
+        lines.append(f"| `{label}` | " + " | ".join(cells) + " |")
+    lines.extend([
+        "",
+        "## BlankClip Throughput",
+        "",
+        f"Each cell is `old FPS -> current Release FPS (speedup)` for {blank_result['environment']['frames']:,} frames from an in-memory 1920x1080 GRAYS `std.BlankClip` at fixed 810p geometry. There is no decoder, source filter, or input-video content; this isolates the fixed-kernel execution path and VapourSynth frame plumbing.",
+        "",
+        "[Open the blank fixed-kernel scaling chart](blank-fixed-kernel-scaling.svg)",
+        "",
+        "| Kernel | R1T1 | R8T8 | R16T16 | R32T32 |",
+        "|---|---:|---:|---:|---:|",
+    ])
+    for name, label in KERNELS:
+        cells = []
+        for thread in THREADS:
+            values = blank_values[name][thread]
             old = values["old"]
             new = values["new"]
             cells.append(f"{old:.3f} -> {new:.3f} ({new / old:.2f}x)")
@@ -312,6 +605,8 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "- [Full error report](../e2e-digimon-release-errors-r32t32/benchmark.json)",
         "- [Full fixed-kernel report](../fixed-kernel-digimon-810p-release/benchmark.json)",
         "- [Fixed-kernel CSV](../fixed-kernel-digimon-810p-release/benchmark.csv)",
+        "- [BlankClip fixed-kernel report](../blank-fixed-kernel-digimon-810p-release-20260805/benchmark.json)",
+        "- [BlankClip CSV](../blank-fixed-kernel-digimon-810p-release-20260805/benchmark.csv)",
         "",
     ])
     (output / "release-benchmark.md").write_text("\n".join(lines),
@@ -329,6 +624,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--source-filter", default="ffms2",
                         choices=("lsmas", "ffms2", "bestsource"))
+    parser.add_argument("--source-plugin", type=Path)
+    parser.add_argument("--source-decoder", default="",
+                        help="Preferred LSMASH/libavcodec decoder name(s).")
+    parser.add_argument("--source-prefer-hw", type=int, default=0,
+                        help="LSMASH prefer_hw mode; 0 keeps software default.")
+    parser.add_argument("--source-ff-loglevel", type=int, default=0,
+                        help="LSMASH FFmpeg log level, 0 is quiet.")
+    parser.add_argument("--source-rap-verification", type=int, default=-1,
+                        help="LSMASH RAP verification; -1 keeps plugin default.")
     parser.add_argument("--output-root", type=Path, default=root / "benchmark-results")
     parser.add_argument("--release-output", type=Path,
                         default=root / "benchmark-results" / "release-benchmark-20260805")
@@ -346,12 +650,16 @@ def main() -> int:
     options.old_plugin = options.old_plugin.expanduser().resolve()
     options.new_plugin = options.new_plugin.expanduser().resolve()
     options.vspipe = options.vspipe.expanduser().resolve()
+    if options.source_plugin:
+        options.source_plugin = options.source_plugin.expanduser().resolve()
     # Keep the VapourSynth launcher path spelling. It may be a symlink whose
     # surrounding environment is selected by the launcher directory.
     options.vs_python = options.vs_python.expanduser()
     options.e2e_runner = Path(__file__).with_name("e2e_benchmark.py").resolve()
     options.fixed_runner = Path(__file__).with_name(
         "fixed_kernel_benchmark.py").resolve()
+    options.blank_runner = Path(__file__).with_name(
+        "blank_fixed_kernel_benchmark.py").resolve()
     options.html = [item.expanduser().resolve() for item in options.html]
     options.scripts = {}
     for raw in options.script:
@@ -361,6 +669,14 @@ def main() -> int:
                      options.vspipe, options.vs_python):
         if not required.is_file():
             raise FileNotFoundError(required)
+    if options.source_plugin and not options.source_plugin.is_file():
+        raise FileNotFoundError(options.source_plugin)
+    if options.source_prefer_hw < 0 or options.source_prefer_hw > 7:
+        raise ValueError("--source-prefer-hw must be between 0 and 7")
+    if options.source_ff_loglevel < 0 or options.source_ff_loglevel > 8:
+        raise ValueError("--source-ff-loglevel must be between 0 and 8")
+    if options.source_rap_verification not in (-1, 0, 1):
+        raise ValueError("--source-rap-verification must be -1, 0, or 1")
 
     output_root = options.output_root.expanduser().resolve()
     if not options.skip_run:
@@ -389,6 +705,9 @@ def main() -> int:
             "--new-plugin", str(options.new_plugin),
             "--vspipe", str(options.vspipe),
             "--source-filter", options.source_filter,
+            "--source-prefer-hw", str(options.source_prefer_hw),
+            "--source-ff-loglevel", str(options.source_ff_loglevel),
+            "--source-rap-verification", str(options.source_rap_verification),
             "--frames", "4000",
             "--src-height", "810",
             "--base-height", "1000",
@@ -398,7 +717,27 @@ def main() -> int:
             "--kernels", *[name for name, _ in KERNELS],
             "--output", str(fixed_output),
         ]
+        if options.source_plugin:
+            fixed_command.extend(["--source-plugin", str(options.source_plugin)])
+        if options.source_decoder:
+            fixed_command.extend(["--source-decoder", options.source_decoder])
         run(fixed_command, "fixed kernel full old/new")
+        blank_output = output_root / "blank-fixed-kernel-digimon-810p-release-20260805"
+        blank_command = [
+            options.python,
+            str(options.blank_runner),
+            "--old-plugin", str(options.old_plugin),
+            "--new-plugin", str(options.new_plugin),
+            "--vspipe", str(options.vspipe),
+            "--frames", "8000",
+            "--src-height", "810",
+            "--base-height", "1000",
+            "--threads", *[str(item) for item in THREADS],
+            "--runs", "1",
+            "--kernels", *[name for name, _ in KERNELS],
+            "--output", str(blank_output),
+        ]
+        run(blank_command, "blank fixed kernel old/new")
     else:
         perf_results = {
             threads: read_json(output_root /
@@ -411,8 +750,11 @@ def main() -> int:
         output_root / "e2e-digimon-release-errors-r32t32" / "benchmark.json")
     fixed_result = read_json(
         output_root / "fixed-kernel-digimon-810p-release" / "benchmark.json")
+    blank_result = read_json(
+        output_root / "blank-fixed-kernel-digimon-810p-release-20260805" /
+        "benchmark.json")
     merge_report(options, options.release_output.expanduser().resolve(),
-                 perf_results, error_result, fixed_result)
+                 perf_results, error_result, fixed_result, blank_result)
     print(options.release_output.expanduser().resolve())
     return 0
 

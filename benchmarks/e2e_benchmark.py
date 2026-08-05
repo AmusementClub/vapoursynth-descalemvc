@@ -341,6 +341,10 @@ def run_vspipe(options, case: str, implementation: str, run: int) -> dict:
         "source_plugin": (str(Path(options.source_plugin).expanduser().resolve())
                           if options.source_plugin else ""),
         "source_filter": options.source_filter,
+        "source_decoder": options.source_decoder,
+        "source_prefer_hw": str(options.source_prefer_hw),
+        "source_ff_loglevel": str(options.source_ff_loglevel),
+        "source_rap_verification": str(options.source_rap_verification),
         "frame": str(RECIPE_FACTS[case]["frame"]),
         "threads": str(options.threads),
     }
@@ -456,9 +460,19 @@ def build_descale(core, implementation: str, source, candidate: dict,
     return output, arguments
 
 
-def open_source(core, source_filter: str, path: str):
+def open_source(core, source_filter: str, path: str, options=None):
     if source_filter == "lsmas":
-        return core.lsmas.LWLibavSource(path)
+        kwargs = {}
+        if options is not None:
+            if options.source_decoder:
+                kwargs["decoder"] = options.source_decoder
+            if options.source_prefer_hw:
+                kwargs["prefer_hw"] = options.source_prefer_hw
+            if options.source_ff_loglevel:
+                kwargs["ff_loglevel"] = options.source_ff_loglevel
+            if options.source_rap_verification >= 0:
+                kwargs["rap_verification"] = options.source_rap_verification
+        return core.lsmas.LWLibavSource(path, **kwargs)
     if source_filter == "ffms2":
         return core.ffms2.Source(path)
     if source_filter == "bestsource":
@@ -573,7 +587,7 @@ def worker_errors(options) -> int:
     load_vs_plugins(core, options)
     src8 = open_source(
         core, options.source_filter,
-        str(Path(options.source).expanduser().resolve()))
+        str(Path(options.source).expanduser().resolve()), options)
     source_frame = src8[RECIPE_FACTS[options.case]["frame"]]
     source_frame = core.std.ShufflePlanes(source_frame, 0, vs.GRAY)
     source = source_frame.resize.Point(format=vs.GRAYS)
@@ -701,6 +715,13 @@ def error_worker_command(options, case: str, output: Path,
     ]
     if options.source_plugin:
         command.extend(["--source-plugin", options.source_plugin])
+    if options.source_decoder:
+        command.extend(["--source-decoder", options.source_decoder])
+    command.extend([
+        "--source-prefer-hw", str(options.source_prefer_hw),
+        "--source-ff-loglevel", str(options.source_ff_loglevel),
+        "--source-rap-verification", str(options.source_rap_verification),
+    ])
     return command
 
 
@@ -1043,6 +1064,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--source-filter", choices=("lsmas", "ffms2", "bestsource"),
                         default=os.environ.get("DSMVC_SOURCE_FILTER", "lsmas"),
                         help="Decoder namespace; default preserves the training scripts.")
+    result.add_argument("--source-decoder", default=os.environ.get(
+        "DSMVC_SOURCE_DECODER", ""),
+        help="Preferred LSMASH/libavcodec decoder name(s).")
+    result.add_argument("--source-prefer-hw", type=int, default=int(
+        os.environ.get("DSMVC_SOURCE_PREFER_HW", "0")),
+        help="LSMASH prefer_hw mode; 0 keeps software default.")
+    result.add_argument("--source-ff-loglevel", type=int, default=int(
+        os.environ.get("DSMVC_SOURCE_FF_LOGLEVEL", "0")),
+        help="LSMASH FFmpeg log level, 0 is quiet.")
+    result.add_argument("--source-rap-verification", type=int, default=int(
+        os.environ.get("DSMVC_SOURCE_RAP_VERIFICATION", "-1")),
+        help="LSMASH RAP verification; -1 keeps plugin default.")
     result.add_argument("--vspipe", default=os.environ.get(
         "DSMVC_VSPIPE", ""))
     result.add_argument("--python", default=os.environ.get(
@@ -1108,6 +1141,12 @@ def main(options) -> int:
     if options.source_plugin and not Path(options.source_plugin).is_file():
         raise FileNotFoundError(
             f"source plugin does not exist: {options.source_plugin}")
+    if options.source_prefer_hw < 0 or options.source_prefer_hw > 7:
+        raise ValueError("--source-prefer-hw must be between 0 and 7")
+    if options.source_ff_loglevel < 0 or options.source_ff_loglevel > 8:
+        raise ValueError("--source-ff-loglevel must be between 0 and 8")
+    if options.source_rap_verification not in (-1, 0, 1):
+        raise ValueError("--source-rap-verification must be -1, 0, or 1")
     if (options.runs < 1 or options.requests < 1 or options.threads < 1
             or options.error_processes < 1 or options.error_threads < 0):
         raise ValueError(
@@ -1172,6 +1211,10 @@ def main(options) -> int:
         "source_plugin": (str(Path(options.source_plugin).resolve())
                           if options.source_plugin else None),
         "source_filter": options.source_filter,
+        "source_decoder": options.source_decoder,
+        "source_prefer_hw": options.source_prefer_hw,
+        "source_ff_loglevel": options.source_ff_loglevel,
+        "source_rap_verification": options.source_rap_verification,
         "runner_sha256": sha256_file(Path(__file__).resolve()),
         "vpy_sha256": sha256_file(
             Path(__file__).with_name("vspipe_e2e.vpy")),
