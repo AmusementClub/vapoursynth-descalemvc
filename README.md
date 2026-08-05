@@ -45,7 +45,7 @@ coefficients. Built-in plans use bounded exact-key single-flight LRU caching;
 sampling geometry is cached separately so Bicubic parameter families can reuse
 it. AVX2 packed plans are shared by filters that share a canonical plan.
 
-The Python wrapper is [python/dsmvc.py](python/dsmvc.py). It preserves the
+The Python wrapper is [dsmvc.py](dsmvc.py). It preserves the
 baseline RGB, YUV, GRAY, bit-depth, subsampling, `yuv444`, `gray`, and chroma
 conversion behavior while dispatching to `core.dsmvc`.
 
@@ -58,24 +58,6 @@ Requirements:
 - VapourSynth API3 headers
 - On Windows, Visual Studio 2022 with the x64 C++ workload
 
-Example for the target R57 installation:
-
-```powershell
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' `
-  -S . -B build -A x64 `
-  -DDSMVC_VAPOURSYNTH_SDK='D:\okegui\OKEGui\tools\vapoursynth\sdk' `
-  -DDSMVC_VS_PYTHON='D:\okegui\OKEGui\tools\vapoursynth\python.exe' `
-  -DDSMVC_BASELINE_PLUGIN='D:\okegui\OKEGui\tools\vapoursynth\vapoursynth64\plugins\descale.dll'
-
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' `
-  --build build --config Release --parallel
-
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe' `
-  --test-dir build -C Release --output-on-failure
-```
-
-The planner and CPU engine are built entirely from this repository. CMake does
-not fetch external source dependencies.
 
 The Release DLL is written to `build/Release/dsmvc.dll`. The build uses the
 static MSVC runtime so that an older runtime DLL bundled with a host cannot
@@ -91,7 +73,7 @@ curves outside the VapourSynth installation.
 
 For the real-video end-to-end comparison based on the supplied training HTML,
 `test_getfnative*.vpy`, and `test_selectkernel.vpy`, use
-[`benchmarks/e2e_benchmark.py`](benchmarks/e2e_benchmark.py). It accepts the
+`benchmarks/e2e_benchmark.py`. It accepts the
 explicit MKV, current plugin, original plugin, VapourSynth Python, and VSPipe
 paths, and writes paired performance and error reports.
 

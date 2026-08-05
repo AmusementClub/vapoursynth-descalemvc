@@ -70,7 +70,7 @@ foreach(_target dsmvc_engine dsmvc)
 endforeach()
 
 install(TARGETS dsmvc LIBRARY DESTINATION vapoursynth RUNTIME DESTINATION vapoursynth)
-install(FILES python/dsmvc.py DESTINATION python)
+install(FILES dsmvc.py DESTINATION python)
 install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md DESTINATION share/dsmvc)
 
 if(BUILD_TESTING)
