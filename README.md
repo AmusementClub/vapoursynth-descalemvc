@@ -74,8 +74,8 @@ Example for the target R57 installation:
   --test-dir build -C Release --output-on-failure
 ```
 
-If `DSMVC_GETNATIVE_SOURCE_DIR` is not set, CMake fetches the pinned
-GetNative-VF commit recorded in [CMakeLists.txt](CMakeLists.txt).
+The planner and CPU engine are built entirely from this repository. CMake does
+not fetch external source dependencies.
 
 The Release DLL is written to `build/Release/dsmvc.dll`. The build uses the
 static MSVC runtime so that an older runtime DLL bundled with a host cannot

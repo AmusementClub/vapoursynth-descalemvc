@@ -26,7 +26,7 @@
 13. `python/dsmvc.py`、`tests/engine_tests.cpp`、`tests/vs_integration.py`
 14. `benchmarks/README.md`、`benchmarks/vspipe_benchmark.vpy`、`benchmarks/benchmark.py`，以及 pack 中的 profile/consolidation 脚本
 
-如果源码只存在于 pack 中，请优先使用 `PACK_ROOT/code/`。不要解压、生成临时源码副本或修改原始仓库/pack；如果某个文件只存在于 source zip 且当前工具不能直接读取，就标注“未直接验证”，不要为了读取它运行解压或构建步骤。旧版 `descale.dll` 可能不在交付包中；若无法取得旧版源码，只能使用公开行为、签名、测试和 benchmark 事实，不能臆测旧实现细节。GetNative-VF 依赖可能不在 pack 中；请从 `CMakeLists.txt` 的 pinned commit 和可用静态源码核实，缺失时明确标注“未直接验证”。
+如果源码只存在于 pack 中，请优先使用 `PACK_ROOT/code/`。不要解压、生成临时源码副本或修改原始仓库/pack；如果某个文件只存在于 source zip 且当前工具不能直接读取，就标注“未直接验证”，不要为了读取它运行解压或构建步骤。旧版 `descale.dll` 可能不在交付包中；若无法取得旧版源码，只能使用公开行为、签名、测试和 benchmark 事实，不能臆测旧实现细节。GetNative-VF 仅作为外部算法参考，不是构建依赖；缺少其源码时明确标注哪些对比未直接验证。
 
 ## 证据优先级
 
@@ -86,7 +86,7 @@
 
 ### 2. Planner 前端和数学算法
 
-重点审阅 `src/axis_plan.cpp`、GetNative-VF planner 接口和 `include/dsmvc/engine.hpp`：
+重点审阅 `src/axis_plan.cpp`、`include/dsmvc/engine.hpp`，并与 GetNative-VF planner 算法对照：
 
 1. 逆向几何的 ratio、pixel center、active length、shift、source/destination 尺寸、half-open/closed 区间是否与 descale 的行为一致。
 2. mirror、repeat、zero border 的边界映射是否在负坐标、最后一个像素、单像素/极小尺寸、奇偶尺寸和极端 shift 下正确；是否存在 `size - 0.5`、舍入、负零、NaN、Inf 或整数溢出问题。

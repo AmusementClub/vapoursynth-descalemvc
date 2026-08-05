@@ -835,8 +835,6 @@ def parse_build_info(options) -> dict:
         "compiler": compiler,
         "compiler_id": compiler_id,
         "compiler_version": compiler_version,
-        "getnative_source": values.get("DSMVC_GETNATIVE_SOURCE_DIR"),
-        "getnative_commit": "d64af6caa6c18d670eda1f25ee69fb47f5313b69",
         "msvc_runtime": "static (/MT)",
     }
 

@@ -11,6 +11,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -18,9 +19,9 @@
 #include <utility>
 #include <vector>
 
-// The inverse geometry and banded LDLT strategy follow GetNative-VF's planner,
-// which is independently expressed from Frechdachs/descale. This variant omits
-// the zimg forward projection because dsmvc only executes the inverse solve.
+// This inverse-only planner follows the descale sampling geometry and banded
+// LDLT strategy. It omits forward projection data because dsmvc only executes
+// the inverse solve.
 
 namespace dsmvc {
 namespace {
@@ -39,7 +40,7 @@ struct PlanKey {
     std::int32_t taps;
     std::uint64_t b;
     std::uint64_t c;
-    getnative::BorderMode border;
+    BorderMode border;
 
     friend bool operator==(const PlanKey &, const PlanKey &) = default;
 };
@@ -50,7 +51,7 @@ struct GeometryKey {
     std::uint64_t active_length;
     std::uint64_t shift;
     std::int32_t support;
-    getnative::BorderMode border;
+    BorderMode border;
 
     friend bool operator==(const GeometryKey &, const GeometryKey &) = default;
 };
@@ -247,6 +248,94 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
                        : std::floor(value + 0.49999999999999994);
 }
 
+[[nodiscard]] constexpr double square(double value) noexcept {
+    return value * value;
+}
+
+[[nodiscard]] constexpr double cube(double value) noexcept {
+    return value * value * value;
+}
+
+[[nodiscard]] double sinc(double value) noexcept {
+    if (value == 0.0) return 1.0;
+    const double scaled = std::numbers::pi * value;
+    return std::sin(scaled) / scaled;
+}
+
+[[nodiscard]] double filter_weight(
+    const KernelSpec &kernel, double distance) noexcept {
+    double x = std::abs(distance);
+    switch (kernel.kind) {
+    case KernelKind::bilinear:
+        return std::max(1.0 - x, 0.0);
+    case KernelKind::bicubic:
+        if (x < 1.0) {
+            return ((12.0 - 9.0 * kernel.b - 6.0 * kernel.c) * cube(x)
+                    + (-18.0 + 12.0 * kernel.b + 6.0 * kernel.c) * square(x)
+                    + (6.0 - 2.0 * kernel.b)) / 6.0;
+        }
+        if (x < 2.0) {
+            return ((-kernel.b - 6.0 * kernel.c) * cube(x)
+                    + (6.0 * kernel.b + 30.0 * kernel.c) * square(x)
+                    + (-12.0 * kernel.b - 48.0 * kernel.c) * x
+                    + (8.0 * kernel.b + 24.0 * kernel.c)) / 6.0;
+        }
+        return 0.0;
+    case KernelKind::lanczos:
+        return kernel.taps > 0 && x < static_cast<double>(kernel.taps)
+            ? sinc(x) * sinc(x / static_cast<double>(kernel.taps)) : 0.0;
+    case KernelKind::spline16:
+        if (x < 1.0) {
+            return 1.0 - x / 5.0 - 9.0 * square(x) / 5.0 + cube(x);
+        }
+        if (x < 2.0) {
+            x -= 1.0;
+            return -7.0 * x / 15.0 + 4.0 * square(x) / 5.0 - cube(x) / 3.0;
+        }
+        return 0.0;
+    case KernelKind::spline36:
+        if (x < 1.0) {
+            return 1.0 - 3.0 * x / 209.0 - 453.0 * square(x) / 209.0
+                + 13.0 * cube(x) / 11.0;
+        }
+        if (x < 2.0) {
+            x -= 1.0;
+            return -156.0 * x / 209.0 + 270.0 * square(x) / 209.0
+                - 6.0 * cube(x) / 11.0;
+        }
+        if (x < 3.0) {
+            x -= 2.0;
+            return 26.0 * x / 209.0 - 45.0 * square(x) / 209.0
+                + cube(x) / 11.0;
+        }
+        return 0.0;
+    case KernelKind::spline64:
+        if (x < 1.0) {
+            return 1.0 - 3.0 * x / 2911.0 - 6387.0 * square(x) / 2911.0
+                + 49.0 * cube(x) / 41.0;
+        }
+        if (x < 2.0) {
+            x -= 1.0;
+            return -2328.0 * x / 2911.0 + 4032.0 * square(x) / 2911.0
+                - 24.0 * cube(x) / 41.0;
+        }
+        if (x < 3.0) {
+            x -= 2.0;
+            return 582.0 * x / 2911.0 - 1008.0 * square(x) / 2911.0
+                + 6.0 * cube(x) / 41.0;
+        }
+        if (x < 4.0) {
+            x -= 3.0;
+            return -97.0 * x / 2911.0 + 168.0 * square(x) / 2911.0
+                - cube(x) / 41.0;
+        }
+        return 0.0;
+    case KernelKind::custom:
+        return 0.0;
+    }
+    return 0.0;
+}
+
 [[nodiscard]] std::size_t checked_elements(
     std::int32_t rows, std::int32_t width, const char *name) {
     const auto row_count = static_cast<std::size_t>(rows);
@@ -259,11 +348,11 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
 }
 
 [[nodiscard]] std::int32_t border_index(
-    double pixel_center, std::int32_t size, getnative::BorderMode border) {
+    double pixel_center, std::int32_t size, BorderMode border) {
     double mapped = pixel_center;
     if (pixel_center < 0.0 || pixel_center >= static_cast<double>(size)) {
-        if (border == getnative::BorderMode::zero) return -1;
-        if (border == getnative::BorderMode::repeat) {
+        if (border == BorderMode::zero) return -1;
+        if (border == BorderMode::repeat) {
             mapped = pixel_center < 0.0 ? 0.0 : static_cast<double>(size) - 0.5;
         } else {
             mapped = pixel_center < 0.0
@@ -309,19 +398,6 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
         throw std::invalid_argument("filter support is invalid or too large");
     }
     return support;
-}
-
-[[nodiscard]] getnative::Filter to_filter(const KernelSpec &kernel) {
-    switch (kernel.kind) {
-    case KernelKind::bilinear: return getnative::Filter::bilinear();
-    case KernelKind::bicubic: return getnative::Filter::bicubic(kernel.b, kernel.c);
-    case KernelKind::lanczos: return getnative::Filter::lanczos(kernel.taps);
-    case KernelKind::spline16: return getnative::Filter::spline16();
-    case KernelKind::spline36: return getnative::Filter::spline36();
-    case KernelKind::spline64: return getnative::Filter::spline64();
-    case KernelKind::custom: break;
-    }
-    throw std::invalid_argument("custom kernels require a callback");
 }
 
 [[nodiscard]] PlanKey plan_key(const AxisRequest &request) noexcept {
@@ -442,7 +518,6 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
     result.offsets.push_back(0U);
 
     const bool custom = request.kernel.kind == KernelKind::custom;
-    const auto filter = custom ? getnative::Filter{} : to_filter(request.kernel);
     std::vector<double> tap_weights(static_cast<std::size_t>(tap_count));
     std::vector<double> coalesced(static_cast<std::size_t>(tap_count));
     std::vector<bool> seen(static_cast<std::size_t>(tap_count));
@@ -454,7 +529,8 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
             const double distance = geometry.distances[
                 row_base + static_cast<std::size_t>(tap)];
             const double weight = custom
-                ? custom_kernel(std::abs(distance)) : filter.weight(distance);
+                ? custom_kernel(std::abs(distance))
+                : filter_weight(request.kernel, distance);
             if (!std::isfinite(weight)) {
                 throw std::runtime_error("filter returned a non-finite value");
             }

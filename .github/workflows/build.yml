@@ -45,14 +45,6 @@ jobs:
           sparse-checkout: include
           persist-credentials: false
 
-      - name: Check out GetNative-VF
-        uses: actions/checkout@v4
-        with:
-          repository: MysteryDove/GetNative-VF
-          ref: d64af6caa6c18d670eda1f25ee69fb47f5313b69
-          path: dependencies/getnative-vf
-          persist-credentials: false
-
       - name: Configure
         shell: bash
         run: >-
@@ -61,7 +53,6 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DBUILD_TESTING=ON
           -DDSMVC_VAPOURSYNTH_SDK="${{ github.workspace }}/dependencies/vapoursynth"
-          -DDSMVC_GETNATIVE_SOURCE_DIR="${{ github.workspace }}/dependencies/getnative-vf"
 
       - name: Build
         run: cmake --build build --config Release --parallel

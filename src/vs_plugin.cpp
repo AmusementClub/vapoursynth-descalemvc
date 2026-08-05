@@ -23,6 +23,7 @@ namespace {
 
 using dsmvc::AxisRequest;
 using dsmvc::BackendKind;
+using dsmvc::BorderMode;
 using dsmvc::CpuExecutor;
 using dsmvc::CpuPath;
 using dsmvc::CustomKernel;
@@ -41,7 +42,7 @@ struct ParsedArguments {
     double src_top = 0.0;
     double src_width = 0.0;
     double src_height = 0.0;
-    getnative::BorderMode border = getnative::BorderMode::mirror;
+    BorderMode border = BorderMode::mirror;
     int border_value = 0;
     int force = 0;
     int force_h = 0;
@@ -275,9 +276,9 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     parsed.src_width = get_float(in, "src_width", static_cast<double>(parsed.width), vsapi);
     parsed.src_height = get_float(in, "src_height", static_cast<double>(parsed.height), vsapi);
     parsed.border_value = get_int(in, "border_handling", 0, vsapi);
-    parsed.border = parsed.border_value == 1 ? getnative::BorderMode::zero
-        : parsed.border_value == 2 ? getnative::BorderMode::repeat
-                                   : getnative::BorderMode::mirror;
+    parsed.border = parsed.border_value == 1 ? BorderMode::zero
+        : parsed.border_value == 2 ? BorderMode::repeat
+                                   : BorderMode::mirror;
     parsed.force = get_int(in, "force", 0, vsapi);
     parsed.force_h = get_int(in, "force_h", parsed.force, vsapi);
     parsed.force_v = get_int(in, "force_v", parsed.force, vsapi);

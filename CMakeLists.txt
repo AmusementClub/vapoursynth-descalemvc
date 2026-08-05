@@ -9,32 +9,10 @@ if(MSVC)
 endif()
 
 include(CTest)
-include(FetchContent)
 
 set(DSMVC_VAPOURSYNTH_SDK "" CACHE PATH "Path to the VapourSynth SDK directory")
-set(DSMVC_GETNATIVE_SOURCE_DIR "" CACHE PATH "Path to a pinned GetNative-VF checkout")
 set(DSMVC_VS_PYTHON "" CACHE FILEPATH "Python executable from the target VapourSynth environment")
 set(DSMVC_BASELINE_PLUGIN "" CACHE FILEPATH "Baseline descale plugin used by integration tests")
-
-if(DSMVC_GETNATIVE_SOURCE_DIR)
-    set(DSMVC_GETNATIVE_ROOT "${DSMVC_GETNATIVE_SOURCE_DIR}")
-else()
-    FetchContent_Declare(
-        dsmvc_getnative
-        GIT_REPOSITORY https://github.com/MysteryDove/GetNative-VF.git
-        GIT_TAG d64af6caa6c18d670eda1f25ee69fb47f5313b69
-        GIT_SHALLOW FALSE
-    )
-    FetchContent_GetProperties(dsmvc_getnative)
-    if(NOT dsmvc_getnative_POPULATED)
-        FetchContent_Populate(dsmvc_getnative)
-    endif()
-    set(DSMVC_GETNATIVE_ROOT "${dsmvc_getnative_SOURCE_DIR}")
-endif()
-
-if(NOT EXISTS "${DSMVC_GETNATIVE_ROOT}/engine/include/getnative/axis_plan.hpp")
-    message(FATAL_ERROR "DSMVC_GETNATIVE_SOURCE_DIR is not a GetNative-VF checkout")
-endif()
 
 if(DSMVC_VAPOURSYNTH_SDK)
     set(_dsmvc_vs_hints "${DSMVC_VAPOURSYNTH_SDK}/include")
@@ -53,7 +31,6 @@ set(DSMVC_ENGINE_SOURCES
     src/axis_plan.cpp
     src/backend.cpp
     src/cpu_executor.cpp
-    "${DSMVC_GETNATIVE_ROOT}/engine/src/planner/filter.cpp"
 )
 
 set(DSMVC_CAN_BUILD_AVX2 OFF)
@@ -64,13 +41,7 @@ endif()
 
 add_library(dsmvc_engine STATIC ${DSMVC_ENGINE_SOURCES})
 target_compile_features(dsmvc_engine PUBLIC cxx_std_23)
-target_include_directories(dsmvc_engine
-    PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${DSMVC_GETNATIVE_ROOT}/engine/include"
-    PRIVATE
-        "${DSMVC_GETNATIVE_ROOT}/engine/src/planner"
-)
+target_include_directories(dsmvc_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set_target_properties(dsmvc_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(DSMVC_CAN_BUILD_AVX2)

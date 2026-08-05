@@ -10,8 +10,6 @@
 #include <string_view>
 #include <vector>
 
-#include <getnative/axis_plan.hpp>
-
 namespace dsmvc {
 
 enum class KernelKind : std::uint8_t {
@@ -38,6 +36,12 @@ enum class CpuPath : std::uint8_t {
     avx2,
 };
 
+enum class BorderMode : std::uint8_t {
+    zero,
+    repeat,
+    mirror,
+};
+
 struct KernelSpec {
     KernelKind kind = KernelKind::bicubic;
     std::int32_t taps = 3;
@@ -51,14 +55,13 @@ struct AxisRequest {
     double active_length = 0.0;
     double shift = 0.0;
     KernelSpec kernel{};
-    getnative::BorderMode border = getnative::BorderMode::mirror;
+    BorderMode border = BorderMode::mirror;
 };
 
 using CustomKernel = std::function<double(double)>;
 
-// Immutable inverse-only planner output. The CPU descale executor never uses
-// GetNative's forward projection table, so keeping it in every VS node wastes
-// planner time and resident memory.
+// Immutable inverse-only planner output. The CPU descale executor does not
+// need a forward projection table, so plans retain only inverse coefficients.
 struct AxisPlan {
     std::int32_t source_size = 0;
     std::int32_t destination_size = 0;
