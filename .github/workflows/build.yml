@@ -23,12 +23,15 @@ jobs:
           - os: windows-2022
             artifact: dsmvc-windows-x64
             cmake-architecture: -A x64
+            enable-cuda: true
           - os: macos-15
             artifact: dsmvc-macos-arm64
             cmake-architecture: -DCMAKE_OSX_ARCHITECTURES=arm64
+            enable-cuda: false
           - os: ubuntu-24.04
             artifact: dsmvc-linux-x64
             cmake-architecture: ""
+            enable-cuda: true
 
     steps:
       - name: Check out dsmvc
@@ -45,6 +48,15 @@ jobs:
           sparse-checkout: include
           persist-credentials: false
 
+      - name: Install CUDA Toolkit
+        if: matrix.enable-cuda
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: 13.2.0
+          method: network
+          sub-packages: '["nvcc", "cuobjdump", "cudart"]'
+          log-file-suffix: ${{ matrix.os }}
+
       - name: Configure
         shell: bash
         run: >-
@@ -52,6 +64,7 @@ jobs:
           ${{ matrix.cmake-architecture }}
           -DCMAKE_BUILD_TYPE=Release
           -DBUILD_TESTING=ON
+          -DDSMVC_ENABLE_CUDA=${{ matrix.enable-cuda }}
           -DDSMVC_VAPOURSYNTH_SDK="${{ github.workspace }}/dependencies/vapoursynth"
 
       - name: Build

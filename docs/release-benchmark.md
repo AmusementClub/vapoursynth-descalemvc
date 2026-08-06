@@ -7,13 +7,13 @@ This package compares the current Release build against the original descale plu
 
 | Workload | Result |
 |---|---:|
-| E2E getfnative candidates | 358.623 candidates/s at R32T32 |
+| E2E getfnative candidates | 361.447 candidates/s at R32T32 |
 | Fixed kernel coverage | 40 algorithm/thread/implementation cases, 4,000 frames each |
 | BlankClip kernel coverage | 80 implementation/thread/kernel cases, 8,000 frames each |
 | Error coverage | 34,101 candidates across three recipes |
 
-At R1T1, the current Release is substantially faster on the complete candidate scans: `getfnative` 13.569 -> 178.114 candidates/s (13.13x), `getfnative_v2` 3.10x, and `selectkernel` 6.02x.
-At R32T32, the gains narrow to 2.56x-6.45x because the workload reaches this machine's shared memory data-movement ceiling. The fixed-kernel R8-R32 results show the same convergence: available memory stays high, so the bottleneck is local memory bandwidth and/or cache/DRAM access and queueing latency rather than capacity.
+At R1T1, the current Release is substantially faster on the complete candidate scans: `getfnative` 13.569 -> 178.796 candidates/s (13.18x), `getfnative_v2` 3.11x, and `selectkernel` 6.07x.
+At R32T32, the gains narrow to 2.63x-6.50x because the workload reaches this machine's shared memory data-movement ceiling. The fixed-kernel R8-R32 results show the same convergence: available memory stays high, so the bottleneck is local memory bandwidth and/or cache/DRAM access and queueing latency rather than capacity.
 A DDR5 platform is therefore expected to improve the high-thread results by raising the memory-system ceiling, especially when channel configuration and timings are favorable. The gain should be treated as an upper-bound improvement opportunity, not a guaranteed linear speedup, because the graph still contains planner, synchronization, and frame-movement overhead.
 
 ## Test System and Run Configuration
@@ -60,9 +60,9 @@ The chart reports candidates per second for the complete candidate graph. It inc
 
 | Case | R1T1 old -> new | R8T8 old -> new | R16T16 old -> new | R32T32 old -> new |
 |---|---:|---:|---:|---:|
-| `getfnative` | 13.569 -> 178.114 (13.13x) | 55.093 -> 391.178 (7.10x) | 57.472 -> 373.662 (6.50x) | 55.581 -> 358.623 (6.45x) |
-| `getfnative_v2` | 109.425 -> 339.658 (3.10x) | 164.063 -> 442.975 (2.70x) | 163.007 -> 427.313 (2.62x) | 159.571 -> 408.623 (2.56x) |
-| `selectkernel` | 18.700 -> 112.489 (6.02x) | 49.605 -> 130.049 (2.62x) | 51.893 -> 129.004 (2.49x) | 51.218 -> 126.175 (2.46x) |
+| `getfnative` | 13.569 -> 178.796 (13.18x) | 55.093 -> 400.023 (7.26x) | 57.472 -> 378.583 (6.59x) | 55.581 -> 361.447 (6.50x) |
+| `getfnative_v2` | 109.425 -> 340.156 (3.11x) | 164.063 -> 451.760 (2.75x) | 163.007 -> 439.617 (2.70x) | 159.571 -> 419.635 (2.63x) |
+| `selectkernel` | 18.700 -> 113.573 (6.07x) | 49.605 -> 135.703 (2.74x) | 51.893 -> 132.263 (2.55x) | 51.218 -> 121.554 (2.37x) |
 
 ## E2E Error Comparison
 
@@ -109,13 +109,13 @@ Each cell is `old FPS -> current Release FPS (speedup)` for 8,000 frames from an
 
 | Kernel | R1T1 | R8T8 | R16T16 | R32T32 |
 |---|---:|---:|---:|---:|
-| `bilinear` | 905.429 -> 1118.063 (1.23x) | 864.647 -> 1089.204 (1.26x) | 767.385 -> 1059.942 (1.38x) | 717.039 -> 1029.197 (1.44x) |
-| `bicubic (0, 0.5)` | 523.091 -> 920.558 (1.76x) | 794.589 -> 1146.916 (1.44x) | 766.976 -> 1092.015 (1.42x) | 715.681 -> 1032.368 (1.44x) |
-| `lanczos2` | 524.669 -> 916.095 (1.75x) | 799.986 -> 1139.471 (1.42x) | 771.968 -> 1091.078 (1.41x) | 715.580 -> 1028.773 (1.44x) |
-| `lanczos3` | 256.213 -> 642.088 (2.51x) | 785.503 -> 1068.997 (1.36x) | 770.586 -> 1105.402 (1.43x) | 702.963 -> 1040.409 (1.48x) |
-| `lanczos4` | 196.204 -> 552.692 (2.82x) | 764.390 -> 973.509 (1.27x) | 766.360 -> 1114.636 (1.45x) | 696.529 -> 1033.407 (1.48x) |
-| `lanczos5` | 156.652 -> 428.908 (2.74x) | 727.444 -> 859.585 (1.18x) | 761.272 -> 1082.981 (1.42x) | 693.835 -> 1014.916 (1.46x) |
-| `lanczos6` | 129.671 -> 382.282 (2.95x) | 678.308 -> 767.966 (1.13x) | 759.645 -> 1041.396 (1.37x) | 692.513 -> 977.961 (1.41x) |
-| `spline16` | 523.460 -> 916.940 (1.75x) | 782.897 -> 1125.032 (1.44x) | 771.402 -> 1092.939 (1.42x) | 717.221 -> 1025.248 (1.43x) |
-| `spline36` | 256.828 -> 654.828 (2.55x) | 789.201 -> 1101.847 (1.40x) | 770.546 -> 1112.049 (1.44x) | 705.717 -> 1037.778 (1.47x) |
-| `spline64` | 195.770 -> 554.729 (2.83x) | 756.119 -> 992.142 (1.31x) | 768.937 -> 1092.615 (1.42x) | 699.173 -> 1032.725 (1.48x) |
+| `bilinear` | 905.429 -> 1987.081 (2.19x) | 864.647 -> 1212.995 (1.40x) | 767.385 -> 1205.674 (1.57x) | 717.039 -> 1054.317 (1.47x) |
+| `bicubic (0, 0.5)` | 523.091 -> 1405.558 (2.69x) | 794.589 -> 1210.783 (1.52x) | 766.976 -> 1194.648 (1.56x) | 715.681 -> 1043.564 (1.46x) |
+| `lanczos2` | 524.669 -> 1406.171 (2.68x) | 799.986 -> 1208.500 (1.51x) | 771.968 -> 1184.898 (1.53x) | 715.580 -> 1043.497 (1.46x) |
+| `lanczos3` | 256.213 -> 846.429 (3.30x) | 785.503 -> 1137.909 (1.45x) | 770.586 -> 1174.760 (1.52x) | 702.963 -> 1044.179 (1.49x) |
+| `lanczos4` | 196.204 -> 700.510 (3.57x) | 764.390 -> 967.554 (1.27x) | 766.360 -> 1144.399 (1.49x) | 696.529 -> 1035.326 (1.49x) |
+| `lanczos5` | 156.652 -> 522.378 (3.33x) | 727.444 -> 870.733 (1.20x) | 761.272 -> 1103.489 (1.45x) | 693.835 -> 1015.063 (1.46x) |
+| `lanczos6` | 129.671 -> 434.968 (3.35x) | 678.308 -> 774.256 (1.14x) | 759.645 -> 1057.559 (1.39x) | 692.513 -> 982.050 (1.42x) |
+| `spline16` | 523.460 -> 1377.237 (2.63x) | 782.897 -> 1215.002 (1.55x) | 771.402 -> 1197.272 (1.55x) | 717.221 -> 1040.051 (1.45x) |
+| `spline36` | 256.828 -> 832.300 (3.24x) | 789.201 -> 1162.324 (1.47x) | 770.546 -> 1179.764 (1.53x) | 705.717 -> 1041.521 (1.48x) |
+| `spline64` | 195.770 -> 708.200 (3.62x) | 756.119 -> 1003.110 (1.33x) | 768.937 -> 1136.727 (1.48x) | 699.173 -> 1038.158 (1.48x) |

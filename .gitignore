@@ -39,6 +39,7 @@ CMakeUserPresets.json
 # Reproducible benchmark output and profiler data
 /benchmark-results/
 /benchmark-results-*/
+/profile-results/
 *.uprof
 *.profraw
 *.gcda
