@@ -24,6 +24,11 @@ struct alignas(16) ScratchVector {
     float lanes[4];
 };
 
+struct NeonPair {
+    float32x4_t first;
+    float32x4_t second;
+};
+
 DSMVC_FORCE_INLINE void transpose4(float32x4_t &row0, float32x4_t &row1,
                                    float32x4_t &row2,
                                    float32x4_t &row3) noexcept {
@@ -100,6 +105,67 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
     return sum;
 }
 
+[[nodiscard]] DSMVC_FORCE_INLINE NeonPair multiply_transpose_pair(
+    const detail::PackedCpuPlan &packed, const float *scratch_first,
+    const float *scratch_second, std::int32_t row) noexcept {
+    NeonPair sum{vdupq_n_f32(0.0F), vdupq_n_f32(0.0F)};
+    const auto left = packed.weights_left[static_cast<std::size_t>(row)];
+    const auto right = packed.weights_right[static_cast<std::size_t>(row)];
+    const auto base = static_cast<std::size_t>(row)
+        * static_cast<std::size_t>(packed.weights_columns);
+    const auto tap_count = right - left;
+
+    if (tap_count == 2 || tap_count == 4
+        || tap_count == 6 || tap_count == 8) {
+        const auto *weights = packed.weights.data() + base;
+        const auto *source_first = scratch_first
+            + static_cast<std::size_t>(left) * 4U;
+        const auto *source_second = scratch_second
+            + static_cast<std::size_t>(left) * 4U;
+#define DSMVC_ACCUMULATE_TRANSPOSE_PAIR(TAP) \
+        do { \
+            const auto weight = vdupq_n_f32(weights[TAP]); \
+            sum.first = vfmaq_f32( \
+                sum.first, weight, \
+                vld1q_f32(source_first \
+                          + static_cast<std::size_t>(TAP) * 4U)); \
+            sum.second = vfmaq_f32( \
+                sum.second, weight, \
+                vld1q_f32(source_second \
+                          + static_cast<std::size_t>(TAP) * 4U)); \
+        } while (false)
+        if (tap_count >= 2) {
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(0);
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(1);
+        }
+        if (tap_count >= 4) {
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(2);
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(3);
+        }
+        if (tap_count >= 6) {
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(4);
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(5);
+        }
+        if (tap_count >= 8) {
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(6);
+            DSMVC_ACCUMULATE_TRANSPOSE_PAIR(7);
+        }
+#undef DSMVC_ACCUMULATE_TRANSPOSE_PAIR
+        return sum;
+    }
+
+    for (std::int32_t source = left; source < right; ++source) {
+        const auto weight = vdupq_n_f32(
+            packed.weights[base + static_cast<std::size_t>(source - left)]);
+        const auto offset = static_cast<std::size_t>(source) * 4U;
+        sum.first = vfmaq_f32(
+            sum.first, weight, vld1q_f32(scratch_first + offset));
+        sum.second = vfmaq_f32(
+            sum.second, weight, vld1q_f32(scratch_second + offset));
+    }
+    return sum;
+}
+
 [[nodiscard]] DSMVC_FORCE_INLINE float32x4_t forward_b1(
     const detail::PackedCpuPlan &packed, std::int32_t i, float32x4_t value,
     float32x4_t previous) noexcept {
@@ -143,6 +209,45 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
         value, vdupq_n_f32(packed.upper_l[stride + index]), next2);
     return vfmsq_f32(
         value, vdupq_n_f32(packed.upper_l[2U * stride + index]), next3);
+}
+
+[[nodiscard]] DSMVC_FORCE_INLINE NeonPair forward_b3_pair(
+    const detail::PackedCpuPlan &packed, std::int32_t i, NeonPair value,
+    NeonPair previous1, NeonPair previous2, NeonPair previous3) noexcept {
+    const auto stride = static_cast<std::size_t>(packed.padded_destination_size);
+    const auto index = static_cast<std::size_t>(i);
+    auto coefficient = vdupq_n_f32(packed.lower_ld[2U * stride + index]);
+    value.first = vfmsq_f32(value.first, coefficient, previous3.first);
+    value.second = vfmsq_f32(value.second, coefficient, previous3.second);
+    coefficient = vdupq_n_f32(packed.lower_ld[stride + index]);
+    value.first = vfmsq_f32(value.first, coefficient, previous2.first);
+    value.second = vfmsq_f32(value.second, coefficient, previous2.second);
+    coefficient = vdupq_n_f32(packed.lower_ld[index]);
+    value.first = vfmsq_f32(value.first, coefficient, previous1.first);
+    value.second = vfmsq_f32(value.second, coefficient, previous1.second);
+    const auto inverse = vdupq_n_f32(packed.inverse_diagonal[index]);
+    return {
+        vmulq_f32(value.first, inverse),
+        vmulq_f32(value.second, inverse),
+    };
+}
+
+[[nodiscard]] DSMVC_FORCE_INLINE NeonPair backward_b3_pair(
+    const detail::PackedCpuPlan &packed, std::int32_t i, NeonPair value,
+    NeonPair next1, NeonPair next2, NeonPair next3) noexcept {
+    const auto stride = static_cast<std::size_t>(packed.padded_destination_size);
+    const auto index = static_cast<std::size_t>(i);
+    auto coefficient = vdupq_n_f32(packed.upper_l[index]);
+    value.first = vfmsq_f32(value.first, coefficient, next1.first);
+    value.second = vfmsq_f32(value.second, coefficient, next1.second);
+    coefficient = vdupq_n_f32(packed.upper_l[stride + index]);
+    value.first = vfmsq_f32(value.first, coefficient, next2.first);
+    value.second = vfmsq_f32(value.second, coefficient, next2.second);
+    coefficient = vdupq_n_f32(packed.upper_l[2U * stride + index]);
+    return {
+        vfmsq_f32(value.first, coefficient, next3.first),
+        vfmsq_f32(value.second, coefficient, next3.second),
+    };
 }
 
 void solve_horizontal_b1(const detail::PackedCpuPlan &packed,
@@ -231,6 +336,81 @@ void solve_horizontal_b3(const detail::PackedCpuPlan &packed,
         vst1q_f32(output + stride + j, x1);
         vst1q_f32(output + 2 * stride + j, x2);
         vst1q_f32(output + 3 * stride + j, x3);
+    }
+}
+
+void solve_horizontal_b3_pair(const detail::PackedCpuPlan &packed,
+                              const float *scratch_first,
+                              const float *scratch_second, float *output,
+                              std::ptrdiff_t stride) noexcept {
+    const NeonPair zero{vdupq_n_f32(0.0F), vdupq_n_f32(0.0F)};
+    NeonPair previous1 = zero;
+    NeonPair previous2 = zero;
+    NeonPair previous3 = zero;
+    const auto padded = packed.padded_destination_size;
+    auto *output_second = output + 4 * stride;
+    for (std::int32_t j = 0; j < padded; j += 4) {
+#define DSMVC_FORWARD3_PAIR(LANE, PREVIOUS1, PREVIOUS2, PREVIOUS3) \
+        NeonPair x##LANE = forward_b3_pair( \
+            packed, j + LANE, \
+            multiply_transpose_pair( \
+                packed, scratch_first, scratch_second, j + LANE), \
+            PREVIOUS1, PREVIOUS2, PREVIOUS3)
+        DSMVC_FORWARD3_PAIR(0, previous1, previous2, previous3);
+        DSMVC_FORWARD3_PAIR(1, x0, previous1, previous2);
+        DSMVC_FORWARD3_PAIR(2, x1, x0, previous1);
+        DSMVC_FORWARD3_PAIR(3, x2, x1, x0);
+#undef DSMVC_FORWARD3_PAIR
+        previous1 = x3;
+        previous2 = x2;
+        previous3 = x1;
+        vst1q_f32(output + j, x0.first);
+        vst1q_f32(output + stride + j, x1.first);
+        vst1q_f32(output + 2 * stride + j, x2.first);
+        vst1q_f32(output + 3 * stride + j, x3.first);
+        vst1q_f32(output_second + j, x0.second);
+        vst1q_f32(output_second + stride + j, x1.second);
+        vst1q_f32(output_second + 2 * stride + j, x2.second);
+        vst1q_f32(output_second + 3 * stride + j, x3.second);
+    }
+
+    NeonPair next1 = zero;
+    NeonPair next2 = zero;
+    NeonPair next3 = zero;
+    for (std::int32_t j = padded - 4; j >= 0; j -= 4) {
+        NeonPair x0{
+            vld1q_f32(output + j),
+            vld1q_f32(output_second + j),
+        };
+        NeonPair x1{
+            vld1q_f32(output + stride + j),
+            vld1q_f32(output_second + stride + j),
+        };
+        NeonPair x2{
+            vld1q_f32(output + 2 * stride + j),
+            vld1q_f32(output_second + 2 * stride + j),
+        };
+        NeonPair x3{
+            vld1q_f32(output + 3 * stride + j),
+            vld1q_f32(output_second + 3 * stride + j),
+        };
+        x3 = backward_b3_pair(packed, j + 3, x3, next1, next2, next3);
+        x2 = backward_b3_pair(packed, j + 2, x2, x3, next1, next2);
+        x1 = backward_b3_pair(packed, j + 1, x1, x2, x3, next1);
+        x0 = backward_b3_pair(packed, j + 0, x0, x1, x2, x3);
+        next1 = x0;
+        next2 = x1;
+        next3 = x2;
+        transpose4(x0.first, x1.first, x2.first, x3.first);
+        transpose4(x0.second, x1.second, x2.second, x3.second);
+        vst1q_f32(output + j, x0.first);
+        vst1q_f32(output + stride + j, x1.first);
+        vst1q_f32(output + 2 * stride + j, x2.first);
+        vst1q_f32(output + 3 * stride + j, x3.first);
+        vst1q_f32(output_second + j, x0.second);
+        vst1q_f32(output_second + stride + j, x1.second);
+        vst1q_f32(output_second + 2 * stride + j, x2.second);
+        vst1q_f32(output_second + 3 * stride + j, x3.second);
     }
 }
 
@@ -386,6 +566,23 @@ void solve_horizontal_block(const AxisPlan &plan,
         solve_horizontal_generic<0>(
             plan, packed, scratch, output, output_stride);
     }
+}
+
+void solve_horizontal_b3_pair_block(
+    const detail::PackedCpuPlan &packed,
+    const float *input, std::ptrdiff_t input_stride,
+    float *output, std::ptrdiff_t output_stride,
+    float *scratch) noexcept {
+    const auto scratch_stride = static_cast<std::size_t>(
+        packed.padded_source_size) * 4U;
+    auto *scratch_second = scratch + scratch_stride;
+    transpose_source(
+        input, input_stride, packed.padded_source_size, scratch);
+    transpose_source(
+        input + 4 * input_stride, input_stride,
+        packed.padded_source_size, scratch_second);
+    solve_horizontal_b3_pair(
+        packed, scratch, scratch_second, output, output_stride);
 }
 
 DSMVC_FORCE_INLINE void multiply_columns_pair(
@@ -1528,11 +1725,26 @@ void inverse_rows_neon(const AxisPlan &plan,
         return;
     }
 
-    thread_local std::vector<ScratchVector> scratch;
-    scratch.resize(static_cast<std::size_t>(packed.padded_source_size));
-    auto *scratch_data = scratch.front().lanes;
     const auto complete_rows = row_count & ~3;
-    for (std::int32_t row = 0; row < complete_rows; row += 4) {
+    const bool pair_b3 = plan.half_bandwidth == 3 && complete_rows >= 8;
+    const auto scratch_blocks = pair_b3 ? 2U : 1U;
+    thread_local std::vector<ScratchVector> scratch;
+    scratch.resize(
+        static_cast<std::size_t>(packed.padded_source_size) * scratch_blocks);
+    auto *scratch_data = scratch.front().lanes;
+    std::int32_t row = 0;
+    if (pair_b3) {
+        const auto paired_rows = complete_rows & ~7;
+        for (; row < paired_rows; row += 8) {
+            solve_horizontal_b3_pair_block(
+                packed,
+                input + static_cast<std::ptrdiff_t>(row) * input_row_stride,
+                input_row_stride,
+                output + static_cast<std::ptrdiff_t>(row) * output_row_stride,
+                output_row_stride, scratch_data);
+        }
+    }
+    for (; row < complete_rows; row += 4) {
         solve_horizontal_block(
             plan, packed,
             input + static_cast<std::ptrdiff_t>(row) * input_row_stride,

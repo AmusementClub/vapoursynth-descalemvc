@@ -1087,6 +1087,22 @@ void test_b5_b7_executor_agreement() {
     }
 }
 
+void test_b3_neon_row_pair_agreement() {
+    if (!dsmvc::cpu_neon_available()) return;
+
+    const auto horizontal_b3 = make_plan(
+        dsmvc::KernelKind::bicubic, 1920, 1692,
+        1691.5555555555557, 0.2222222222221717);
+    require(horizontal_b3.half_bandwidth == 3,
+            "Bicubic did not produce half-bandwidth 3");
+    const dsmvc::CpuExecutor neon(dsmvc::CpuPath::neon);
+    for (const auto rows : {8, 9, 12, 13, 16, 17}) {
+        compare_rows(
+            neon, horizontal_b3, rows,
+            "NEON Bicubic b3 paired rows=" + std::to_string(rows));
+    }
+}
+
 void test_streamed_2d_executor_agreement() {
     const struct {
         dsmvc::KernelKind kind;
@@ -1289,6 +1305,7 @@ int main() {
         test_inverse_only_cache();
         test_large_support_compatibility();
         test_axis_plan_validation();
+        test_b3_neon_row_pair_agreement();
         test_b5_b7_executor_agreement();
         test_streamed_2d_executor_agreement();
         test_integer_2d_executor_agreement();
