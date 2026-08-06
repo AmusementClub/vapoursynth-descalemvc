@@ -42,7 +42,7 @@ BackendKind resolve_backend(BackendKind requested) {
     if (requested == BackendKind::cuda) {
         if (cuda_detail::backend_available()) return BackendKind::cuda;
         throw std::runtime_error(
-            "backend 'cuda' is compiled but no compatible CUDA device is available");
+            "backend 'cuda' is compiled but no CUDA device is available");
     }
 #endif
     throw std::runtime_error(std::string{"backend '"} + backend_name(requested)

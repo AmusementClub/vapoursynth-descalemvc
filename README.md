@@ -73,7 +73,8 @@ static MSVC runtime so that an older runtime DLL bundled with a host cannot
 change the STL synchronization ABI.
 
 The CUDA backend is optional and currently supports Windows and Linux with a
-CUDA Toolkit containing `nvcc`, `cuobjdump`, and `cuda.h`:
+CUDA Toolkit containing the CUDA compiler and static Runtime library.
+CUDA-enabled test builds also require `cuobjdump`:
 
 ```sh
 cmake -S . -B build-cuda \
@@ -82,11 +83,15 @@ cmake -S . -B build-cuda \
 cmake --build build-cuda --config Release --parallel
 ```
 
-The build embeds native SM75-SM121 kernels plus PTX fallbacks by default. The
-matrix is configurable with `DSMVC_CUDA_ARCHITECTURES` and
-`DSMVC_CUDA_PTX_ARCHITECTURES`; `DSMVC_CUDA_MIN_ARCHITECTURE` defaults to 75.
-The plugin loads the NVIDIA Driver API dynamically and does not require a CUDA
-Runtime DLL beside the plugin. At runtime, `DSMVC_CUDA_STREAMS` may be set to a
+The build embeds native SM75, SM86, SM89, and SM120 kernels by default, plus
+compute_75 and compute_120 PTX fallbacks. The matrix is configurable with
+`DSMVC_CUDA_ARCHITECTURES` and `DSMVC_CUDA_PTX_ARCHITECTURES`. Architectures
+without a native image use driver JIT compilation and may incur a first-run
+delay. The plugin statically links the official CUDA Runtime and therefore does
+not require a CUDA Runtime DLL or shared library beside it. CUDA Runtime device
+code, streams, and allocations use the device's primary context so they can
+coexist with other CUDA filters in the host process. At runtime,
+`DSMVC_CUDA_STREAMS` may be set to a
 value from 1 through 16. When unset, the runtime uses up to eight concurrent
 slots for 2D plans with half-bandwidth seven or greater, while narrower 2D and
 one-axis work remain limited to four. An explicit value applies uniformly to

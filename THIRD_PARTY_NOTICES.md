@@ -49,11 +49,20 @@ TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
 
 0. You just DO WHAT THE FUCK YOU WANT TO.
 
+## NVIDIA CUDA Runtime
+
+CUDA-enabled builds statically link the NVIDIA CUDA Runtime (`cudart_static`).
+The CUDA Runtime static libraries are redistributable components listed in
+Attachment A of the NVIDIA CUDA Toolkit End User License Agreement.
+
+Source and license: https://docs.nvidia.com/cuda/eula/
+
+Copyright (c) NVIDIA Corporation. All rights reserved.
+
 ## GetNative-VF
 
-The CUDA Driver API loading, fatbin packaging, pinned staging, plan packing,
-and inverse-axis kernel structure were adapted from the GetNative-VF CUDA
-backend.
+The CUDA pinned staging, plan packing, and inverse-axis kernel structure were
+adapted from the GetNative-VF CUDA backend.
 
 Source: https://github.com/MysteryDove/GetNative-VF
 

@@ -1,4 +1,4 @@
-#include "cuda_kernel.hpp"
+#include "cuda_launch.hpp"
 
 #include <cuda_runtime.h>
 
@@ -759,71 +759,6 @@ extern "C" __global__ void dsmvc_cuda_solve_vertical(
         output + column, source_width);
 }
 
-extern "C" __global__ void dsmvc_cuda_inverse_axis_batch(
-    const kernel::AxisBatchJobDescriptor *__restrict__ jobs) {
-    const auto &job = jobs[blockIdx.y];
-    const std::uint32_t vector =
-        blockIdx.x * blockDim.x + threadIdx.x;
-    if (vector >= job.vector_count) return;
-    const auto *input = reinterpret_cast<const float *>(job.input);
-    auto *output = reinterpret_cast<float *>(job.output);
-    inverse_axis(
-        job.plan,
-        reinterpret_cast<const std::uint32_t *>(job.transpose_offsets),
-        reinterpret_cast<const std::int32_t *>(job.transpose_indices),
-        reinterpret_cast<const float *>(job.transpose_weights),
-        reinterpret_cast<const float *>(job.lower_ld),
-        reinterpret_cast<const float *>(job.upper_l),
-        reinterpret_cast<const float *>(job.inverse_diagonal),
-        input + vector, job.vector_count,
-        output + vector, job.vector_count);
-}
-
-extern "C" __global__ void dsmvc_cuda_rhs_axis_batch(
-    const kernel::AxisBatchJobDescriptor *__restrict__ jobs) {
-    const auto &job = jobs[blockIdx.z];
-    const std::uint32_t vector =
-        blockIdx.x * blockDim.x + threadIdx.x;
-    const std::uint32_t index =
-        blockIdx.y * blockDim.y + threadIdx.y;
-    if (vector >= job.vector_count
-        || index >= job.plan.destination_size) return;
-
-    const auto *offsets = reinterpret_cast<const std::uint32_t *>(
-        job.transpose_offsets);
-    const auto *indices = reinterpret_cast<const std::int32_t *>(
-        job.transpose_indices);
-    const auto *weights = reinterpret_cast<const float *>(
-        job.transpose_weights);
-    const auto *input = reinterpret_cast<const float *>(job.input);
-    auto *output = reinterpret_cast<float *>(job.output);
-    float sum = 0.0F;
-    const std::uint32_t begin = offsets[index];
-    const std::uint32_t end = offsets[index + 1U];
-    for (std::uint32_t position = begin; position < end; ++position) {
-        const auto source = static_cast<std::uint32_t>(indices[position]);
-        sum = fmaf(
-            weights[position],
-            input[source * job.vector_count + vector], sum);
-    }
-    output[index * job.vector_count + vector] = sum;
-}
-
-extern "C" __global__ void dsmvc_cuda_solve_axis_batch(
-    const kernel::AxisBatchJobDescriptor *__restrict__ jobs) {
-    const auto &job = jobs[blockIdx.y];
-    const std::uint32_t vector =
-        blockIdx.x * blockDim.x + threadIdx.x;
-    if (vector >= job.vector_count) return;
-    auto *output = reinterpret_cast<float *>(job.output);
-    solve_axis(
-        job.plan,
-        reinterpret_cast<const float *>(job.lower_ld),
-        reinterpret_cast<const float *>(job.upper_l),
-        reinterpret_cast<const float *>(job.inverse_diagonal),
-        output + vector, job.vector_count);
-}
-
 extern "C" __global__ void dsmvc_cuda_convert_u8(
     const float *__restrict__ source,
     std::uint32_t element_count,
@@ -845,3 +780,167 @@ extern "C" __global__ void dsmvc_cuda_convert_u16(
         output[index] = convert_output<std::uint16_t>(source[index], conversion);
     }
 }
+
+namespace dsmvc::cuda_detail::cuda_launch {
+namespace {
+
+constexpr unsigned int rhs_vector_threads = 32U;
+constexpr unsigned int rhs_index_threads = 8U;
+constexpr unsigned int conversion_threads = 256U;
+
+[[nodiscard]] constexpr unsigned int divide_up(
+    std::uint32_t value, unsigned int divisor) noexcept {
+    return (value + divisor - 1U) / divisor;
+}
+
+[[nodiscard]] cudaError_t launch_status() noexcept {
+    return cudaGetLastError();
+}
+
+} // namespace
+
+cudaError_t transpose(
+    const float *source, std::uint32_t width, std::uint32_t height,
+    float *destination, cudaStream_t stream) {
+    dsmvc_cuda_transpose_f32<<<
+        dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
+        0U, stream>>>(source, width, height, destination);
+    return launch_status();
+}
+
+cudaError_t transpose(
+    const std::uint8_t *source, std::uint32_t width, std::uint32_t height,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    float *destination, cudaStream_t stream) {
+    dsmvc_cuda_transpose_u8<<<
+        dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
+        0U, stream>>>(source, width, height, conversion, destination);
+    return launch_status();
+}
+
+cudaError_t transpose(
+    const std::uint16_t *source, std::uint32_t width, std::uint32_t height,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    float *destination, cudaStream_t stream) {
+    dsmvc_cuda_transpose_u16<<<
+        dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
+        0U, stream>>>(source, width, height, conversion, destination);
+    return launch_status();
+}
+
+cudaError_t inverse_horizontal(
+    const float *source, std::uint32_t vector_count,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights, const float *lower, const float *upper,
+    const float *diagonal, float *output, bool column_major,
+    unsigned int threads, unsigned int shared_bytes, cudaStream_t stream) {
+    const dim3 grid(divide_up(vector_count, threads));
+    const dim3 block(threads);
+    if (column_major) {
+        dsmvc_cuda_inverse_horizontal_column_major<<<grid, block, 0U, stream>>>(
+            source, vector_count, plan, offsets, indices, weights,
+            lower, upper, diagonal, output);
+    } else {
+        dsmvc_cuda_inverse_horizontal<<<grid, block, shared_bytes, stream>>>(
+            source, vector_count, plan, offsets, indices, weights,
+            lower, upper, diagonal, output);
+    }
+    return launch_status();
+}
+
+cudaError_t inverse_vertical(
+    const float *source, std::uint32_t source_width,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights, const float *lower, const float *upper,
+    const float *diagonal, float *output, unsigned int threads,
+    cudaStream_t stream) {
+    dsmvc_cuda_inverse_vertical<<<divide_up(source_width, threads), threads,
+        0U, stream>>>(
+        source, source_width, plan, offsets, indices, weights,
+        lower, upper, diagonal, output);
+    return launch_status();
+}
+
+cudaError_t rhs_horizontal(
+    const float *source, std::uint32_t vector_count,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights, float *output, bool column_major,
+    cudaStream_t stream) {
+    const dim3 grid(
+        divide_up(vector_count, rhs_vector_threads),
+        divide_up(plan.destination_size, rhs_index_threads));
+    const dim3 block(rhs_vector_threads, rhs_index_threads);
+    if (column_major) {
+        dsmvc_cuda_rhs_horizontal_column_major<<<grid, block, 0U, stream>>>(
+            source, vector_count, plan, offsets, indices, weights, output);
+    } else {
+        dsmvc_cuda_rhs_horizontal<<<grid, block, 0U, stream>>>(
+            source, vector_count, plan, offsets, indices, weights, output);
+    }
+    return launch_status();
+}
+
+cudaError_t rhs_vertical(
+    const float *source, std::uint32_t source_width,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights, float *output, cudaStream_t stream) {
+    const dim3 grid(
+        divide_up(source_width, rhs_vector_threads),
+        divide_up(plan.destination_size, rhs_index_threads));
+    dsmvc_cuda_rhs_vertical<<<grid,
+        dim3(rhs_vector_threads, rhs_index_threads), 0U, stream>>>(
+        source, source_width, plan, offsets, indices, weights, output);
+    return launch_status();
+}
+
+cudaError_t solve_horizontal(
+    std::uint32_t vector_count, cuda_kernel::AxisPlanDescriptor plan,
+    const float *lower, const float *upper, const float *diagonal,
+    float *output, bool column_major, unsigned int threads,
+    unsigned int shared_bytes, cudaStream_t stream) {
+    const dim3 grid(divide_up(vector_count, threads));
+    if (column_major) {
+        dsmvc_cuda_solve_horizontal_column_major<<<grid, threads, 0U, stream>>>(
+            vector_count, plan, lower, upper, diagonal, output);
+    } else {
+        dsmvc_cuda_solve_horizontal<<<grid, threads, shared_bytes, stream>>>(
+            vector_count, plan, lower, upper, diagonal, output);
+    }
+    return launch_status();
+}
+
+cudaError_t solve_vertical(
+    std::uint32_t source_width, cuda_kernel::AxisPlanDescriptor plan,
+    const float *lower, const float *upper, const float *diagonal,
+    float *output, unsigned int threads, cudaStream_t stream) {
+    dsmvc_cuda_solve_vertical<<<divide_up(source_width, threads), threads,
+        0U, stream>>>(
+        source_width, plan, lower, upper, diagonal, output);
+    return launch_status();
+}
+
+cudaError_t convert(
+    const float *source, std::uint32_t element_count,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    std::uint8_t *output, cudaStream_t stream) {
+    dsmvc_cuda_convert_u8<<<divide_up(element_count, conversion_threads),
+        conversion_threads, 0U, stream>>>(
+        source, element_count, conversion, output);
+    return launch_status();
+}
+
+cudaError_t convert(
+    const float *source, std::uint32_t element_count,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    std::uint16_t *output, cudaStream_t stream) {
+    dsmvc_cuda_convert_u16<<<divide_up(element_count, conversion_threads),
+        conversion_threads, 0U, stream>>>(
+        source, element_count, conversion, output);
+    return launch_status();
+}
+
+} // namespace dsmvc::cuda_detail::cuda_launch

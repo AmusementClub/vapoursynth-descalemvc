@@ -16,12 +16,10 @@ set(DSMVC_BASELINE_PLUGIN "" CACHE FILEPATH "Baseline descale plugin used by int
 set(DSMVC_BASELINE_WRAPPER "" CACHE FILEPATH "Baseline descale.py used by integration tests")
 option(DSMVC_ENABLE_CUDA
        "Build the optional CUDA backend on Windows or Linux" OFF)
-set(DSMVC_CUDA_MIN_ARCHITECTURE "75" CACHE STRING
-    "Minimum compute capability accepted by the CUDA backend")
 set(DSMVC_CUDA_ARCHITECTURES
-    "75;80;86;87;88;89;90;100;103;110;120;121" CACHE STRING
-    "Native SM targets embedded in the CUDA fatbin")
-set(DSMVC_CUDA_PTX_ARCHITECTURES "75;121" CACHE STRING
+    "75;86;89;120" CACHE STRING
+    "Native SM targets embedded in the CUDA module")
+set(DSMVC_CUDA_PTX_ARCHITECTURES "75;120" CACHE STRING
     "Virtual compute targets embedded as CUDA PTX fallbacks")
 
 if(DSMVC_VAPOURSYNTH_SDK)
@@ -54,23 +52,13 @@ if(DSMVC_ENABLE_CUDA)
     if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(FATAL_ERROR "DSMVC_ENABLE_CUDA currently requires Windows or Linux")
     endif()
-    find_program(DSMVC_NVCC_EXECUTABLE
-        NAMES nvcc.exe nvcc
-        HINTS "$ENV{CUDA_PATH}/bin" "/usr/local/cuda/bin")
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
     find_program(DSMVC_CUOBJDUMP_EXECUTABLE
         NAMES cuobjdump.exe cuobjdump
-        HINTS "$ENV{CUDA_PATH}/bin" "/usr/local/cuda/bin")
-    find_path(DSMVC_CUDA_INCLUDE_DIR
-        NAMES cuda.h
-        HINTS "$ENV{CUDA_PATH}/include" "/usr/local/cuda/include")
-    if(NOT DSMVC_NVCC_EXECUTABLE OR NOT DSMVC_CUOBJDUMP_EXECUTABLE
-       OR NOT DSMVC_CUDA_INCLUDE_DIR)
-        message(FATAL_ERROR
-            "DSMVC_ENABLE_CUDA requires a CUDA Toolkit with nvcc, cuobjdump, and cuda.h")
-    endif()
-    if(NOT DSMVC_CUDA_MIN_ARCHITECTURE MATCHES "^[0-9]+$")
-        message(FATAL_ERROR
-            "DSMVC_CUDA_MIN_ARCHITECTURE must be one numeric SM value")
+        HINTS "${CUDAToolkit_BIN_DIR}")
+    if(BUILD_TESTING AND NOT DSMVC_CUOBJDUMP_EXECUTABLE)
+        message(FATAL_ERROR "CUDA artifact tests require cuobjdump")
     endif()
     if(DSMVC_CUDA_ARCHITECTURES STREQUAL ""
        OR DSMVC_CUDA_PTX_ARCHITECTURES STREQUAL "")
@@ -83,85 +71,19 @@ if(DSMVC_ENABLE_CUDA)
         if(NOT _architecture MATCHES "^[0-9]+$")
             message(FATAL_ERROR "CUDA architecture lists must contain numeric SM values")
         endif()
-        if(_architecture LESS DSMVC_CUDA_MIN_ARCHITECTURE)
-            message(FATAL_ERROR
-                "CUDA architecture ${_architecture} is below the configured minimum ${DSMVC_CUDA_MIN_ARCHITECTURE}")
-        endif()
     endforeach()
-    list(FIND DSMVC_CUDA_ARCHITECTURES
-         "${DSMVC_CUDA_MIN_ARCHITECTURE}" _minimum_native_index)
-    list(FIND DSMVC_CUDA_PTX_ARCHITECTURES
-         "${DSMVC_CUDA_MIN_ARCHITECTURE}" _minimum_ptx_index)
-    if(_minimum_native_index EQUAL -1 OR _minimum_ptx_index EQUAL -1)
-        message(FATAL_ERROR
-            "The minimum CUDA architecture must be present in native and PTX lists")
-    endif()
 
-    set(_dsmvc_cuda_code_args)
+    set(_dsmvc_cuda_architectures)
     foreach(_architecture IN LISTS DSMVC_CUDA_ARCHITECTURES)
-        list(APPEND _dsmvc_cuda_code_args
-            "--generate-code=arch=compute_${_architecture},code=sm_${_architecture}")
+        list(APPEND _dsmvc_cuda_architectures "${_architecture}-real")
     endforeach()
     foreach(_architecture IN LISTS DSMVC_CUDA_PTX_ARCHITECTURES)
-        list(APPEND _dsmvc_cuda_code_args
-            "--generate-code=arch=compute_${_architecture},code=compute_${_architecture}")
+        list(APPEND _dsmvc_cuda_architectures "${_architecture}-virtual")
     endforeach()
 
-    set(_dsmvc_cuda_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/cuda")
-    set(_dsmvc_cuda_fatbin "${_dsmvc_cuda_generated_dir}/dsmvc_cuda.fatbin")
-    set(_dsmvc_cuda_header "${_dsmvc_cuda_generated_dir}/dsmvc_cuda_fatbin.hpp")
-    set(_dsmvc_cuda_resource "${_dsmvc_cuda_generated_dir}/dsmvc_cuda_fatbin.rc")
-    set(_dsmvc_cuda_host_options)
-    if(CMAKE_HOST_WIN32)
-        list(APPEND _dsmvc_cuda_host_options -Xcompiler=/utf-8)
-    endif()
-    add_custom_command(
-        OUTPUT "${_dsmvc_cuda_fatbin}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_dsmvc_cuda_generated_dir}"
-        COMMAND "${DSMVC_NVCC_EXECUTABLE}"
-                --fatbin --cudart=none --machine=64 --std=c++17 -O3 -lineinfo
-                ${_dsmvc_cuda_host_options}
-                ${_dsmvc_cuda_code_args}
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/cuda"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/dsmvc_cuda.cu"
-                -o "${_dsmvc_cuda_fatbin}"
-        DEPENDS
-            src/cuda/dsmvc_cuda.cu
-            src/cuda/cuda_kernel.hpp
-        COMMENT "Building the dsmvc CUDA fatbin"
-        VERBATIM)
-    if(WIN32)
-        enable_language(RC)
-        configure_file(
-            cmake/cuda_fatbin_resource.hpp.in
-            "${_dsmvc_cuda_header}" @ONLY)
-        configure_file(
-            cmake/cuda_fatbin.rc.in
-            "${_dsmvc_cuda_resource}" @ONLY)
-        set_source_files_properties(
-            "${_dsmvc_cuda_resource}" PROPERTIES OBJECT_DEPENDS "${_dsmvc_cuda_fatbin}")
-        set(_dsmvc_cuda_embed_outputs "${_dsmvc_cuda_header}")
-        list(APPEND DSMVC_ENGINE_SOURCES src/cuda/cuda_fatbin_resource.cpp)
-    else()
-        add_custom_command(
-            OUTPUT "${_dsmvc_cuda_header}"
-            COMMAND "${CMAKE_COMMAND}"
-                    "-DINPUT=${_dsmvc_cuda_fatbin}"
-                    "-DOUTPUT=${_dsmvc_cuda_header}"
-                    -DSYMBOL=dsmvc_cuda_fatbin
-                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
-            DEPENDS
-                "${_dsmvc_cuda_fatbin}"
-                cmake/embed_binary.cmake
-            VERBATIM)
-        set(_dsmvc_cuda_embed_outputs "${_dsmvc_cuda_header}")
-    endif()
-    add_custom_target(dsmvc_cuda_fatbin
-        DEPENDS "${_dsmvc_cuda_fatbin}" ${_dsmvc_cuda_embed_outputs})
     list(APPEND DSMVC_ENGINE_SOURCES
-        src/cuda/cuda_driver.cpp
         src/cuda/cuda_executor.cpp
-        "${_dsmvc_cuda_header}")
+        src/cuda/dsmvc_cuda.cu)
 endif()
 
 add_library(dsmvc_engine STATIC ${DSMVC_ENGINE_SOURCES})
@@ -170,17 +92,17 @@ target_include_directories(dsmvc_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/incl
 set_target_properties(dsmvc_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(DSMVC_ENABLE_CUDA)
-    add_dependencies(dsmvc_engine dsmvc_cuda_fatbin)
-    target_compile_definitions(dsmvc_engine PRIVATE
-        DSMVC_HAS_CUDA=1
-        DSMVC_CUDA_MIN_ARCHITECTURE=${DSMVC_CUDA_MIN_ARCHITECTURE})
+    target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_CUDA=1)
     target_include_directories(dsmvc_engine PRIVATE
-        "${DSMVC_CUDA_INCLUDE_DIR}"
-        "${_dsmvc_cuda_generated_dir}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda")
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_link_libraries(dsmvc_engine PRIVATE ${CMAKE_DL_LIBS})
-    endif()
+    target_link_libraries(dsmvc_engine PRIVATE CUDA::cudart_static)
+    set_target_properties(dsmvc_engine PROPERTIES
+        CUDA_ARCHITECTURES "${_dsmvc_cuda_architectures}"
+        CUDA_RUNTIME_LIBRARY Static
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON)
+    target_compile_options(dsmvc_engine PRIVATE
+        "$<$<COMPILE_LANGUAGE:CUDA>:-O3;-lineinfo>")
 endif()
 
 if(DSMVC_CAN_BUILD_AVX2)
@@ -198,17 +120,15 @@ target_compile_features(dsmvc PRIVATE cxx_std_23)
 target_include_directories(dsmvc PRIVATE "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}")
 target_link_libraries(dsmvc PRIVATE dsmvc_engine)
 set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
-if(DSMVC_ENABLE_CUDA AND WIN32)
-    target_sources(dsmvc PRIVATE "${_dsmvc_cuda_resource}")
-    add_dependencies(dsmvc dsmvc_cuda_fatbin)
-endif()
 
 foreach(_target dsmvc_engine dsmvc)
     if(MSVC)
-        target_compile_options(${_target} PRIVATE /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_options(${_target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/EHsc;/fp:strict;/Zc:__cplusplus>")
         target_compile_definitions(${_target} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
     else()
-        target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+        target_compile_options(${_target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-ffp-contract=off>")
     endif()
 endforeach()
 
@@ -220,16 +140,12 @@ if(BUILD_TESTING)
     add_executable(dsmvc_engine_tests tests/engine_tests.cpp)
     target_compile_features(dsmvc_engine_tests PRIVATE cxx_std_23)
     target_link_libraries(dsmvc_engine_tests PRIVATE dsmvc_engine)
-    if(DSMVC_ENABLE_CUDA AND WIN32)
-        target_sources(dsmvc_engine_tests PRIVATE "${_dsmvc_cuda_resource}")
-        add_dependencies(dsmvc_engine_tests dsmvc_cuda_fatbin)
-    endif()
     add_test(NAME dsmvc_engine_tests COMMAND dsmvc_engine_tests)
 
     if(DSMVC_ENABLE_CUDA)
         add_test(NAME dsmvc_cuda_artifact_inventory
             COMMAND "${CMAKE_COMMAND}"
-                "-DFATBIN=${_dsmvc_cuda_fatbin}"
+                "-DFATBIN=$<TARGET_FILE:dsmvc>"
                 "-DCUOBJDUMP=${DSMVC_CUOBJDUMP_EXECUTABLE}"
                 "-DNATIVE_ARCHITECTURES=${DSMVC_CUDA_ARCHITECTURES}"
                 "-DPTX_ARCHITECTURES=${DSMVC_CUDA_PTX_ARCHITECTURES}"

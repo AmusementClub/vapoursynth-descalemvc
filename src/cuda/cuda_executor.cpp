@@ -1,11 +1,10 @@
 #include "cuda_executor.hpp"
 
-#include "cuda_driver.hpp"
+#include "cuda_launch.hpp"
 #include "cuda_kernel.hpp"
-#include "dsmvc_cuda_fatbin.hpp"
+#include "cuda_runtime.hpp"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -15,7 +14,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <iterator>
@@ -28,41 +26,17 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#ifndef DSMVC_CUDA_MIN_ARCHITECTURE
-#define DSMVC_CUDA_MIN_ARCHITECTURE 75
-#endif
-
 namespace dsmvc::cuda_detail {
 namespace {
 
-constexpr int minimum_architecture = DSMVC_CUDA_MIN_ARCHITECTURE;
 constexpr std::size_t maximum_allocation_bytes =
     2ULL * 1024ULL * 1024ULL * 1024ULL - 1ULL;
 constexpr unsigned int default_inverse_threads = 64U;
-constexpr unsigned int conversion_threads = 256U;
-constexpr unsigned int rhs_vector_threads = 32U;
-constexpr unsigned int rhs_index_threads = 8U;
-
-[[nodiscard]] std::size_t batch_frame_count() noexcept {
-    constexpr std::size_t fallback = 8U;
-    const char *text = std::getenv("DSMVC_CUDA_BATCH_FRAMES");
-    if (!text) return fallback;
-    std::size_t value = 0U;
-    const std::string_view view{text};
-    const auto parsed = std::from_chars(
-        view.data(), view.data() + view.size(), value);
-    if (parsed.ec != std::errc{} || parsed.ptr != view.data() + view.size()
-        || value < 1U || value > 8U) {
-        return fallback;
-    }
-    return value;
-}
 
 [[nodiscard]] std::size_t checked_product(
     std::size_t left, std::size_t right, const char *label) {
@@ -95,15 +69,6 @@ constexpr unsigned int rhs_index_threads = 8U;
         throw std::length_error(std::string{label} + " exceeds CUDA ABI limits");
     }
     return static_cast<std::uint32_t>(value);
-}
-
-[[nodiscard]] unsigned int divide_up(
-    std::uint32_t value, unsigned int divisor) noexcept {
-    return (value + divisor - 1U) / divisor;
-}
-
-[[nodiscard]] int architecture_code(int major, int minor) noexcept {
-    return major * 10 + minor;
 }
 
 struct ExecutionSlotConfiguration {
@@ -214,37 +179,37 @@ enum class SplitRhsMode : std::uint8_t {
     return value * 1024U * 1024U;
 }
 
-class CurrentContextGuard {
+class CurrentDeviceGuard {
 public:
-    CurrentContextGuard(const DriverApi &api, CUcontext desired) : api_(&api) {
-        cuda_check(api, api.ctx_get_current(&previous_), "cuCtxGetCurrent");
+    explicit CurrentDeviceGuard(int desired) {
+        cuda_check(cudaGetDevice(&previous_), "cudaGetDevice");
         if (previous_ != desired) {
-            cuda_check(api, api.ctx_set_current(desired), "cuCtxSetCurrent");
+            cuda_check(cudaSetDevice(desired), "cudaSetDevice");
             changed_ = true;
         }
     }
 
-    ~CurrentContextGuard() {
-        if (changed_) (void)api_->ctx_set_current(previous_);
+    ~CurrentDeviceGuard() {
+        if (changed_) (void)cudaSetDevice(previous_);
     }
 
-    CurrentContextGuard(const CurrentContextGuard &) = delete;
-    CurrentContextGuard &operator=(const CurrentContextGuard &) = delete;
+    CurrentDeviceGuard(const CurrentDeviceGuard &) = delete;
+    CurrentDeviceGuard &operator=(const CurrentDeviceGuard &) = delete;
 
 private:
-    const DriverApi *api_ = nullptr;
-    CUcontext previous_ = nullptr;
+    int previous_ = -1;
     bool changed_ = false;
 };
 
 class DeviceBuffer {
 public:
     DeviceBuffer() = default;
-    DeviceBuffer(std::shared_ptr<DriverApi> api, CUcontext context,
+    DeviceBuffer(std::shared_ptr<RuntimeApi> api, int device,
                  std::size_t bytes)
-        : api_(std::move(api)), context_(context), bytes_(bytes) {
+        : api_(std::move(api)), device_(device), bytes_(bytes) {
         if (bytes != 0U) {
-            cuda_check(*api_, api_->mem_alloc(&pointer_, bytes), "cuMemAlloc_v2");
+            CurrentDeviceGuard current(device_);
+            cuda_check(*api_, api_->mem_alloc(&pointer_, bytes), "cudaMalloc");
         }
     }
 
@@ -260,16 +225,16 @@ public:
         return *this;
     }
 
-    [[nodiscard]] CUdeviceptr pointer() const noexcept { return pointer_; }
+    [[nodiscard]] DevicePointer pointer() const noexcept { return pointer_; }
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
 
-    void reserve(const std::shared_ptr<DriverApi> &api, CUcontext context,
+    void reserve(const std::shared_ptr<RuntimeApi> &api, int device,
                  std::size_t bytes) {
         if (bytes <= bytes_) return;
         if (bytes > maximum_allocation_bytes) {
             throw std::length_error("CUDA buffer exceeds the 2 GiB allocation guard");
         }
-        DeviceBuffer replacement(api, context, growing_capacity(bytes_, bytes));
+        DeviceBuffer replacement(api, device, growing_capacity(bytes_, bytes));
         swap(replacement);
     }
 
@@ -280,27 +245,27 @@ public:
 
 private:
     void release() noexcept {
-        if (pointer_ == 0U || !api_) return;
-        CUcontext previous = nullptr;
-        const bool queried = api_->ctx_get_current(&previous) == CUDA_SUCCESS;
-        const bool changed = queried && previous != context_
-            && api_->ctx_set_current(context_) == CUDA_SUCCESS;
+        if (!pointer_ || !api_) return;
+        int previous = -1;
+        const bool queried = cudaGetDevice(&previous) == cudaSuccess;
+        const bool changed = queried && previous != device_
+            && cudaSetDevice(device_) == cudaSuccess;
         (void)api_->mem_free(pointer_);
-        if (changed) (void)api_->ctx_set_current(previous);
-        pointer_ = 0U;
+        if (changed) (void)cudaSetDevice(previous);
+        pointer_ = nullptr;
         bytes_ = 0U;
     }
 
     void swap(DeviceBuffer &other) noexcept {
         std::swap(api_, other.api_);
-        std::swap(context_, other.context_);
+        std::swap(device_, other.device_);
         std::swap(pointer_, other.pointer_);
         std::swap(bytes_, other.bytes_);
     }
 
-    std::shared_ptr<DriverApi> api_;
-    CUcontext context_ = nullptr;
-    CUdeviceptr pointer_ = 0U;
+    std::shared_ptr<RuntimeApi> api_;
+    int device_ = -1;
+    DevicePointer pointer_ = nullptr;
     std::size_t bytes_ = 0U;
 };
 
@@ -324,14 +289,14 @@ public:
             return *this;
         }
 
-        [[nodiscard]] CUdeviceptr pointer() const noexcept {
+        [[nodiscard]] DevicePointer pointer() const noexcept {
             return pointer_;
         }
 
     private:
         Allocation(
             DeviceArena &arena, Chunk &chunk, std::size_t offset,
-            std::size_t bytes, CUdeviceptr pointer) noexcept
+            std::size_t bytes, DevicePointer pointer) noexcept
             : arena_(&arena), chunk_(&chunk), pointer_(pointer),
               offset_(offset), bytes_(bytes) {}
 
@@ -339,7 +304,7 @@ public:
             if (arena_) arena_->release(*chunk_, offset_, bytes_);
             arena_ = nullptr;
             chunk_ = nullptr;
-            pointer_ = 0U;
+            pointer_ = nullptr;
             offset_ = 0U;
             bytes_ = 0U;
         }
@@ -354,14 +319,14 @@ public:
 
         DeviceArena *arena_ = nullptr;
         Chunk *chunk_ = nullptr;
-        CUdeviceptr pointer_ = 0U;
+        DevicePointer pointer_ = nullptr;
         std::size_t offset_ = 0U;
         std::size_t bytes_ = 0U;
         friend class DeviceArena;
     };
 
     [[nodiscard]] Allocation allocate(
-        const std::shared_ptr<DriverApi> &api, CUcontext context,
+        const std::shared_ptr<RuntimeApi> &api, int device,
         std::size_t bytes) {
         constexpr std::size_t alignment = 256U;
         constexpr std::size_t maximum_chunk_bytes = 64U * 1024U * 1024U;
@@ -386,7 +351,7 @@ public:
             capacity *= 2U;
         }
         capacity = std::max(capacity, aligned_bytes);
-        auto chunk = std::make_unique<Chunk>(api, context, capacity);
+        auto chunk = std::make_unique<Chunk>(api, device, capacity);
         Chunk &created = *chunk;
         chunks_.push_back(std::move(chunk));
         auto allocation = try_allocate(created, aligned_bytes);
@@ -410,9 +375,9 @@ public:
 private:
     struct Chunk {
         Chunk(
-            const std::shared_ptr<DriverApi> &api, CUcontext context,
+            const std::shared_ptr<RuntimeApi> &api, int device,
             std::size_t bytes)
-            : storage(api, context, bytes) {
+            : storage(api, device, bytes) {
             free_ranges.emplace(0U, bytes);
         }
 
@@ -466,14 +431,15 @@ private:
 class PinnedBuffer {
 public:
     PinnedBuffer() = default;
-    PinnedBuffer(std::shared_ptr<DriverApi> api, CUcontext context,
+    PinnedBuffer(std::shared_ptr<RuntimeApi> api, int device,
                  std::size_t bytes)
-        : api_(std::move(api)), context_(context), bytes_(bytes) {
+        : api_(std::move(api)), device_(device), bytes_(bytes) {
         if (bytes != 0U) {
+            CurrentDeviceGuard current(device_);
             cuda_check(
                 *api_, api_->mem_host_alloc(
-                    &pointer_, bytes, CU_MEMHOSTALLOC_PORTABLE),
-                "cuMemHostAlloc");
+                    &pointer_, bytes, cudaHostAllocPortable),
+                "cudaHostAlloc");
         }
     }
 
@@ -492,39 +458,39 @@ public:
     [[nodiscard]] void *data() noexcept { return pointer_; }
     [[nodiscard]] const void *data() const noexcept { return pointer_; }
 
-    void reserve(const std::shared_ptr<DriverApi> &api, CUcontext context,
+    void reserve(const std::shared_ptr<RuntimeApi> &api, int device,
                  std::size_t bytes) {
         if (bytes <= bytes_) return;
         if (bytes > maximum_allocation_bytes) {
             throw std::length_error(
                 "CUDA pinned buffer exceeds the 2 GiB allocation guard");
         }
-        PinnedBuffer replacement(api, context, growing_capacity(bytes_, bytes));
+        PinnedBuffer replacement(api, device, growing_capacity(bytes_, bytes));
         swap(replacement);
     }
 
 private:
     void release() noexcept {
         if (!pointer_ || !api_) return;
-        CUcontext previous = nullptr;
-        const bool queried = api_->ctx_get_current(&previous) == CUDA_SUCCESS;
-        const bool changed = queried && previous != context_
-            && api_->ctx_set_current(context_) == CUDA_SUCCESS;
+        int previous = -1;
+        const bool queried = cudaGetDevice(&previous) == cudaSuccess;
+        const bool changed = queried && previous != device_
+            && cudaSetDevice(device_) == cudaSuccess;
         (void)api_->mem_free_host(pointer_);
-        if (changed) (void)api_->ctx_set_current(previous);
+        if (changed) (void)cudaSetDevice(previous);
         pointer_ = nullptr;
         bytes_ = 0U;
     }
 
     void swap(PinnedBuffer &other) noexcept {
         std::swap(api_, other.api_);
-        std::swap(context_, other.context_);
+        std::swap(device_, other.device_);
         std::swap(pointer_, other.pointer_);
         std::swap(bytes_, other.bytes_);
     }
 
-    std::shared_ptr<DriverApi> api_;
-    CUcontext context_ = nullptr;
+    std::shared_ptr<RuntimeApi> api_;
+    int device_ = -1;
     void *pointer_ = nullptr;
     std::size_t bytes_ = 0U;
 };
@@ -574,7 +540,7 @@ public:
     };
 
     [[nodiscard]] Allocation allocate(
-        const std::shared_ptr<DriverApi> &api, CUcontext context,
+        const std::shared_ptr<RuntimeApi> &api, int device,
         std::size_t bytes) {
         constexpr std::size_t slab_bytes = 8U * 1024U * 1024U;
         if (bytes == 0U) return {};
@@ -598,7 +564,7 @@ public:
         size_class.available.reserve(
             checked_add(size_class.total_blocks, block_count,
                         "CUDA pinned block pool"));
-        auto slab = std::make_unique<PinnedBuffer>(api, context, capacity);
+        auto slab = std::make_unique<PinnedBuffer>(api, device, capacity);
         auto *base = static_cast<std::byte *>(slab->data());
         size_class.slabs.push_back(std::move(slab));
         for (std::size_t index = 1U; index < block_count; ++index) {
@@ -635,11 +601,12 @@ private:
 class DeviceEvent {
 public:
     DeviceEvent() = default;
-    DeviceEvent(std::shared_ptr<DriverApi> api, CUcontext context)
-        : api_(std::move(api)), context_(context) {
+    DeviceEvent(std::shared_ptr<RuntimeApi> api, int device)
+        : api_(std::move(api)), device_(device) {
+        CurrentDeviceGuard current(device_);
         cuda_check(
-            *api_, api_->event_create(&event_, CU_EVENT_DISABLE_TIMING),
-            "cuEventCreate");
+            *api_, api_->event_create(&event_, cudaEventDisableTiming),
+            "cudaEventCreateWithFlags");
     }
 
     ~DeviceEvent() { release(); }
@@ -654,29 +621,29 @@ public:
         return *this;
     }
 
-    [[nodiscard]] CUevent event() const noexcept { return event_; }
+    [[nodiscard]] cudaEvent_t event() const noexcept { return event_; }
 
 private:
     void release() noexcept {
         if (!event_ || !api_) return;
-        CUcontext previous = nullptr;
-        const bool queried = api_->ctx_get_current(&previous) == CUDA_SUCCESS;
-        const bool changed = queried && previous != context_
-            && api_->ctx_set_current(context_) == CUDA_SUCCESS;
+        int previous = -1;
+        const bool queried = cudaGetDevice(&previous) == cudaSuccess;
+        const bool changed = queried && previous != device_
+            && cudaSetDevice(device_) == cudaSuccess;
         (void)api_->event_destroy(event_);
-        if (changed) (void)api_->ctx_set_current(previous);
+        if (changed) (void)cudaSetDevice(previous);
         event_ = nullptr;
     }
 
     void swap(DeviceEvent &other) noexcept {
         std::swap(api_, other.api_);
-        std::swap(context_, other.context_);
+        std::swap(device_, other.device_);
         std::swap(event_, other.event_);
     }
 
-    std::shared_ptr<DriverApi> api_;
-    CUcontext context_ = nullptr;
-    CUevent event_ = nullptr;
+    std::shared_ptr<RuntimeApi> api_;
+    int device_ = -1;
+    cudaEvent_t event_ = nullptr;
 };
 
 class DeviceEventPool {
@@ -696,10 +663,10 @@ public:
             return *this;
         }
 
-        [[nodiscard]] CUevent event() const noexcept { return event_; }
+        [[nodiscard]] cudaEvent_t event() const noexcept { return event_; }
 
     private:
-        Handle(DeviceEventPool &pool, CUevent event) noexcept
+        Handle(DeviceEventPool &pool, cudaEvent_t event) noexcept
             : pool_(&pool), event_(event) {}
 
         void reset() noexcept {
@@ -714,45 +681,46 @@ public:
         }
 
         DeviceEventPool *pool_ = nullptr;
-        CUevent event_ = nullptr;
+        cudaEvent_t event_ = nullptr;
         friend class DeviceEventPool;
     };
 
     [[nodiscard]] Handle acquire(
-        const std::shared_ptr<DriverApi> &api, CUcontext context) {
+        const std::shared_ptr<RuntimeApi> &api, int device) {
         {
             const std::scoped_lock lock(mutex_);
             if (!api_) {
                 api_ = api;
-                context_ = context;
+                device_ = device;
             }
             if (!available_.empty()) {
-                CUevent event = available_.back();
+                cudaEvent_t event = available_.back();
                 available_.pop_back();
                 return Handle(*this, event);
             }
         }
-        CUevent event = nullptr;
+        CurrentDeviceGuard current(device);
+        cudaEvent_t event = nullptr;
         cuda_check(
-            *api, api->event_create(&event, CU_EVENT_DISABLE_TIMING),
-            "cuEventCreate(axis plan)");
+            *api, api->event_create(&event, cudaEventDisableTiming),
+            "cudaEventCreateWithFlags(axis plan)");
         return Handle(*this, event);
     }
 
     void reset() noexcept {
-        std::vector<CUevent> released;
-        std::shared_ptr<DriverApi> api;
-        CUcontext context = nullptr;
+        std::vector<cudaEvent_t> released;
+        std::shared_ptr<RuntimeApi> api;
+        int device = -1;
         {
             const std::scoped_lock lock(mutex_);
             released.swap(available_);
             api = api_;
-            context = context_;
+            device = device_;
         }
-        if (!api || !context) return;
+        if (!api || device < 0) return;
         try {
-            CurrentContextGuard current(*api, context);
-            for (CUevent event : released) {
+            CurrentDeviceGuard current(device);
+            for (cudaEvent_t event : released) {
                 (void)api->event_destroy(event);
             }
         } catch (...) {
@@ -760,7 +728,7 @@ public:
     }
 
 private:
-    void release(CUevent event) noexcept {
+    void release(cudaEvent_t event) noexcept {
         try {
             const std::scoped_lock lock(mutex_);
             available_.push_back(event);
@@ -769,16 +737,16 @@ private:
         }
         if (!api_ || !event) return;
         try {
-            CurrentContextGuard current(*api_, context_);
+            CurrentDeviceGuard current(device_);
             (void)api_->event_destroy(event);
         } catch (...) {
         }
     }
 
     std::mutex mutex_;
-    std::shared_ptr<DriverApi> api_;
-    CUcontext context_ = nullptr;
-    std::vector<CUevent> available_;
+    std::shared_ptr<RuntimeApi> api_;
+    int device_ = -1;
+    std::vector<cudaEvent_t> available_;
 };
 
 enum class CachedInputLayout : std::uint8_t {
@@ -827,23 +795,23 @@ struct InputCacheKeyHash {
 class CachedInput {
 public:
     CachedInput(
-        const std::shared_ptr<DriverApi> &api, CUcontext context,
+        const std::shared_ptr<RuntimeApi> &api, int device,
         DeviceArena &arena, std::size_t bytes,
         std::shared_ptr<const void> requested_lifetime)
-        : api_(api), storage_(arena.allocate(api, context, bytes)),
-          ready_(api, context), lifetime_(std::move(requested_lifetime)),
+        : api_(api), storage_(arena.allocate(api, device, bytes)),
+          ready_(api, device), lifetime_(std::move(requested_lifetime)),
           bytes_(bytes) {}
 
-    [[nodiscard]] CUdeviceptr pointer() const noexcept {
+    [[nodiscard]] DevicePointer pointer() const noexcept {
         return storage_.pointer();
     }
 
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
 
-    void publish(CUstream stream) {
+    void publish(cudaStream_t stream) {
         cuda_check(
             *api_, api_->event_record(ready_.event(), stream),
-            "cuEventRecord(shared input)");
+            "cudaEventRecord(shared input)");
         {
             const std::scoped_lock lock(mutex_);
             scheduled_ = true;
@@ -860,7 +828,7 @@ public:
         scheduled_ready_.notify_all();
     }
 
-    void wait_on(CUstream stream) const {
+    void wait_on(cudaStream_t stream) const {
         std::exception_ptr error;
         {
             std::unique_lock lock(mutex_);
@@ -870,11 +838,11 @@ public:
         if (error) std::rethrow_exception(error);
         cuda_check(
             *api_, api_->stream_wait_event(stream, ready_.event(), 0U),
-            "cuStreamWaitEvent(shared input)");
+            "cudaStreamWaitEvent(shared input)");
     }
 
 private:
-    std::shared_ptr<DriverApi> api_;
+    std::shared_ptr<RuntimeApi> api_;
     DeviceArena::Allocation storage_;
     DeviceEvent ready_;
     std::shared_ptr<const void> lifetime_;
@@ -897,8 +865,8 @@ public:
     [[nodiscard]] bool enabled() const noexcept { return capacity_ != 0U; }
 
     [[nodiscard]] Acquisition acquire(
-        const InputCacheKey &key, const std::shared_ptr<DriverApi> &api,
-        CUcontext context, DeviceArena &arena, std::size_t bytes,
+        const InputCacheKey &key, const std::shared_ptr<RuntimeApi> &api,
+        int device, DeviceArena &arena, std::size_t bytes,
         std::shared_ptr<const void> lifetime) {
         std::vector<std::shared_ptr<CachedInput>> evicted;
         Acquisition result;
@@ -910,7 +878,7 @@ public:
             }
 
             result.input = std::make_shared<CachedInput>(
-                api, context, arena, bytes, std::move(lifetime));
+                api, device, arena, bytes, std::move(lifetime));
             result.producer = true;
             bytes_ = checked_add(bytes_, bytes, "CUDA input cache");
             lru_.push_back(key);
@@ -997,27 +965,32 @@ template <class Sample>
 }
 
 struct ExecutionSlot {
-    ExecutionSlot(const std::shared_ptr<DriverApi> &requested_api,
-                  CUcontext context)
-        : api(requested_api), cuda_context(context) {
+    ExecutionSlot(const std::shared_ptr<RuntimeApi> &requested_api, int device)
+        : api(requested_api), cuda_device(device) {
+        CurrentDeviceGuard current(cuda_device);
         cuda_check(
-            *api, api->stream_create(&stream, CU_STREAM_NON_BLOCKING),
-            "cuStreamCreate");
+            *api, api->stream_create(&stream, cudaStreamNonBlocking),
+            "cudaStreamCreateWithFlags");
     }
 
     ~ExecutionSlot() {
         if (stream && api) {
+            int previous = -1;
+            const bool queried = cudaGetDevice(&previous) == cudaSuccess;
+            const bool changed = queried && previous != cuda_device
+                && cudaSetDevice(cuda_device) == cudaSuccess;
             (void)api->stream_synchronize(stream);
             (void)api->stream_destroy(stream);
+            if (changed) (void)cudaSetDevice(previous);
         }
     }
 
     ExecutionSlot(const ExecutionSlot &) = delete;
     ExecutionSlot &operator=(const ExecutionSlot &) = delete;
 
-    std::shared_ptr<DriverApi> api;
-    CUcontext cuda_context = nullptr;
-    CUstream stream = nullptr;
+    std::shared_ptr<RuntimeApi> api;
+    int cuda_device = -1;
+    cudaStream_t stream = nullptr;
     PinnedBuffer host_source;
     PinnedBuffer host_destination;
     DeviceBuffer source;
@@ -1041,123 +1014,49 @@ public:
         horizontal_global_transpose = environment_flag(
             "DSMVC_CUDA_HORIZONTAL_GLOBAL_TRANSPOSE", true);
         split_rhs = split_rhs_mode();
-        api = load_cuda_driver();
-        cuda_check(*api, api->init(0U), "cuInit");
+        api = std::make_shared<RuntimeApi>();
 
         int count = 0;
-        cuda_check(*api, api->device_get_count(&count), "cuDeviceGetCount");
-        for (int ordinal = 0; ordinal < count; ++ordinal) {
-            CUdevice candidate = 0;
-            cuda_check(*api, api->device_get(&candidate, ordinal), "cuDeviceGet");
-            int major = 0;
-            int minor = 0;
-            int maximum_threads = 0;
-            cuda_check(
-                *api, api->device_get_attribute(
-                    &major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-                    candidate),
-                "cuDeviceGetAttribute(COMPUTE_CAPABILITY_MAJOR)");
-            cuda_check(
-                *api, api->device_get_attribute(
-                    &minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-                    candidate),
-                "cuDeviceGetAttribute(COMPUTE_CAPABILITY_MINOR)");
-            cuda_check(
-                *api, api->device_get_attribute(
-                    &maximum_threads, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-                    candidate),
-                "cuDeviceGetAttribute(MAX_THREADS_PER_BLOCK)");
-            if (architecture_code(major, minor) >= minimum_architecture
-                && maximum_threads >= static_cast<int>(conversion_threads)) {
-                device = candidate;
-                device_ordinal = ordinal;
-                break;
-            }
-        }
-        if (device_ordinal < 0) {
-            throw std::runtime_error(
-                "no CUDA device meets the dsmvc compute capability requirement");
-        }
-
-        std::array<char, 256U> raw_name{};
-        cuda_check(
-            *api, api->device_get_name(
-                raw_name.data(), static_cast<int>(raw_name.size()), device),
-            "cuDeviceGetName");
-        display_name = "cuda (" + std::string{raw_name.data()} + ")";
-
-        CUcontext previous = nullptr;
-        cuda_check(*api, api->ctx_get_current(&previous), "cuCtxGetCurrent");
+        cuda_check(cudaGetDeviceCount(&count), "cudaGetDeviceCount");
+        if (count < 1) throw std::runtime_error("no CUDA device is available");
+        cuda_check(cudaGetDevice(&device_ordinal), "cudaGetDevice");
+        CurrentDeviceGuard current(device_ordinal);
+        cuda_check(cudaFree(nullptr), "CUDA primary-context initialization");
         try {
             cuda_check(
-                *api, api->ctx_create(&context, CU_CTX_SCHED_AUTO, device),
-                "cuCtxCreate_v2");
-            cuda_check(
-                *api, api->module_load_data(&module, dsmvc_cuda_fatbin),
-                "cuModuleLoadData");
-            cuda_check(
-                *api, api->stream_create(&plan_stream, CU_STREAM_NON_BLOCKING),
-                "cuStreamCreate(plan upload)");
-            load_function(transpose_f32, "dsmvc_cuda_transpose_f32");
-            load_function(transpose_u8, "dsmvc_cuda_transpose_u8");
-            load_function(transpose_u16, "dsmvc_cuda_transpose_u16");
-            load_function(inverse_horizontal, "dsmvc_cuda_inverse_horizontal");
-            load_function(
-                inverse_horizontal_column_major,
-                "dsmvc_cuda_inverse_horizontal_column_major");
-            load_function(inverse_vertical, "dsmvc_cuda_inverse_vertical");
-            load_function(rhs_horizontal, "dsmvc_cuda_rhs_horizontal");
-            load_function(
-                rhs_horizontal_column_major,
-                "dsmvc_cuda_rhs_horizontal_column_major");
-            load_function(rhs_vertical, "dsmvc_cuda_rhs_vertical");
-            load_function(solve_horizontal, "dsmvc_cuda_solve_horizontal");
-            load_function(
-                solve_horizontal_column_major,
-                "dsmvc_cuda_solve_horizontal_column_major");
-            load_function(solve_vertical, "dsmvc_cuda_solve_vertical");
-            load_function(convert_u8, "dsmvc_cuda_convert_u8");
-            load_function(convert_u16, "dsmvc_cuda_convert_u16");
-            load_function(
-                inverse_axis_batch, "dsmvc_cuda_inverse_axis_batch");
-            load_function(rhs_axis_batch, "dsmvc_cuda_rhs_axis_batch");
-            load_function(solve_axis_batch, "dsmvc_cuda_solve_axis_batch");
+                *api, api->stream_create(
+                    &plan_stream, cudaStreamNonBlocking),
+                "cudaStreamCreateWithFlags(plan upload)");
 
             const auto slot_configuration = execution_slot_configuration();
             limited_slot_count = slot_configuration.limited;
             adaptive_slots = slot_configuration.adaptive;
-            maximum_slot_count = std::max(
-                slot_configuration.total, batch_frame_count() * 2U);
+            maximum_slot_count = slot_configuration.total;
             slots.reserve(maximum_slot_count);
             const std::size_t initial_slot_count = adaptive_slots
                 ? limited_slot_count : maximum_slot_count;
             for (std::size_t index = 0U;
                  index < initial_slot_count; ++index) {
-                slots.push_back(std::make_unique<ExecutionSlot>(api, context));
+                slots.push_back(
+                    std::make_unique<ExecutionSlot>(api, device_ordinal));
             }
             slot_busy.reserve(maximum_slot_count);
             slot_busy.assign(initial_slot_count, false);
-            cuda_check(*api, api->ctx_set_current(previous), "cuCtxSetCurrent");
         } catch (...) {
             slots.clear();
             if (plan_stream) {
                 (void)api->stream_synchronize(plan_stream);
                 (void)api->stream_destroy(plan_stream);
             }
-            if (module) (void)api->module_unload(module);
-            if (context) (void)api->ctx_destroy(context);
-            module = nullptr;
-            context = nullptr;
-            (void)api->ctx_set_current(previous);
+            plan_stream = nullptr;
             throw;
         }
     }
 
     ~Runtime() {
-        if (!api || !context) return;
-        CUcontext previous = nullptr;
-        if (api->ctx_get_current(&previous) == CUDA_SUCCESS
-            && api->ctx_set_current(context) == CUDA_SUCCESS) {
+        if (!api || device_ordinal < 0) return;
+        try {
+            CurrentDeviceGuard current(device_ordinal);
             slots.clear();
             input_cache.reset();
             input_arena.reset();
@@ -1171,19 +1070,18 @@ public:
                 (void)api->stream_destroy(plan_stream);
                 plan_stream = nullptr;
             }
-            if (module) (void)api->module_unload(module);
-            (void)api->ctx_set_current(previous);
+        } catch (...) {
         }
-        (void)api->ctx_destroy(context);
     }
 
     [[nodiscard]] std::size_t acquire_slot(ExecutionSlotClass slot_class) {
         std::unique_lock lock(slot_mutex);
         if (adaptive_slots && slot_class == ExecutionSlotClass::heavy_2d
             && slots.size() < maximum_slot_count) {
-            CurrentContextGuard current(*api, context);
+            CurrentDeviceGuard current(device_ordinal);
             while (slots.size() < maximum_slot_count) {
-                slots.push_back(std::make_unique<ExecutionSlot>(api, context));
+                slots.push_back(
+                    std::make_unique<ExecutionSlot>(api, device_ordinal));
                 slot_busy.push_back(false);
             }
         }
@@ -1229,35 +1127,9 @@ public:
         if (reset_cache) input_cache.reset();
     }
 
-    void load_function(CUfunction &function, const char *name) {
-        cuda_check(
-            *api, api->module_get_function(&function, module, name),
-            "cuModuleGetFunction");
-    }
-
-    std::shared_ptr<DriverApi> api;
-    CUdevice device = 0;
+    std::shared_ptr<RuntimeApi> api;
     int device_ordinal = -1;
-    CUcontext context = nullptr;
-    CUmodule module = nullptr;
-    CUstream plan_stream = nullptr;
-    CUfunction transpose_f32 = nullptr;
-    CUfunction transpose_u8 = nullptr;
-    CUfunction transpose_u16 = nullptr;
-    CUfunction inverse_horizontal = nullptr;
-    CUfunction inverse_horizontal_column_major = nullptr;
-    CUfunction inverse_vertical = nullptr;
-    CUfunction rhs_horizontal = nullptr;
-    CUfunction rhs_horizontal_column_major = nullptr;
-    CUfunction rhs_vertical = nullptr;
-    CUfunction solve_horizontal = nullptr;
-    CUfunction solve_horizontal_column_major = nullptr;
-    CUfunction solve_vertical = nullptr;
-    CUfunction convert_u8 = nullptr;
-    CUfunction convert_u16 = nullptr;
-    CUfunction inverse_axis_batch = nullptr;
-    CUfunction rhs_axis_batch = nullptr;
-    CUfunction solve_axis_batch = nullptr;
+    cudaStream_t plan_stream = nullptr;
     unsigned int horizontal_threads = default_inverse_threads;
     unsigned int vertical_threads = default_inverse_threads;
     unsigned int split_horizontal_threads = 32U;
@@ -1269,7 +1141,6 @@ public:
     DeviceEventPool plan_event_pool;
     DeviceArena input_arena;
     InputCache input_cache;
-    std::string display_name;
     std::vector<std::unique_ptr<ExecutionSlot>> slots;
     std::vector<bool> slot_busy;
     std::mutex slot_mutex;
@@ -1296,7 +1167,7 @@ public:
     ~SlotRelease() {
         if (!completed_) {
             try {
-                CurrentContextGuard context(*runtime_->api, runtime_->context);
+                CurrentDeviceGuard context(runtime_->device_ordinal);
                 ExecutionSlot &slot = *runtime_->slots[index_];
                 (void)runtime_->api->stream_synchronize(slot.stream);
             } catch (...) {
@@ -1368,11 +1239,11 @@ struct PackedPlan {
         const std::size_t lower_offset = reserve_field(axis->lower_ld);
         const std::size_t upper_offset = reserve_field(axis->upper_l);
         const std::size_t diagonal_offset = reserve_field(axis->inverse_diagonal);
-        CurrentContextGuard context(*runtime->api, runtime->context);
+        CurrentDeviceGuard context(runtime->device_ordinal);
         staging = runtime->plan_staging_arena.allocate(
-            runtime->api, runtime->context, storage_bytes);
+            runtime->api, runtime->device_ordinal, storage_bytes);
         ready = runtime->plan_event_pool.acquire(
-            runtime->api, runtime->context);
+            runtime->api, runtime->device_ordinal);
         const auto copy_field = [&](std::size_t offset, const auto &values) {
             using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
             if (!values.empty()) {
@@ -1390,7 +1261,7 @@ struct PackedPlan {
         copy_field(diagonal_offset, axis->inverse_diagonal);
 
         storage = runtime->plan_arena.allocate(
-            runtime->api, runtime->context, storage_bytes);
+            runtime->api, runtime->device_ordinal, storage_bytes);
         transpose_offsets = storage.pointer() + offsets_offset;
         transpose_indices = storage.pointer() + indices_offset;
         transpose_weights = storage.pointer() + weights_offset;
@@ -1404,12 +1275,12 @@ struct PackedPlan {
                 runtime->api->memcpy_htod_async(
                     storage.pointer(), staging.data(), storage_bytes,
                     runtime->plan_stream),
-                "cuMemcpyHtoDAsync_v2(axis plan)");
+                "cudaMemcpyAsync(axis plan upload)");
             submitted = true;
             cuda_check(
                 *runtime->api,
                 runtime->api->event_record(ready.event(), runtime->plan_stream),
-                "cuEventRecord(axis plan)");
+                "cudaEventRecord(axis plan)");
         } catch (...) {
             if (submitted) {
                 (void)runtime->api->stream_synchronize(runtime->plan_stream);
@@ -1423,34 +1294,34 @@ struct PackedPlan {
         try {
             const std::scoped_lock lock(upload_mutex);
             if (upload_complete.load(std::memory_order_relaxed)) return;
-            CurrentContextGuard context(*runtime->api, runtime->context);
-            if (runtime->api->event_synchronize(ready.event()) == CUDA_SUCCESS) {
+            CurrentDeviceGuard context(runtime->device_ordinal);
+            if (runtime->api->event_synchronize(ready.event()) == cudaSuccess) {
                 upload_complete.store(true, std::memory_order_release);
             }
         } catch (...) {
         }
     }
 
-    void wait_on(CUstream stream) const {
+    void wait_on(cudaStream_t stream) const {
         if (upload_complete.load(std::memory_order_acquire)) return;
         PinnedBlockPool::Allocation retired_staging;
         DeviceEventPool::Handle retired_ready;
         const std::scoped_lock lock(upload_mutex);
         if (upload_complete.load(std::memory_order_relaxed)) return;
-        const CUresult status = runtime->api->event_query(ready.event());
-        if (status == CUDA_SUCCESS) {
+        const cudaError_t status = runtime->api->event_query(ready.event());
+        if (status == cudaSuccess) {
             upload_complete.store(true, std::memory_order_release);
             retired_staging = std::move(staging);
             retired_ready = std::move(ready);
             return;
         }
-        if (status != CUDA_ERROR_NOT_READY) {
-            cuda_check(*runtime->api, status, "cuEventQuery(axis plan)");
+        if (status != cudaErrorNotReady) {
+            cuda_check(*runtime->api, status, "cudaEventQuery(axis plan)");
         }
         cuda_check(
             *runtime->api,
             runtime->api->stream_wait_event(stream, ready.event(), 0U),
-            "cuStreamWaitEvent(axis plan)");
+            "cudaStreamWaitEvent(axis plan)");
     }
 
     void mark_upload_complete() const noexcept {
@@ -1472,12 +1343,12 @@ struct PackedPlan {
     mutable PinnedBlockPool::Allocation staging;
     mutable DeviceEventPool::Handle ready;
     std::size_t storage_bytes = 0U;
-    CUdeviceptr transpose_offsets = 0U;
-    CUdeviceptr transpose_indices = 0U;
-    CUdeviceptr transpose_weights = 0U;
-    CUdeviceptr lower_ld = 0U;
-    CUdeviceptr upper_l = 0U;
-    CUdeviceptr inverse_diagonal = 0U;
+    DevicePointer transpose_offsets = nullptr;
+    DevicePointer transpose_indices = nullptr;
+    DevicePointer transpose_weights = nullptr;
+    DevicePointer lower_ld = nullptr;
+    DevicePointer upper_l = nullptr;
+    DevicePointer inverse_diagonal = nullptr;
     mutable std::mutex upload_mutex;
     mutable std::atomic<bool> upload_complete{false};
     mutable std::atomic<std::uint32_t> execution_count{0U};
@@ -1652,191 +1523,158 @@ void unpack_host_rows(
     }
 }
 
+enum class TransposeSample : std::uint8_t {
+    float32,
+    uint8,
+    uint16,
+};
+
+template <class Value>
+[[nodiscard]] Value *device_as(DevicePointer pointer) noexcept {
+    return reinterpret_cast<Value *>(pointer);
+}
+
 void launch_transpose(
-    Runtime &runtime, ExecutionSlot &slot, CUfunction function,
+    Runtime &runtime, ExecutionSlot &slot, TransposeSample sample,
     std::uint32_t width, std::uint32_t height,
     const cuda_kernel::IntegerConversionDescriptor *conversion,
-    CUdeviceptr requested_source = 0U,
-    CUdeviceptr requested_destination = 0U,
-    CUstream requested_stream = nullptr) {
-    CUdeviceptr source = requested_source != 0U
+    DevicePointer requested_source = nullptr,
+    DevicePointer requested_destination = nullptr) {
+    DevicePointer source = requested_source
         ? requested_source : slot.source.pointer();
-    CUdeviceptr transposed = requested_destination != 0U
+    DevicePointer transposed = requested_destination
         ? requested_destination : slot.transposed.pointer();
-    void *float_arguments[]{&source, &width, &height, &transposed};
-    cuda_kernel::IntegerConversionDescriptor converted{};
-    if (conversion) converted = *conversion;
-    void *integer_arguments[]{
-        &source, &width, &height, &converted, &transposed};
-    CUstream stream = requested_stream ? requested_stream : slot.stream;
+    cudaError_t status = cudaErrorInvalidValue;
+    switch (sample) {
+    case TransposeSample::float32:
+        status = cuda_launch::transpose(
+            device_as<const float>(source), width, height,
+            device_as<float>(transposed), slot.stream);
+        break;
+    case TransposeSample::uint8:
+        status = cuda_launch::transpose(
+            device_as<const std::uint8_t>(source), width, height, *conversion,
+            device_as<float>(transposed), slot.stream);
+        break;
+    case TransposeSample::uint16:
+        status = cuda_launch::transpose(
+            device_as<const std::uint16_t>(source), width, height, *conversion,
+            device_as<float>(transposed), slot.stream);
+        break;
+    }
     cuda_check(
-        *runtime.api,
-        runtime.api->launch_kernel(
-            function, divide_up(width, 32U), divide_up(height, 32U), 1U,
-            32U, 8U, 1U, 0U, stream,
-            conversion ? integer_arguments : float_arguments, nullptr),
-        "cuLaunchKernel(transpose)");
+        *runtime.api, status, "CUDA transpose kernel launch");
 }
 
 void launch_horizontal(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
-    std::uint32_t vector_count, CUdeviceptr output,
-    CUdeviceptr requested_transposed = 0U) {
-    CUdeviceptr transposed = requested_transposed != 0U
+    std::uint32_t vector_count, DevicePointer output,
+    DevicePointer requested_transposed = nullptr) {
+    DevicePointer transposed = requested_transposed
         ? requested_transposed : slot.transposed.pointer();
-    auto descriptor = plan.descriptor;
-    CUdeviceptr offsets = plan.transpose_offsets;
-    CUdeviceptr indices = plan.transpose_indices;
-    CUdeviceptr weights = plan.transpose_weights;
-    CUdeviceptr lower = plan.lower_ld;
-    CUdeviceptr upper = plan.upper_l;
-    CUdeviceptr diagonal = plan.inverse_diagonal;
-    void *arguments[]{
-        &transposed, &vector_count, &descriptor, &offsets, &indices, &weights,
-        &lower, &upper, &diagonal, &output};
-    const CUfunction function = runtime.horizontal_global_transpose
-        ? runtime.inverse_horizontal_column_major
-        : runtime.inverse_horizontal;
     const unsigned int shared_bytes = runtime.horizontal_global_transpose
         ? 0U
         : runtime.horizontal_threads * 33U
             * static_cast<unsigned int>(sizeof(float));
     cuda_check(
         *runtime.api,
-        runtime.api->launch_kernel(
-            function,
-            divide_up(vector_count, runtime.horizontal_threads), 1U, 1U,
-            runtime.horizontal_threads, 1U, 1U, shared_bytes, slot.stream,
-            arguments, nullptr),
-        "cuLaunchKernel(inverse horizontal)");
+        cuda_launch::inverse_horizontal(
+            device_as<const float>(transposed), vector_count, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<float>(output), runtime.horizontal_global_transpose,
+            runtime.horizontal_threads, shared_bytes, slot.stream),
+        "CUDA inverse-horizontal kernel launch");
 }
 
 void launch_horizontal_split(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
-    std::uint32_t vector_count, CUdeviceptr output,
-    CUdeviceptr requested_transposed = 0U) {
-    CUdeviceptr transposed = requested_transposed != 0U
+    std::uint32_t vector_count, DevicePointer output,
+    DevicePointer requested_transposed = nullptr) {
+    DevicePointer transposed = requested_transposed
         ? requested_transposed : slot.transposed.pointer();
-    auto descriptor = plan.descriptor;
-    CUdeviceptr offsets = plan.transpose_offsets;
-    CUdeviceptr indices = plan.transpose_indices;
-    CUdeviceptr weights = plan.transpose_weights;
-    void *rhs_arguments[]{
-        &transposed, &vector_count, &descriptor,
-        &offsets, &indices, &weights, &output};
-    const CUfunction rhs_function = runtime.horizontal_global_transpose
-        ? runtime.rhs_horizontal_column_major : runtime.rhs_horizontal;
     cuda_check(
         *runtime.api,
-        runtime.api->launch_kernel(
-            rhs_function,
-            divide_up(vector_count, rhs_vector_threads),
-            divide_up(descriptor.destination_size, rhs_index_threads),
-            1U,
-            rhs_vector_threads, rhs_index_threads, 1U, 0U, slot.stream,
-            rhs_arguments, nullptr),
-        "cuLaunchKernel(horizontal RHS)");
+        cuda_launch::rhs_horizontal(
+            device_as<const float>(transposed), vector_count, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<float>(output), runtime.horizontal_global_transpose,
+            slot.stream),
+        "CUDA horizontal-RHS kernel launch");
 
-    CUdeviceptr lower = plan.lower_ld;
-    CUdeviceptr upper = plan.upper_l;
-    CUdeviceptr diagonal = plan.inverse_diagonal;
-    void *solve_arguments[]{
-        &vector_count, &descriptor, &lower, &upper, &diagonal, &output};
-    const CUfunction solve_function = runtime.horizontal_global_transpose
-        ? runtime.solve_horizontal_column_major : runtime.solve_horizontal;
     const unsigned int shared_bytes = runtime.horizontal_global_transpose
         ? 0U
         : runtime.split_horizontal_threads * 33U
             * static_cast<unsigned int>(sizeof(float));
     cuda_check(
         *runtime.api,
-        runtime.api->launch_kernel(
-            solve_function,
-            divide_up(vector_count, runtime.split_horizontal_threads),
-            1U, 1U, runtime.split_horizontal_threads, 1U, 1U,
-            shared_bytes, slot.stream, solve_arguments, nullptr),
-        "cuLaunchKernel(horizontal solve)");
+        cuda_launch::solve_horizontal(
+            vector_count, plan.descriptor,
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<float>(output), runtime.horizontal_global_transpose,
+            runtime.split_horizontal_threads, shared_bytes, slot.stream),
+        "CUDA horizontal-solve kernel launch");
 }
 
 void launch_vertical(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
-    CUdeviceptr source, std::uint32_t source_width, CUdeviceptr output) {
-    auto descriptor = plan.descriptor;
-    CUdeviceptr offsets = plan.transpose_offsets;
-    CUdeviceptr indices = plan.transpose_indices;
-    CUdeviceptr weights = plan.transpose_weights;
-    CUdeviceptr lower = plan.lower_ld;
-    CUdeviceptr upper = plan.upper_l;
-    CUdeviceptr diagonal = plan.inverse_diagonal;
-    void *arguments[]{
-        &source, &source_width, &descriptor, &offsets, &indices, &weights,
-        &lower, &upper, &diagonal, &output};
+    DevicePointer source, std::uint32_t source_width, DevicePointer output) {
     cuda_check(
         *runtime.api,
-        runtime.api->launch_kernel(
-            runtime.inverse_vertical,
-            divide_up(source_width, runtime.vertical_threads),
-            1U, 1U,
-            runtime.vertical_threads, 1U, 1U, 0U, slot.stream, arguments,
-            nullptr),
-        "cuLaunchKernel(inverse vertical)");
+        cuda_launch::inverse_vertical(
+            device_as<const float>(source), source_width, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<float>(output), runtime.vertical_threads, slot.stream),
+        "CUDA inverse-vertical kernel launch");
 }
 
 void launch_vertical_split(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
-    CUdeviceptr source, std::uint32_t source_width, CUdeviceptr output) {
-    auto descriptor = plan.descriptor;
-    CUdeviceptr offsets = plan.transpose_offsets;
-    CUdeviceptr indices = plan.transpose_indices;
-    CUdeviceptr weights = plan.transpose_weights;
-    void *rhs_arguments[]{
-        &source, &source_width, &descriptor,
-        &offsets, &indices, &weights, &output};
+    DevicePointer source, std::uint32_t source_width, DevicePointer output) {
     cuda_check(
         *runtime.api,
-        runtime.api->launch_kernel(
-            runtime.rhs_vertical,
-            divide_up(source_width, rhs_vector_threads),
-            divide_up(descriptor.destination_size, rhs_index_threads),
-            1U,
-            rhs_vector_threads, rhs_index_threads, 1U, 0U, slot.stream,
-            rhs_arguments, nullptr),
-        "cuLaunchKernel(vertical RHS)");
+        cuda_launch::rhs_vertical(
+            device_as<const float>(source), source_width, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<float>(output), slot.stream),
+        "CUDA vertical-RHS kernel launch");
 
-    CUdeviceptr lower = plan.lower_ld;
-    CUdeviceptr upper = plan.upper_l;
-    CUdeviceptr diagonal = plan.inverse_diagonal;
-    void *solve_arguments[]{
-        &source_width, &descriptor, &lower, &upper, &diagonal, &output};
     cuda_check(
         *runtime.api,
-        runtime.api->launch_kernel(
-            runtime.solve_vertical,
-            divide_up(source_width, runtime.split_vertical_threads),
-            1U, 1U,
-            runtime.split_vertical_threads, 1U, 1U, 0U, slot.stream,
-            solve_arguments, nullptr),
-        "cuLaunchKernel(vertical solve)");
+        cuda_launch::solve_vertical(
+            source_width, plan.descriptor,
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<float>(output), runtime.split_vertical_threads,
+            slot.stream),
+        "CUDA vertical-solve kernel launch");
 }
 
 template <class Sample>
 void launch_conversion(
     Runtime &runtime, ExecutionSlot &slot, std::uint32_t element_count,
-    const cuda_kernel::IntegerConversionDescriptor &conversion,
-    CUstream requested_stream = nullptr) {
-    CUdeviceptr source = slot.destination.pointer();
-    CUdeviceptr output = slot.integer_output.pointer();
-    auto descriptor = conversion;
-    void *arguments[]{&source, &element_count, &descriptor, &output};
-    const CUfunction function = std::is_same_v<Sample, std::uint8_t>
-        ? runtime.convert_u8 : runtime.convert_u16;
-    CUstream stream = requested_stream ? requested_stream : slot.stream;
-    cuda_check(
-        *runtime.api,
-        runtime.api->launch_kernel(
-            function, divide_up(element_count, conversion_threads), 1U, 1U,
-            conversion_threads, 1U, 1U, 0U, stream, arguments, nullptr),
-        "cuLaunchKernel(integer conversion)");
+    const cuda_kernel::IntegerConversionDescriptor &conversion) {
+    const cudaError_t status = cuda_launch::convert(
+        device_as<const float>(slot.destination.pointer()), element_count,
+        conversion, device_as<Sample>(slot.integer_output.pointer()),
+        slot.stream);
+    cuda_check(*runtime.api, status, "CUDA integer-conversion kernel launch");
 }
 
 template <class Sample>
@@ -1868,40 +1706,8 @@ template <class Sample>
 
 bool backend_available() noexcept {
     static const bool available = [] {
-        try {
-            const auto api = load_cuda_driver();
-            cuda_check(*api, api->init(0U), "cuInit");
-            int count = 0;
-            cuda_check(*api, api->device_get_count(&count), "cuDeviceGetCount");
-            for (int ordinal = 0; ordinal < count; ++ordinal) {
-                CUdevice device = 0;
-                cuda_check(*api, api->device_get(&device, ordinal), "cuDeviceGet");
-                int major = 0;
-                int minor = 0;
-                int maximum_threads = 0;
-                cuda_check(
-                    *api, api->device_get_attribute(
-                        &major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-                        device),
-                    "cuDeviceGetAttribute(COMPUTE_CAPABILITY_MAJOR)");
-                cuda_check(
-                    *api, api->device_get_attribute(
-                        &minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-                        device),
-                    "cuDeviceGetAttribute(COMPUTE_CAPABILITY_MINOR)");
-                cuda_check(
-                    *api, api->device_get_attribute(
-                        &maximum_threads,
-                        CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK, device),
-                    "cuDeviceGetAttribute(MAX_THREADS_PER_BLOCK)");
-                if (architecture_code(major, minor) >= minimum_architecture
-                    && maximum_threads >= static_cast<int>(conversion_threads)) {
-                    return true;
-                }
-            }
-        } catch (...) {
-        }
-        return false;
+        int count = 0;
+        return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
     }();
     return available;
 }
@@ -2005,37 +1811,40 @@ struct CudaExecutor::Impl {
             ? ExecutionSlotClass::heavy_2d : ExecutionSlotClass::light_2d;
         const std::size_t slot_index = runtime->acquire_slot(slot_class);
         SlotRelease release(*runtime, slot_index, slot_class);
-        CurrentContextGuard context(*runtime->api, runtime->context);
+        CurrentDeviceGuard context(runtime->device_ordinal);
         ExecutionSlot &slot = *runtime->slots[slot_index];
         const std::size_t source_capacity = runtime->horizontal_global_transpose
             ? std::max(source_bytes, intermediate_bytes) : source_bytes;
-        slot.source.reserve(runtime->api, runtime->context, source_capacity);
+        slot.source.reserve(
+            runtime->api, runtime->device_ordinal, source_capacity);
         if (!cache_requested) {
             slot.transposed.reserve(
-                runtime->api, runtime->context, transposed_bytes);
+                runtime->api, runtime->device_ordinal, transposed_bytes);
         }
-        slot.intermediate.reserve(runtime->api, runtime->context, intermediate_bytes);
+        slot.intermediate.reserve(
+            runtime->api, runtime->device_ordinal, intermediate_bytes);
         slot.destination.reserve(
-            runtime->api, runtime->context, destination_bytes);
-        slot.host_source.reserve(runtime->api, runtime->context, source_bytes);
+            runtime->api, runtime->device_ordinal, destination_bytes);
+        slot.host_source.reserve(
+            runtime->api, runtime->device_ordinal, source_bytes);
         slot.host_destination.reserve(
-            runtime->api, runtime->context, result_bytes);
+            runtime->api, runtime->device_ordinal, result_bytes);
         if constexpr (!std::is_same_v<Sample, float>) {
             slot.integer_output.reserve(
-                runtime->api, runtime->context, result_bytes);
+                runtime->api, runtime->device_ordinal, result_bytes);
         }
 
         cuda_kernel::IntegerConversionDescriptor converted{};
-        CUfunction transpose = runtime->transpose_f32;
+        TransposeSample transpose = TransposeSample::float32;
         const cuda_kernel::IntegerConversionDescriptor *converted_ptr = nullptr;
         if constexpr (std::is_same_v<Sample, std::uint8_t>) {
             converted = conversion_descriptor(*conversion);
             converted_ptr = &converted;
-            transpose = runtime->transpose_u8;
+            transpose = TransposeSample::uint8;
         } else if constexpr (std::is_same_v<Sample, std::uint16_t>) {
             converted = conversion_descriptor(*conversion);
             converted_ptr = &converted;
-            transpose = runtime->transpose_u16;
+            transpose = TransposeSample::uint16;
         }
 
         if (cache_requested) {
@@ -2043,13 +1852,13 @@ struct CudaExecutor::Impl {
                 input, input_row_stride, source_width, source_height,
                 CachedInputLayout::transposed, conversion);
             auto acquired = runtime->input_cache.acquire(
-                *cache_key, runtime->api, runtime->context,
+                *cache_key, runtime->api, runtime->device_ordinal,
                 runtime->input_arena, transposed_bytes,
                 std::move(input_lifetime));
             cached_input = std::move(acquired.input);
             cache_producer = acquired.producer;
         }
-        const CUdeviceptr transposed_input = cached_input
+        const DevicePointer transposed_input = cached_input
             ? cached_input->pointer() : slot.transposed.pointer();
         const auto populate_input = [&] {
             pack_host_rows(
@@ -2066,7 +1875,7 @@ struct CudaExecutor::Impl {
                 runtime->api->memcpy_htod_async(
                     slot.source.pointer(), slot.host_source.data(), source_bytes,
                     slot.stream),
-                "cuMemcpyHtoDAsync_v2(source)");
+                "cudaMemcpyAsync(source upload)");
             launch_transpose(
                 *runtime, slot, transpose, source_width, source_height,
                 converted_ptr, slot.source.pointer(), transposed_input);
@@ -2087,7 +1896,7 @@ struct CudaExecutor::Impl {
             cached_input->wait_on(slot.stream);
         }
 
-        const CUdeviceptr horizontal_output =
+        const DevicePointer horizontal_output =
             runtime->horizontal_global_transpose
             ? slot.source.pointer() : slot.intermediate.pointer();
         packed_horizontal->wait_on(slot.stream);
@@ -2102,7 +1911,7 @@ struct CudaExecutor::Impl {
         }
         if (runtime->horizontal_global_transpose) {
             launch_transpose(
-                *runtime, slot, runtime->transpose_f32,
+                *runtime, slot, TransposeSample::float32,
                 source_height, destination_width, nullptr,
                 slot.source.pointer(), slot.intermediate.pointer());
         }
@@ -2116,7 +1925,7 @@ struct CudaExecutor::Impl {
                 *runtime, slot, *packed_vertical, slot.intermediate.pointer(),
                 destination_width, slot.destination.pointer());
         }
-        CUdeviceptr result = slot.destination.pointer();
+        DevicePointer result = slot.destination.pointer();
         if constexpr (!std::is_same_v<Sample, float>) {
             launch_conversion<Sample>(
                 *runtime, slot, checked_u32(
@@ -2128,10 +1937,10 @@ struct CudaExecutor::Impl {
             *runtime->api,
             runtime->api->memcpy_dtoh_async(
                 slot.host_destination.data(), result, result_bytes, slot.stream),
-            "cuMemcpyDtoHAsync_v2(destination)");
+            "cudaMemcpyAsync(destination download)");
         cuda_check(
             *runtime->api, runtime->api->stream_synchronize(slot.stream),
-            "cuStreamSynchronize");
+            "cudaStreamSynchronize");
         packed_horizontal->mark_upload_complete();
         packed_vertical->mark_upload_complete();
         release.mark_completed();
@@ -2156,7 +1965,7 @@ CudaExecutor::CudaExecutor() : impl_(std::make_shared<Impl>()) {}
 CudaExecutor::~CudaExecutor() = default;
 
 const char *CudaExecutor::name() const noexcept {
-    return impl_->runtime->display_name.c_str();
+    return "cuda";
 }
 
 bool CudaExecutor::input_cache_enabled() const noexcept {
@@ -2218,33 +2027,33 @@ void CudaExecutor::inverse_rows(
         ExecutionSlotClass::one_dimensional);
     SlotRelease release(
         *impl_->runtime, slot_index, ExecutionSlotClass::one_dimensional);
-    CurrentContextGuard context(*impl_->runtime->api, impl_->runtime->context);
+    CurrentDeviceGuard context(impl_->runtime->device_ordinal);
     ExecutionSlot &slot = *impl_->runtime->slots[slot_index];
     slot.source.reserve(
-        impl_->runtime->api, impl_->runtime->context, source_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
     if (!cache_requested) {
         slot.transposed.reserve(
-            impl_->runtime->api, impl_->runtime->context, source_bytes);
+            impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
     }
     slot.destination.reserve(
-        impl_->runtime->api, impl_->runtime->context, output_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
     slot.host_source.reserve(
-        impl_->runtime->api, impl_->runtime->context, source_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
     slot.host_destination.reserve(
-        impl_->runtime->api, impl_->runtime->context, output_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
 
     if (cache_requested) {
         cache_key = make_input_cache_key(
             input, input_row_stride, width, height,
             CachedInputLayout::transposed);
         auto acquired = impl_->runtime->input_cache.acquire(
-            *cache_key, impl_->runtime->api, impl_->runtime->context,
+            *cache_key, impl_->runtime->api, impl_->runtime->device_ordinal,
             impl_->runtime->input_arena, source_bytes,
             std::move(input_lifetime));
         cached_input = std::move(acquired.input);
         cache_producer = acquired.producer;
     }
-    const CUdeviceptr transposed_input = cached_input
+    const DevicePointer transposed_input = cached_input
         ? cached_input->pointer() : slot.transposed.pointer();
     const auto populate_input = [&] {
         pack_host_rows(
@@ -2259,9 +2068,9 @@ void CudaExecutor::inverse_rows(
             impl_->runtime->api->memcpy_htod_async(
                 slot.source.pointer(), slot.host_source.data(), source_bytes,
                 slot.stream),
-            "cuMemcpyHtoDAsync_v2(row source)");
+            "cudaMemcpyAsync(row source upload)");
         launch_transpose(
-            *impl_->runtime, slot, impl_->runtime->transpose_f32,
+            *impl_->runtime, slot, TransposeSample::float32,
             width, height, nullptr, slot.source.pointer(), transposed_input);
     };
     if (!cached_input) {
@@ -2280,7 +2089,7 @@ void CudaExecutor::inverse_rows(
         cached_input->wait_on(slot.stream);
     }
 
-    const CUdeviceptr horizontal_output =
+    const DevicePointer horizontal_output =
         impl_->runtime->horizontal_global_transpose
         ? slot.source.pointer() : slot.destination.pointer();
     packed->wait_on(slot.stream);
@@ -2295,7 +2104,7 @@ void CudaExecutor::inverse_rows(
     }
     if (impl_->runtime->horizontal_global_transpose) {
         launch_transpose(
-            *impl_->runtime, slot, impl_->runtime->transpose_f32,
+            *impl_->runtime, slot, TransposeSample::float32,
             height, destination_width, nullptr,
             slot.source.pointer(), slot.destination.pointer());
     }
@@ -2304,11 +2113,11 @@ void CudaExecutor::inverse_rows(
         impl_->runtime->api->memcpy_dtoh_async(
             slot.host_destination.data(), slot.destination.pointer(),
             output_bytes, slot.stream),
-        "cuMemcpyDtoHAsync_v2(row destination)");
+        "cudaMemcpyAsync(row destination download)");
     cuda_check(
         *impl_->runtime->api,
         impl_->runtime->api->stream_synchronize(slot.stream),
-        "cuStreamSynchronize");
+        "cudaStreamSynchronize");
     packed->mark_upload_complete();
     release.mark_completed();
     unpack_host_rows(
@@ -2358,29 +2167,29 @@ void CudaExecutor::inverse_columns(
         ExecutionSlotClass::one_dimensional);
     SlotRelease release(
         *impl_->runtime, slot_index, ExecutionSlotClass::one_dimensional);
-    CurrentContextGuard context(*impl_->runtime->api, impl_->runtime->context);
+    CurrentDeviceGuard context(impl_->runtime->device_ordinal);
     ExecutionSlot &slot = *impl_->runtime->slots[slot_index];
     slot.source.reserve(
-        impl_->runtime->api, impl_->runtime->context, source_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
     slot.destination.reserve(
-        impl_->runtime->api, impl_->runtime->context, output_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
     slot.host_source.reserve(
-        impl_->runtime->api, impl_->runtime->context, source_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
     slot.host_destination.reserve(
-        impl_->runtime->api, impl_->runtime->context, output_bytes);
+        impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
 
     if (cache_requested) {
         cache_key = make_input_cache_key(
             input, input_row_stride, width, source_height,
             CachedInputLayout::row_major);
         auto acquired = impl_->runtime->input_cache.acquire(
-            *cache_key, impl_->runtime->api, impl_->runtime->context,
+            *cache_key, impl_->runtime->api, impl_->runtime->device_ordinal,
             impl_->runtime->input_arena, source_bytes,
             std::move(input_lifetime));
         cached_input = std::move(acquired.input);
         cache_producer = acquired.producer;
     }
-    const CUdeviceptr device_input = cached_input
+    const DevicePointer device_input = cached_input
         ? cached_input->pointer() : slot.source.pointer();
     const auto populate_input = [&] {
         pack_host_rows(
@@ -2396,7 +2205,7 @@ void CudaExecutor::inverse_columns(
             impl_->runtime->api->memcpy_htod_async(
                 device_input, slot.host_source.data(), source_bytes,
                 slot.stream),
-            "cuMemcpyHtoDAsync_v2(column source)");
+            "cudaMemcpyAsync(column source upload)");
     };
     if (!cached_input) {
         populate_input();
@@ -2429,11 +2238,11 @@ void CudaExecutor::inverse_columns(
         impl_->runtime->api->memcpy_dtoh_async(
             slot.host_destination.data(), slot.destination.pointer(),
             output_bytes, slot.stream),
-        "cuMemcpyDtoHAsync_v2(column destination)");
+        "cudaMemcpyAsync(column destination download)");
     cuda_check(
         *impl_->runtime->api,
         impl_->runtime->api->stream_synchronize(slot.stream),
-        "cuStreamSynchronize");
+        "cudaStreamSynchronize");
     packed->mark_upload_complete();
     release.mark_completed();
     unpack_host_rows(
