@@ -9,6 +9,7 @@ namespace dsmvc::cuda_detail {
 namespace {
 
 constexpr WORD fatbin_resource_id = 101;
+constexpr WORD rcdata_resource_type = 10;
 const int module_anchor = 0;
 
 [[noreturn]] void throw_resource_error(const char *operation) {
@@ -28,7 +29,8 @@ const void *embedded_cuda_fatbin() {
         throw_resource_error("GetModuleHandleExW");
     }
     const HRSRC resource = FindResourceW(
-        module, MAKEINTRESOURCEW(fatbin_resource_id), RT_RCDATA);
+        module, MAKEINTRESOURCEW(fatbin_resource_id),
+        MAKEINTRESOURCEW(rcdata_resource_type));
     if (!resource) throw_resource_error("FindResourceW");
     const HGLOBAL loaded = LoadResource(module, resource);
     if (!loaded) throw_resource_error("LoadResource");
