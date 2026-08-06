@@ -54,7 +54,7 @@ jobs:
         with:
           cuda: 13.2.0
           method: network
-          sub-packages: '["nvcc", "cuobjdump", "cudart"]'
+          sub-packages: '["nvcc", "cuobjdump", "cudart", "crt"]'
           log-file-suffix: ${{ matrix.os }}
 
       - name: Configure

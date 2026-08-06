@@ -16,9 +16,29 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
+
+class JoiningThread {
+public:
+    template <class Function>
+    explicit JoiningThread(Function &&function)
+        : thread_(std::forward<Function>(function)) {}
+
+    JoiningThread(const JoiningThread &) = delete;
+    JoiningThread &operator=(const JoiningThread &) = delete;
+    JoiningThread(JoiningThread &&) noexcept = default;
+    JoiningThread &operator=(JoiningThread &&) = delete;
+
+    ~JoiningThread() {
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    std::thread thread_;
+};
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -736,7 +756,7 @@ void test_cuda_executor_agreement() {
         const char *label) {
         std::vector<std::exception_ptr> errors(6U);
         std::barrier start(static_cast<std::ptrdiff_t>(errors.size()));
-        std::vector<std::jthread> callers;
+        std::vector<JoiningThread> callers;
         callers.reserve(errors.size());
         for (std::size_t index = 0; index < errors.size(); ++index) {
             callers.emplace_back([&, index] {
@@ -829,7 +849,7 @@ void test_inverse_only_cache() {
     request.kernel.c = 0.5;
 
     std::vector<std::shared_ptr<const dsmvc::AxisPlan>> plans(8);
-    std::vector<std::jthread> workers;
+    std::vector<JoiningThread> workers;
     for (std::size_t index = 0; index < plans.size(); ++index) {
         workers.emplace_back([&, index] {
             plans[index] = dsmvc::get_or_build_axis_plan(request);
@@ -1000,7 +1020,7 @@ void test_b5_b7_executor_agreement() {
         "Spline64 b7 vertical non-vector tail");
 
     std::vector<std::exception_ptr> errors(8U);
-    std::vector<std::jthread> callers;
+    std::vector<JoiningThread> callers;
     callers.reserve(errors.size());
     for (std::size_t index = 0; index < errors.size(); ++index) {
         callers.emplace_back([&, index] {
@@ -1159,7 +1179,7 @@ void test_concurrent_prepare_and_seal() {
     std::atomic<std::size_t> prepared{0U};
     std::atomic<std::size_t> rejected{0U};
     std::vector<std::exception_ptr> errors(plans.size());
-    std::vector<std::jthread> workers;
+    std::vector<JoiningThread> workers;
     workers.reserve(plans.size());
     for (std::size_t index = 0; index < plans.size(); ++index) {
         workers.emplace_back([&, index] {
