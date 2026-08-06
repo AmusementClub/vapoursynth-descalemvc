@@ -30,7 +30,7 @@ Mac 上如果 SHA-256 不一致，先不要跑完整 benchmark；那已经不是
 
 ## 2. 准备环境
 
-需要 CMake 3.24 或更新版本、C++23 编译器、VapourSynth API3 SDK、VSPipe、
+需要 CMake 3.24 或更新版本、C++23 编译器、VapourSynth API4 SDK、VSPipe、
 VapourSynth Python，以及所选的 source plugin。Apple Silicon 和 Intel Mac
 不能混用插件或 VapourSynth：所有 `.so`/`.dylib`、VSPipe、Python 和宿主进程
 都必须是同一架构。
@@ -73,7 +73,7 @@ test -f "$SOURCE"
 test -f "$OLD_PLUGIN"
 test -f "$VS_PY"
 test -f "$VSPIPE"
-test -f "$VS_SDK/include/VapourSynth.h"
+test -f "$VS_SDK/include/VapourSynth4.h"
 for path in "$HTML_1" "$HTML_2" "$SCRIPT_GETNATIVE" \
     "$SCRIPT_GETNATIVE_V2" "$SCRIPT_SELECTKERNEL"; do
     test -f "$path"

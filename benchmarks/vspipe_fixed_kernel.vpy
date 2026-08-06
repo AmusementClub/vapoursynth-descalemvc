@@ -65,13 +65,14 @@ def descale(source, kernel_name, arguments):
     elif kernel_name.startswith("lanczos"):
         kwargs["taps"] = int(kernel_name.removeprefix("lanczos"))
     if implementation == "new":
-        kwargs["backend"] = "cpu"
+        kwargs["backend"] = backend
     return getattr(namespace, FUNCTIONS[kernel_name])(
         source, **kwargs)
 
 
 core = vs.core
 core.num_threads = int(threads)
+backend = globals().get("backend", "cpu")
 source_decoder = globals().get("source_decoder", "")
 source_prefer_hw = int(globals().get("source_prefer_hw", "0") or 0)
 source_ff_loglevel = int(globals().get("source_ff_loglevel", "0") or 0)

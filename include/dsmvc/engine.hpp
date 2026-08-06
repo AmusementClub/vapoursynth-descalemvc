@@ -135,6 +135,8 @@ inline void inverse_axis_f32(const AxisPlan &plan,
 
 [[nodiscard]] bool cpu_avx2_compiled() noexcept;
 [[nodiscard]] bool cpu_avx2_available() noexcept;
+[[nodiscard]] bool cuda_compiled() noexcept;
+[[nodiscard]] bool cuda_available() noexcept;
 
 class CpuExecutor {
 public:
@@ -207,6 +209,76 @@ private:
         const Sample *input, std::ptrdiff_t input_row_stride,
         Sample *output, std::ptrdiff_t output_row_stride,
         const IntegerConversion &conversion) const;
+};
+
+// Backend-neutral executor used by the plugin. Automatic dispatch deliberately
+// remains CPU-first; callers opt in to CUDA with BackendKind::cuda.
+class Executor {
+public:
+    explicit Executor(
+        BackendKind requested = BackendKind::automatic,
+        CpuPath cpu_path = CpuPath::automatic);
+    ~Executor();
+    Executor(const Executor &) noexcept = default;
+    Executor &operator=(const Executor &) noexcept = default;
+    Executor(Executor &&) noexcept = default;
+    Executor &operator=(Executor &&) noexcept = default;
+
+    [[nodiscard]] BackendKind backend() const noexcept;
+    [[nodiscard]] const char *name() const noexcept;
+    [[nodiscard]] bool input_cache_enabled() const noexcept;
+
+    void prepare(std::shared_ptr<const AxisPlan> plan) const;
+    void seal() const;
+
+    void inverse_rows(const AxisPlan &plan,
+                      const float *input, std::ptrdiff_t input_row_stride,
+                      float *output, std::ptrdiff_t output_row_stride,
+                      std::int32_t row_count,
+                      std::shared_ptr<const void> input_lifetime = {}) const;
+
+    void inverse_columns(const AxisPlan &plan,
+                         const float *input, std::ptrdiff_t input_row_stride,
+                         float *output, std::ptrdiff_t output_row_stride,
+                         std::int32_t column_count,
+                         std::shared_ptr<const void> input_lifetime = {}) const;
+
+    void inverse_2d(const AxisPlan &horizontal, const AxisPlan &vertical,
+                    const float *input, std::ptrdiff_t input_row_stride,
+                    float *output, std::ptrdiff_t output_row_stride,
+                    std::shared_ptr<const void> input_lifetime = {}) const;
+
+    void inverse_2d_u8(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+        std::uint8_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion,
+        std::shared_ptr<const void> input_lifetime = {}) const;
+
+    void inverse_2d_u16(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+        std::uint16_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion,
+        std::shared_ptr<const void> input_lifetime = {}) const;
+
+    void inverse_2d_u8_streamed(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+        std::uint8_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion,
+        std::shared_ptr<const void> input_lifetime = {}) const;
+
+    void inverse_2d_u16_streamed(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+        std::uint16_t *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion &conversion,
+        std::shared_ptr<const void> input_lifetime = {}) const;
+
+private:
+    struct Impl;
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace dsmvc

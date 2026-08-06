@@ -36,6 +36,15 @@ def fixed_geometry(width, height, native_height, base_height):
 
 core = vs.core
 core.num_threads = int(threads)
+backend = globals().get("backend", "cpu")
+sample_format_name = globals().get("sample_format", "GRAYS")
+sample_formats = {
+    "GRAY8": vs.GRAY8,
+    "GRAY16": vs.GRAY16,
+    "GRAYS": vs.GRAYS,
+}
+if sample_format_name not in sample_formats:
+    raise ValueError("unsupported sample_format: " + str(sample_format_name))
 
 if implementation == "new":
     if not hasattr(core, "dsmvc"):
@@ -50,7 +59,7 @@ source = core.std.BlankClip(
     width=1920,
     height=1080,
     length=int(frames),
-    format=vs.GRAYS,
+    format=sample_formats[sample_format_name],
     color=0,
 )
 arguments = fixed_geometry(
@@ -60,6 +69,6 @@ if kernel == "bicubic_b0_c0_5":
 elif kernel.startswith("lanczos"):
     arguments["taps"] = int(kernel.removeprefix("lanczos"))
 if implementation == "new":
-    arguments["backend"] = "cpu"
+    arguments["backend"] = backend
 output = getattr(namespace, FUNCTIONS[kernel])(source, **arguments)
 output.set_output(0)

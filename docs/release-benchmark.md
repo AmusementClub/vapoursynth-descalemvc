@@ -49,7 +49,7 @@ The measured graph starts with `source -> ShufflePlanes(plane=0, GRAY) -> resize
 ## Build and Provenance
 
 - Build: `Release`, CMake platform defaults, with AVX2/FMA isolated to `cpu_executor_avx2.cpp` when the target is x86_64
-- Link: version-script export of `VapourSynthPluginInit`, RELRO, NOW, and pthread
+- Link: version-script export of `VapourSynthPluginInit2`, RELRO, NOW, and pthread
 - No LTO, PGO, native CPU tuning, or fast-math flags
 
 ## E2E Thread Scaling

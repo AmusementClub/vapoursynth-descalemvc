@@ -1,7 +1,7 @@
 #include <dsmvc/engine.hpp>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
 
 #include <algorithm>
 #include <atomic>
@@ -24,9 +24,9 @@ namespace {
 using dsmvc::AxisRequest;
 using dsmvc::BackendKind;
 using dsmvc::BorderMode;
-using dsmvc::CpuExecutor;
 using dsmvc::CpuPath;
 using dsmvc::CustomKernel;
+using dsmvc::Executor;
 using dsmvc::IntegerConversion;
 using dsmvc::KernelKind;
 using dsmvc::KernelSpec;
@@ -35,7 +35,7 @@ constexpr const char *plugin_id = "com.dsmvc.descale";
 
 struct ParsedArguments {
     KernelSpec kernel{};
-    VSFuncRef *custom_kernel = nullptr;
+    VSFunction *custom_kernel = nullptr;
     int width = 0;
     int height = 0;
     double src_left = 0.0;
@@ -55,9 +55,9 @@ struct ParsedArguments {
 };
 
 struct FilterData {
-    explicit FilterData(CpuPath path) : executor(path) {}
+    FilterData(BackendKind backend, CpuPath path) : executor(backend, path) {}
 
-    VSNodeRef *node = nullptr;
+    VSNode *node = nullptr;
     VSVideoInfo vi{};
     int source_width = 0;
     int source_height = 0;
@@ -66,7 +66,7 @@ struct FilterData {
     int subsampling_w = 0;
     int subsampling_h = 0;
     int num_planes = 0;
-    int color_family = cmGray;
+    int color_family = cfGray;
     int bits_per_sample = 32;
     int bytes_per_sample = 4;
     int core_threads = 1;
@@ -81,9 +81,9 @@ struct FilterData {
     std::shared_ptr<const dsmvc::AxisPlan> vertical[2];
     std::once_flag planning_once;
     std::exception_ptr planning_error;
-    VSFuncRef *custom_kernel = nullptr;
+    VSFunction *custom_kernel = nullptr;
     CustomKernel custom_callback;
-    CpuExecutor executor{};
+    Executor executor{};
     std::atomic<std::uint32_t> active_2d_frames{0};
 };
 
@@ -198,21 +198,21 @@ std::string lower_copy(const char *value) {
 
 int get_int(const VSMap *map, const char *key, int fallback, const VSAPI *vsapi) {
     int error = 0;
-    const auto value = vsapi->propGetInt(map, key, 0, &error);
-    return error ? fallback : int64ToIntS(value);
+    const auto value = vsapi->mapGetInt(map, key, 0, &error);
+    return error ? fallback : vsh::int64ToIntS(value);
 }
 
 double get_float(const VSMap *map, const char *key, double fallback,
                  const VSAPI *vsapi) {
     int error = 0;
-    const double value = vsapi->propGetFloat(map, key, 0, &error);
+    const double value = vsapi->mapGetFloat(map, key, 0, &error);
     return error ? fallback : value;
 }
 
 std::string get_data(const VSMap *map, const char *key,
                      const char *fallback, const VSAPI *vsapi) {
     int error = 0;
-    const char *value = vsapi->propGetData(map, key, 0, &error);
+    const char *value = vsapi->mapGetData(map, key, 0, &error);
     return error || !value ? fallback : value;
 }
 
@@ -241,26 +241,26 @@ const char *kernel_name(KernelKind kind) noexcept {
 
 void set_error(VSMap *out, const std::string &message, const VSAPI *vsapi) {
     const std::string prefixed = "dsmvc: " + message;
-    vsapi->setError(out, prefixed.c_str());
+    vsapi->mapSetError(out, prefixed.c_str());
 }
 
-VSFuncRef *get_function(const VSMap *in, const char *key, const VSAPI *vsapi) {
+VSFunction *get_function(const VSMap *in, const char *key, const VSAPI *vsapi) {
     int error = 0;
-    VSFuncRef *function = vsapi->propGetFunc(in, key, 0, &error);
+    VSFunction *function = vsapi->mapGetFunction(in, key, 0, &error);
     return error ? nullptr : function;
 }
 
 class FunctionGuard {
 public:
-    FunctionGuard(VSFuncRef *&function, const VSAPI *vsapi)
+    FunctionGuard(VSFunction *&function, const VSAPI *vsapi)
         : function_(function), vsapi_(vsapi) {}
     ~FunctionGuard() {
-        if (!dismissed_ && function_) vsapi_->freeFunc(function_);
+        if (!dismissed_ && function_) vsapi_->freeFunction(function_);
     }
     void dismiss() noexcept { dismissed_ = true; }
 
 private:
-    VSFuncRef *&function_;
+    VSFunction *&function_;
     const VSAPI *vsapi_;
     bool dismissed_ = false;
 };
@@ -293,12 +293,12 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
         parsed.kernel.kind = static_cast<KernelKind>(fixed_mode - 1);
     } else {
         int kernel_error = 0;
-        const char *kernel = vsapi->propGetData(in, "kernel", 0, &kernel_error);
-        VSFuncRef *legacy_custom = get_function(in, "custom", vsapi);
-        VSFuncRef *custom_kernel = get_function(in, "custom_kernel", vsapi);
+        const char *kernel = vsapi->mapGetData(in, "kernel", 0, &kernel_error);
+        VSFunction *legacy_custom = get_function(in, "custom", vsapi);
+        VSFunction *custom_kernel = get_function(in, "custom_kernel", vsapi);
         if (legacy_custom) {
             parsed.custom_kernel = legacy_custom;
-            if (custom_kernel) vsapi->freeFunc(custom_kernel);
+            if (custom_kernel) vsapi->freeFunction(custom_kernel);
         } else {
             parsed.custom_kernel = custom_kernel;
         }
@@ -315,11 +315,11 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     parsed.kernel.b = get_float(in, "b", 0.0, vsapi);
     parsed.kernel.c = get_float(in, "c", 0.5, vsapi);
     int taps_error = 0;
-    const auto taps = vsapi->propGetInt(in, "taps", 0, &taps_error);
+    const auto taps = vsapi->mapGetInt(in, "taps", 0, &taps_error);
     int support_error = 0;
-    const auto support = vsapi->propGetInt(in, "support", 0, &support_error);
-    parsed.kernel.taps = !taps_error ? int64ToIntS(taps)
-        : !support_error ? int64ToIntS(support) : 3;
+    const auto support = vsapi->mapGetInt(in, "support", 0, &support_error);
+    parsed.kernel.taps = !taps_error ? vsh::int64ToIntS(taps)
+        : !support_error ? vsh::int64ToIntS(support) : 3;
     if ((parsed.kernel.kind == KernelKind::lanczos
          || parsed.kernel.kind == KernelKind::custom)
         && parsed.kernel.taps < 1) {
@@ -355,68 +355,78 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
 
 void copy_common_arguments(VSMap *map, const ParsedArguments &parsed,
                            const VSAPI *vsapi) {
-    vsapi->propSetInt(map, "width", parsed.width, paReplace);
-    vsapi->propSetInt(map, "height", parsed.height, paReplace);
+    vsapi->mapSetInt(map, "width", parsed.width, maReplace);
+    vsapi->mapSetInt(map, "height", parsed.height, maReplace);
     if (parsed.kernel.kind == KernelKind::custom) {
-        vsapi->propSetFunc(map, "custom_kernel", parsed.custom_kernel, paReplace);
+        vsapi->mapSetFunction(
+            map, "custom_kernel", parsed.custom_kernel, maReplace);
     } else {
-        vsapi->propSetData(map, "kernel", kernel_name(parsed.kernel.kind), -1, paReplace);
+        vsapi->mapSetData(map, "kernel", kernel_name(parsed.kernel.kind), -1,
+                          dtUtf8, maReplace);
     }
-    vsapi->propSetInt(map, "taps", parsed.kernel.taps, paReplace);
-    vsapi->propSetFloat(map, "b", parsed.kernel.b, paReplace);
-    vsapi->propSetFloat(map, "c", parsed.kernel.c, paReplace);
-    vsapi->propSetFloat(map, "src_left", parsed.src_left, paReplace);
-    vsapi->propSetFloat(map, "src_top", parsed.src_top, paReplace);
-    vsapi->propSetFloat(map, "src_width", parsed.src_width, paReplace);
-    vsapi->propSetFloat(map, "src_height", parsed.src_height, paReplace);
-    vsapi->propSetInt(map, "border_handling", parsed.border_value, paReplace);
-    vsapi->propSetInt(map, "force", parsed.force, paReplace);
-    vsapi->propSetInt(map, "force_h", parsed.force_h, paReplace);
-    vsapi->propSetInt(map, "force_v", parsed.force_v, paReplace);
-    vsapi->propSetInt(map, "opt", parsed.opt, paReplace);
-    vsapi->propSetData(map, "backend", parsed.backend_text.c_str(), -1, paReplace);
+    vsapi->mapSetInt(map, "taps", parsed.kernel.taps, maReplace);
+    vsapi->mapSetFloat(map, "b", parsed.kernel.b, maReplace);
+    vsapi->mapSetFloat(map, "c", parsed.kernel.c, maReplace);
+    vsapi->mapSetFloat(map, "src_left", parsed.src_left, maReplace);
+    vsapi->mapSetFloat(map, "src_top", parsed.src_top, maReplace);
+    vsapi->mapSetFloat(map, "src_width", parsed.src_width, maReplace);
+    vsapi->mapSetFloat(map, "src_height", parsed.src_height, maReplace);
+    vsapi->mapSetInt(map, "border_handling", parsed.border_value, maReplace);
+    vsapi->mapSetInt(map, "force", parsed.force, maReplace);
+    vsapi->mapSetInt(map, "force_h", parsed.force_h, maReplace);
+    vsapi->mapSetInt(map, "force_v", parsed.force_v, maReplace);
+    vsapi->mapSetInt(map, "opt", parsed.opt, maReplace);
+    vsapi->mapSetData(map, "backend", parsed.backend_text.c_str(), -1,
+                      dtUtf8, maReplace);
 }
 
-VSNodeRef *invoke_clip(VSPlugin *plugin, const char *function, VSMap *arguments,
-                       const VSAPI *vsapi) {
+VSNode *invoke_clip(VSPlugin *plugin, const char *function, VSMap *arguments,
+                    const VSAPI *vsapi) {
     VSMap *result = vsapi->invoke(plugin, function, arguments);
-    const char *error = vsapi->getError(result);
+    const char *error = vsapi->mapGetError(result);
     if (error) {
         const std::string message = error;
         vsapi->freeMap(result);
         throw std::runtime_error(message);
     }
     int node_error = 0;
-    VSNodeRef *node = vsapi->propGetNode(result, "clip", 0, &node_error);
+    VSNode *node = vsapi->mapGetNode(result, "clip", 0, &node_error);
     vsapi->freeMap(result);
     if (node_error || !node) throw std::runtime_error("filter did not return a clip");
     return node;
 }
 
-void convert_and_invoke(VSNodeRef *source, const VSVideoInfo &source_vi,
+void convert_and_invoke(VSNode *source, const VSVideoInfo &source_vi,
                         const ParsedArguments &parsed, VSMap *out,
                         VSCore *core, const VSAPI *vsapi) {
-    VSPlugin *resize = vsapi->getPluginById("com.vapoursynth.resize", core);
-    VSPlugin *self = vsapi->getPluginById(plugin_id, core);
+    VSPlugin *resize = vsapi->getPluginByID("com.vapoursynth.resize", core);
+    VSPlugin *self = vsapi->getPluginByID(plugin_id, core);
     if (!resize || !self) throw std::runtime_error("required plugin lookup failed");
-    const VSFormat *float_format = vsapi->registerFormat(
-        source_vi.format->colorFamily, stFloat, 32,
-        source_vi.format->subSamplingW, source_vi.format->subSamplingH, core);
-    if (!float_format) throw std::runtime_error("failed to register Float32 format");
+    const auto float_format_id = vsapi->queryVideoFormatID(
+        source_vi.format.colorFamily, stFloat, 32,
+        source_vi.format.subSamplingW, source_vi.format.subSamplingH, core);
+    const auto source_format_id = vsapi->queryVideoFormatID(
+        source_vi.format.colorFamily, source_vi.format.sampleType,
+        source_vi.format.bitsPerSample, source_vi.format.subSamplingW,
+        source_vi.format.subSamplingH, core);
+    if (!float_format_id || !source_format_id) {
+        throw std::runtime_error("failed to query conversion format");
+    }
 
     VSMap *arguments = vsapi->createMap();
-    vsapi->propSetNode(arguments, "clip", source, paReplace);
-    vsapi->propSetInt(arguments, "format", float_format->id, paReplace);
-    vsapi->propSetData(arguments, "dither_type", "none", -1, paReplace);
-    VSNodeRef *float_node = nullptr;
-    VSNodeRef *descaled_node = nullptr;
-    VSNodeRef *result_node = nullptr;
+    vsapi->mapSetNode(arguments, "clip", source, maReplace);
+    vsapi->mapSetInt(arguments, "format", float_format_id, maReplace);
+    vsapi->mapSetData(
+        arguments, "dither_type", "none", -1, dtUtf8, maReplace);
+    VSNode *float_node = nullptr;
+    VSNode *descaled_node = nullptr;
+    VSNode *result_node = nullptr;
     try {
         float_node = invoke_clip(resize, "Point", arguments, vsapi);
         vsapi->freeMap(arguments);
 
         arguments = vsapi->createMap();
-        vsapi->propSetNode(arguments, "src", float_node, paReplace);
+        vsapi->mapSetNode(arguments, "src", float_node, maReplace);
         copy_common_arguments(arguments, parsed, vsapi);
         descaled_node = invoke_clip(self, "Descale", arguments, vsapi);
         vsapi->freeMap(arguments);
@@ -424,16 +434,17 @@ void convert_and_invoke(VSNodeRef *source, const VSVideoInfo &source_vi,
         float_node = nullptr;
 
         arguments = vsapi->createMap();
-        vsapi->propSetNode(arguments, "clip", descaled_node, paReplace);
-        vsapi->propSetInt(arguments, "format", source_vi.format->id, paReplace);
-        vsapi->propSetData(arguments, "dither_type", "none", -1, paReplace);
+        vsapi->mapSetNode(arguments, "clip", descaled_node, maReplace);
+        vsapi->mapSetInt(arguments, "format", source_format_id, maReplace);
+        vsapi->mapSetData(
+            arguments, "dither_type", "none", -1, dtUtf8, maReplace);
         result_node = invoke_clip(resize, "Point", arguments, vsapi);
         vsapi->freeMap(arguments);
         arguments = nullptr;
         vsapi->freeNode(descaled_node);
         descaled_node = nullptr;
-        vsapi->propSetNode(out, "clip", result_node, paReplace);
-        vsapi->freeNode(result_node);
+        vsapi->mapConsumeNode(out, "clip", result_node, maReplace);
+        result_node = nullptr;
     } catch (...) {
         if (arguments) vsapi->freeMap(arguments);
         if (float_node) vsapi->freeNode(float_node);
@@ -443,23 +454,23 @@ void convert_and_invoke(VSNodeRef *source, const VSVideoInfo &source_vi,
     }
 }
 
-double call_custom_kernel(VSFuncRef *function, double x, VSCore *core,
-                          const VSAPI *vsapi) {
+double call_custom_kernel(VSFunction *function, double x, const VSAPI *vsapi) {
     VSMap *input = vsapi->createMap();
     VSMap *output = vsapi->createMap();
-    vsapi->propSetFloat(input, "x", x, paReplace);
-    vsapi->callFunc(function, input, output, core, vsapi);
+    vsapi->mapSetFloat(input, "x", x, maReplace);
+    vsapi->callFunction(function, input, output);
     vsapi->freeMap(input);
-    const char *error = vsapi->getError(output);
+    const char *error = vsapi->mapGetError(output);
     if (error) {
         const std::string message = "custom kernel error: " + std::string{error};
         vsapi->freeMap(output);
         throw std::runtime_error(message);
     }
     int value_error = 0;
-    double value = vsapi->propGetFloat(output, "val", 0, &value_error);
+    double value = vsapi->mapGetFloat(output, "val", 0, &value_error);
     if (value_error) {
-        value = static_cast<double>(vsapi->propGetInt(output, "val", 0, &value_error));
+        value = static_cast<double>(
+            vsapi->mapGetInt(output, "val", 0, &value_error));
     }
     vsapi->freeMap(output);
     if (value_error) throw std::runtime_error("custom kernel must return val as float or int");
@@ -546,28 +557,28 @@ void ensure_filter_plans(FilterData &data, const VSAPI *vsapi) {
         }
         data.custom_callback = {};
         if (data.custom_kernel) {
-            vsapi->freeFunc(data.custom_kernel);
+            vsapi->freeFunction(data.custom_kernel);
             data.custom_kernel = nullptr;
         }
     });
     if (data.planning_error) std::rethrow_exception(data.planning_error);
 }
 
-int frame_range(const VSFrameRef *frame, int color_family,
+int frame_range(const VSFrame *frame, int color_family,
                 const VSAPI *vsapi) noexcept {
-    const auto *properties = vsapi->getFramePropsRO(frame);
+    const auto *properties = vsapi->getFramePropertiesRO(frame);
     for (const auto *name : {"_Range", "_ColorRange"}) {
         int error = 0;
-        const auto value = vsapi->propGetInt(properties, name, 0, &error);
+        const auto value = vsapi->mapGetInt(properties, name, 0, &error);
         if (!error) return value == 1 ? 1 : 0;
     }
-    return color_family == cmRGB ? 1 : 0;
+    return color_family == cfRGB ? 1 : 0;
 }
 
 IntegerConversion integer_conversion(const FilterData &data, int plane,
                                      int range) noexcept {
     const auto maximum = (1U << data.bits_per_sample) - 1U;
-    const bool chroma = data.color_family == cmYUV && plane != 0;
+    const bool chroma = data.color_family == cfYUV && plane != 0;
     std::uint32_t offset = 0U;
     std::uint32_t scale = maximum;
     if (range == 0) {
@@ -586,41 +597,49 @@ IntegerConversion integer_conversion(const FilterData &data, int plane,
     };
 }
 
-void VS_CC filter_init(VSMap *, VSMap *, void **instance_data, VSNode *node,
-                       VSCore *, const VSAPI *vsapi) {
-    auto *data = static_cast<FilterData *>(*instance_data);
-    vsapi->setVideoInfo(&data->vi, 1, node);
-}
-
-const VSFrameRef *VS_CC filter_get_frame(
-    int frame_number, int activation_reason, void **instance_data, void **,
+const VSFrame *VS_CC filter_get_frame(
+    int frame_number, int activation_reason, void *instance_data, void **,
     VSFrameContext *frame_context, VSCore *core, const VSAPI *vsapi) {
-    auto *data = static_cast<FilterData *>(*instance_data);
+    auto *data = static_cast<FilterData *>(instance_data);
     if (activation_reason == arInitial) {
         vsapi->requestFrameFilter(frame_number, data->node, frame_context);
         return nullptr;
     }
     if (activation_reason != arAllFramesReady) return nullptr;
 
-    const VSFrameRef *source = vsapi->getFrameFilter(
+    const VSFrame *source = vsapi->getFrameFilter(
         frame_number, data->node, frame_context);
     const bool adaptive_2d =
         data->process_horizontal && data->process_vertical;
-    VSFrameRef *intermediate = nullptr;
-    VSFrameRef *destination = nullptr;
+    VSFrame *intermediate = nullptr;
+    VSFrame *destination = nullptr;
     try {
         ensure_filter_plans(*data, vsapi);
+        const bool uses_cuda =
+            data->executor.backend() == BackendKind::cuda;
+        std::shared_ptr<const void> source_lifetime;
+        if (data->executor.input_cache_enabled()) {
+            const VSFrame *retained = vsapi->addFrameRef(source);
+            if (!retained) {
+                throw std::runtime_error("failed to retain the CUDA source frame");
+            }
+            const auto free_frame = vsapi->freeFrame;
+            source_lifetime = std::shared_ptr<const void>(
+                retained, [free_frame](const void *frame) noexcept {
+                    free_frame(static_cast<const VSFrame *>(frame));
+                });
+        }
         const auto &memory_config = memory_phase_config();
         const bool wide_kernel = adaptive_2d
             && data->vertical[0]->half_bandwidth >= 5;
         MemoryPhaseGuard memory_phase(
-            adaptive_2d && memory_config.limit > 0U
+            !uses_cuda && adaptive_2d && memory_config.limit > 0U
             && static_cast<std::size_t>(data->core_threads) > memory_config.limit
             && (wide_kernel || memory_config.all_kernels));
         const bool allow_streamed_integer = !data->fused_integer
             || data->vertical[0]->half_bandwidth < 7
             || data->core_threads > 8;
-        const bool track_overlapping_frames = adaptive_2d
+        const bool track_overlapping_frames = !uses_cuda && adaptive_2d
             && data->core_threads > 1 && allow_streamed_integer;
         ActiveFrameGuard active_frame(track_overlapping_frames
             ? &data->active_2d_frames : nullptr);
@@ -629,22 +648,22 @@ const VSFrameRef *VS_CC filter_get_frame(
         const bool first_2d_frame = adaptive_2d
             && (!track_overlapping_frames || active_frame.first());
         const bool buffered_float_2d =
-            !data->fused_integer && first_2d_frame;
+            !uses_cuda && !data->fused_integer && first_2d_frame;
         if (buffered_float_2d) {
             intermediate = vsapi->newVideoFrame(
-                data->vi.format, data->destination_width, data->source_height,
+                &data->vi.format, data->destination_width, data->source_height,
                 nullptr, core);
         }
         destination = vsapi->newVideoFrame(
-            data->vi.format, data->destination_width, data->destination_height,
+            &data->vi.format, data->destination_width, data->destination_height,
             source, core);
 
         const auto range = data->fused_integer
             ? frame_range(source, data->color_family, vsapi) : 0;
         if (data->fused_integer) {
-            vsapi->propSetInt(
-                vsapi->getFramePropsRW(destination), "_Range",
-                range, paReplace);
+            vsapi->mapSetInt(
+                vsapi->getFramePropertiesRW(destination), "_Range",
+                range, maReplace);
         }
 
         for (int plane = 0; plane < data->num_planes; ++plane) {
@@ -663,14 +682,14 @@ const VSFrameRef *VS_CC filter_get_frame(
                             *data->vertical[vertical_index],
                             vsapi->getReadPtr(source, plane), source_stride,
                             vsapi->getWritePtr(destination, plane),
-                            destination_stride, conversion);
+                            destination_stride, conversion, source_lifetime);
                     } else {
                         data->executor.inverse_2d_u8_streamed(
                             *data->horizontal[horizontal_index],
                             *data->vertical[vertical_index],
                             vsapi->getReadPtr(source, plane), source_stride,
                             vsapi->getWritePtr(destination, plane),
-                            destination_stride, conversion);
+                            destination_stride, conversion, source_lifetime);
                     }
                 } else {
                     if (first_2d_frame) {
@@ -682,7 +701,7 @@ const VSFrameRef *VS_CC filter_get_frame(
                             source_stride,
                             reinterpret_cast<std::uint16_t *>(
                                 vsapi->getWritePtr(destination, plane)),
-                            destination_stride, conversion);
+                            destination_stride, conversion, source_lifetime);
                     } else {
                         data->executor.inverse_2d_u16_streamed(
                             *data->horizontal[horizontal_index],
@@ -692,7 +711,7 @@ const VSFrameRef *VS_CC filter_get_frame(
                             source_stride,
                             reinterpret_cast<std::uint16_t *>(
                                 vsapi->getWritePtr(destination, plane)),
-                            destination_stride, conversion);
+                            destination_stride, conversion, source_lifetime);
                     }
                 }
                 continue;
@@ -729,20 +748,22 @@ const VSFrameRef *VS_CC filter_get_frame(
                         *data->horizontal[horizontal_index],
                         *data->vertical[vertical_index],
                         source_ptr, source_stride,
-                        destination_ptr, destination_stride);
+                        destination_ptr, destination_stride, source_lifetime);
                 }
             } else if (data->process_horizontal) {
                 const auto row_count = data->source_height
                     >> (plane != 0 ? data->subsampling_h : 0);
                 data->executor.inverse_rows(
                     *data->horizontal[horizontal_index], source_ptr, source_stride,
-                    destination_ptr, destination_stride, row_count);
+                    destination_ptr, destination_stride, row_count,
+                    source_lifetime);
             } else {
                 const auto column_count = data->source_width
                     >> (plane != 0 ? data->subsampling_w : 0);
                 data->executor.inverse_columns(
                     *data->vertical[vertical_index], source_ptr, source_stride,
-                    destination_ptr, destination_stride, column_count);
+                    destination_ptr, destination_stride, column_count,
+                    source_lifetime);
             }
         }
         if (intermediate) vsapi->freeFrame(intermediate);
@@ -761,34 +782,31 @@ const VSFrameRef *VS_CC filter_get_frame(
 
 void VS_CC filter_free(void *instance_data, VSCore *, const VSAPI *vsapi) {
     auto *data = static_cast<FilterData *>(instance_data);
-    if (data->custom_kernel) vsapi->freeFunc(data->custom_kernel);
+    if (data->custom_kernel) vsapi->freeFunction(data->custom_kernel);
     if (data->node) vsapi->freeNode(data->node);
     delete data;
 }
 
 void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
                          VSCore *core, const VSAPI *vsapi) {
-    VSNodeRef *source = nullptr;
-    VSFuncRef *custom = nullptr;
+    VSNode *source = nullptr;
+    VSFunction *custom = nullptr;
     try {
         int node_error = 0;
-        source = vsapi->propGetNode(in, "src", 0, &node_error);
+        source = vsapi->mapGetNode(in, "src", 0, &node_error);
         if (node_error || !source) throw std::invalid_argument("src is required");
         const VSVideoInfo *source_info = vsapi->getVideoInfo(source);
-        if (!isConstantFormat(source_info)) {
+        if (!vsh::isConstantVideoFormat(source_info)) {
             throw std::invalid_argument("only constant format input is supported");
-        }
-        if (source_info->format->colorFamily == cmCompat) {
-            throw std::invalid_argument("compat formats are not supported");
         }
 
         const auto fixed_mode = reinterpret_cast<std::intptr_t>(user_data);
         ParsedArguments parsed = parse_arguments(in, fixed_mode, *source_info, vsapi);
         custom = parsed.custom_kernel;
-        if (parsed.width % (1 << source_info->format->subSamplingW) != 0) {
+        if (parsed.width % (1 << source_info->format.subSamplingW) != 0) {
             throw std::invalid_argument("output width is incompatible with subsampling");
         }
-        if (parsed.height % (1 << source_info->format->subSamplingH) != 0) {
+        if (parsed.height % (1 << source_info->format.subSamplingH) != 0) {
             throw std::invalid_argument("output height is incompatible with subsampling");
         }
 
@@ -801,44 +819,44 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             || parsed.src_height != static_cast<double>(parsed.height)
             || parsed.force_v != 0;
         if (!process_horizontal && !process_vertical) {
-            vsapi->propSetNode(out, "clip", source, paReplace);
-            if (custom) vsapi->freeFunc(custom);
-            vsapi->freeNode(source);
+            vsapi->mapConsumeNode(out, "clip", source, maReplace);
+            source = nullptr;
+            if (custom) vsapi->freeFunction(custom);
             return;
         }
 
         const bool fused_integer =
-            source_info->format->sampleType == stInteger
-            && source_info->format->bitsPerSample >= 8
-            && source_info->format->bitsPerSample <= 16
-            && (source_info->format->bytesPerSample == 1
-                || source_info->format->bytesPerSample == 2)
+            source_info->format.sampleType == stInteger
+            && source_info->format.bitsPerSample >= 8
+            && source_info->format.bitsPerSample <= 16
+            && (source_info->format.bytesPerSample == 1
+                || source_info->format.bytesPerSample == 2)
             && process_horizontal && process_vertical;
         if (!fused_integer
-            && (source_info->format->sampleType != stFloat
-                || source_info->format->bitsPerSample != 32)) {
+            && (source_info->format.sampleType != stFloat
+                || source_info->format.bitsPerSample != 32)) {
             convert_and_invoke(source, *source_info, parsed, out, core, vsapi);
-            if (custom) vsapi->freeFunc(custom);
+            if (custom) vsapi->freeFunction(custom);
             vsapi->freeNode(source);
             return;
         }
 
-        auto data = std::make_unique<FilterData>(parsed.cpu_path);
+        auto data = std::make_unique<FilterData>(
+            parsed.backend, parsed.cpu_path);
         data->node = source;
-        source = nullptr;
         data->vi = *source_info;
         data->source_width = source_info->width;
         data->source_height = source_info->height;
         data->destination_width = parsed.width;
         data->destination_height = parsed.height;
-        data->subsampling_w = source_info->format->subSamplingW;
-        data->subsampling_h = source_info->format->subSamplingH;
-        data->num_planes = source_info->format->numPlanes;
-        data->color_family = source_info->format->colorFamily;
-        data->bits_per_sample = source_info->format->bitsPerSample;
-        data->bytes_per_sample = source_info->format->bytesPerSample;
+        data->subsampling_w = source_info->format.subSamplingW;
+        data->subsampling_h = source_info->format.subSamplingH;
+        data->num_planes = source_info->format.numPlanes;
+        data->color_family = source_info->format.colorFamily;
+        data->bits_per_sample = source_info->format.bitsPerSample;
+        data->bytes_per_sample = source_info->format.bytesPerSample;
         VSCoreInfo core_info{};
-        vsapi->getCoreInfo2(core, &core_info);
+        vsapi->getCoreInfo(core, &core_info);
         data->core_threads = std::max(core_info.numThreads, 1);
         data->process_horizontal = process_horizontal;
         data->process_vertical = process_vertical;
@@ -847,29 +865,36 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         data->vi.height = parsed.height;
         prepare_filter_requests(*data, parsed);
         if (custom) {
-            data->custom_callback = [custom, core, vsapi](double x) {
-                return call_custom_kernel(custom, x, core, vsapi);
+            data->custom_callback = [custom, vsapi](double x) {
+                return call_custom_kernel(custom, x, vsapi);
             };
             data->custom_kernel = custom;
-            custom = nullptr;
         }
 
-        auto *raw = data.release();
-        vsapi->createFilter(in, out, parsed.function_name.c_str(), filter_init,
-                            filter_get_frame, filter_free, fmParallel, 0, raw, core);
+        const VSFilterDependency dependency{data->node, rpStrictSpatial};
+        VSNode *result = vsapi->createVideoFilter2(
+            parsed.function_name.c_str(), &data->vi, filter_get_frame,
+            filter_free, fmParallel, &dependency, 1, data.get(), core);
+        if (!result) throw std::runtime_error("failed to create video filter");
+        source = nullptr;
+        custom = nullptr;
+        data.release();
+        if (vsapi->mapConsumeNode(out, "clip", result, maReplace) != 0) {
+            throw std::runtime_error("failed to return video filter");
+        }
     } catch (const std::exception &error) {
-        if (custom) vsapi->freeFunc(custom);
+        if (custom) vsapi->freeFunction(custom);
         if (source) vsapi->freeNode(source);
         set_error(out, error.what(), vsapi);
     } catch (...) {
-        if (custom) vsapi->freeFunc(custom);
+        if (custom) vsapi->freeFunction(custom);
         if (source) vsapi->freeNode(source);
         set_error(out, "unknown plugin error", vsapi);
     }
 }
 
 constexpr const char *common_geometry =
-    "src:clip;"
+    "src:vnode;"
     "width:int;"
     "height:int;";
 
@@ -885,38 +910,50 @@ constexpr const char *common_tail =
     "opt:int:opt;";
 
 constexpr const char *backend_tail = "backend:data:opt;";
+constexpr const char *clip_return = "clip:vnode;";
 
 } // namespace
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(
-    VSConfigPlugin config_func, VSRegisterFunction register_func, VSPlugin *plugin) {
-    config_func(plugin_id, "dsmvc", "dsmvc optimized descale",
-                VAPOURSYNTH_API_VERSION, 1, plugin);
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(
+    VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
+    vspapi->configPlugin(
+        plugin_id, "dsmvc", "dsmvc optimized descale",
+        VS_MAKE_VERSION(0, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
 
     const std::string geometry = common_geometry;
     const std::string tail = common_tail;
-    register_func("Debilinear", (geometry + tail + backend_tail).c_str(), filter_create,
-                  reinterpret_cast<void *>(static_cast<std::intptr_t>(1)), plugin);
-    register_func("Debicubic", (geometry + "b:float:opt;c:float:opt;" + tail
-                                + backend_tail).c_str(),
-                  filter_create,
-                  reinterpret_cast<void *>(static_cast<std::intptr_t>(2)), plugin);
-    register_func("Delanczos", (geometry + "taps:int:opt;" + tail
-                                + backend_tail).c_str(),
-                  filter_create,
-                  reinterpret_cast<void *>(static_cast<std::intptr_t>(3)), plugin);
-    register_func("Despline16", (geometry + tail + backend_tail).c_str(), filter_create,
-                  reinterpret_cast<void *>(static_cast<std::intptr_t>(4)), plugin);
-    register_func("Despline36", (geometry + tail + backend_tail).c_str(), filter_create,
-                  reinterpret_cast<void *>(static_cast<std::intptr_t>(5)), plugin);
-    register_func("Despline64", (geometry + tail + backend_tail).c_str(), filter_create,
-                  reinterpret_cast<void *>(static_cast<std::intptr_t>(6)), plugin);
-    register_func(
+    vspapi->registerFunction(
+        "Debilinear", (geometry + tail + backend_tail).c_str(), clip_return,
+        filter_create,
+        reinterpret_cast<void *>(static_cast<std::intptr_t>(1)), plugin);
+    vspapi->registerFunction(
+        "Debicubic", (geometry + "b:float:opt;c:float:opt;" + tail
+                      + backend_tail).c_str(),
+        clip_return, filter_create,
+        reinterpret_cast<void *>(static_cast<std::intptr_t>(2)), plugin);
+    vspapi->registerFunction(
+        "Delanczos", (geometry + "taps:int:opt;" + tail
+                      + backend_tail).c_str(),
+        clip_return, filter_create,
+        reinterpret_cast<void *>(static_cast<std::intptr_t>(3)), plugin);
+    vspapi->registerFunction(
+        "Despline16", (geometry + tail + backend_tail).c_str(), clip_return,
+        filter_create,
+        reinterpret_cast<void *>(static_cast<std::intptr_t>(4)), plugin);
+    vspapi->registerFunction(
+        "Despline36", (geometry + tail + backend_tail).c_str(), clip_return,
+        filter_create,
+        reinterpret_cast<void *>(static_cast<std::intptr_t>(5)), plugin);
+    vspapi->registerFunction(
+        "Despline64", (geometry + tail + backend_tail).c_str(), clip_return,
+        filter_create,
+        reinterpret_cast<void *>(static_cast<std::intptr_t>(6)), plugin);
+    vspapi->registerFunction(
         "Descale",
         (geometry
          + "kernel:data:opt;taps:int:opt;b:float:opt;c:float:opt;"
          + tail
          + "custom:func:opt;support:int:opt;custom_kernel:func:opt;"
          + backend_tail).c_str(),
-        filter_create, nullptr, plugin);
+        clip_return, filter_create, nullptr, plugin);
 }

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -43,6 +44,10 @@ DESCALE_FILTERS = {
 }
 DEFAULT_THREADS = (1, 8, 16, 32)
 IMPLEMENTATIONS = ("old", "new")
+OUTPUT_RE = re.compile(
+    r"Output (?P<frames>\d+) frames in (?P<seconds>[0-9.]+) seconds "
+    r"\((?P<fps>[0-9.]+) fps\)"
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -104,16 +109,32 @@ def parse_filter_times(stderr: str) -> dict[str, dict[str, float]]:
     return result
 
 
+def parse_vspipe_timing(output: str, expected_frames: int) -> dict:
+    match = OUTPUT_RE.search(output)
+    if match is None:
+        raise RuntimeError("VSPipe output did not contain an Output timing line")
+    emitted_frames = int(match.group("frames"))
+    if emitted_frames != expected_frames:
+        raise RuntimeError(
+            f"VSPipe emitted {emitted_frames} frames; expected {expected_frames}")
+    return {
+        "frames": emitted_frames,
+        "seconds": float(match.group("seconds")),
+        "fps": float(match.group("fps")),
+    }
+
+
 def build_command(options, kernel: str, implementation: str,
-                  threads: int) -> list[str]:
+                  threads: int, frames: int) -> list[str]:
     script = Path(__file__).with_name("vspipe_blank_fixed_kernel.vpy").resolve()
     values = {
         "implementation": implementation,
         "kernel": kernel,
         "plugin": str(options.new_plugin),
         "old_plugin": str(options.old_plugin),
-        "frames": str(options.frames),
+        "frames": str(frames),
         "threads": str(threads),
+        "backend": options.backend,
         "src_height": str(options.src_height),
         "base_height": str(options.base_height),
     }
@@ -123,7 +144,7 @@ def build_command(options, kernel: str, implementation: str,
     command.extend([
         "--requests", str(threads),
         "--start", "0",
-        "--end", str(options.frames - 1),
+        "--end", str(frames - 1),
         "--filter-time", str(script),
         "--",
     ])
@@ -131,8 +152,10 @@ def build_command(options, kernel: str, implementation: str,
 
 
 def run_sample(options, kernel: str, implementation: str,
-               threads: int, run: int) -> dict:
-    command = build_command(options, kernel, implementation, threads)
+               threads: int, run: int, frames: int,
+               warmup: bool = False) -> dict:
+    command = build_command(
+        options, kernel, implementation, threads, frames)
     started = time.perf_counter_ns()
     completed = subprocess.run(
         command, capture_output=True, text=True, errors="replace",
@@ -143,17 +166,23 @@ def run_sample(options, kernel: str, implementation: str,
         raise RuntimeError(
             f"VSPipe failed for {kernel}/{implementation}/R{threads}T{threads}/"
             f"run-{run}:\n{output[-8000:]}")
+    vspipe_timing = parse_vspipe_timing(output, frames)
     elapsed_seconds = elapsed_ns / 1e9
     return {
         "kernel": kernel,
         "label": KERNELS[kernel],
         "implementation": implementation,
         "run": run,
-        "frames": options.frames,
+        "warmup": warmup,
+        "frames": frames,
         "threads": threads,
         "requests": threads,
         "elapsed_seconds": elapsed_seconds,
-        "fps": options.frames / elapsed_seconds,
+        "fps": frames / elapsed_seconds,
+        "vspipe_seconds": vspipe_timing["seconds"],
+        "vspipe_fps": vspipe_timing["fps"],
+        "process_overhead_seconds": max(
+            0.0, elapsed_seconds - vspipe_timing["seconds"]),
         "filter_time": parse_filter_times(output),
         "command": command_text(command),
         "vspipe_output_tail": output[-4000:],
@@ -176,6 +205,12 @@ def summarize_cases(samples: list[dict]) -> list[dict]:
             "elapsed_seconds": summarize([
                 item["elapsed_seconds"] for item in items]),
             "fps": summarize([item["fps"] for item in items]),
+            "vspipe_seconds": summarize([
+                item["vspipe_seconds"] for item in items]),
+            "vspipe_fps": summarize([
+                item["vspipe_fps"] for item in items]),
+            "process_overhead_seconds": summarize([
+                item["process_overhead_seconds"] for item in items]),
             "filter_time": {
                 name: {
                     metric: statistics.median([
@@ -201,7 +236,8 @@ def filter_value(case: dict, *names: str) -> dict:
 def write_csv(samples: list[dict], path: Path) -> None:
     fields = [
         "kernel", "implementation", "threads", "run", "frames",
-        "elapsed_seconds", "fps",
+        "elapsed_seconds", "fps", "vspipe_seconds", "vspipe_fps",
+        "process_overhead_seconds",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -215,13 +251,19 @@ def write_markdown(result: dict, path: Path) -> None:
     by_key = {(case["kernel"], case["implementation"], case["threads"]): case
               for case in cases}
     threads = result["environment"]["threads"]
+    implementations = result["environment"]["implementations"]
     throughput_header = ["Kernel"]
     throughput_separator = ["---"]
     for thread in threads:
-        throughput_header.extend([
-            f"R{thread} old", f"R{thread} new", f"R{thread} new/old",
-        ])
-        throughput_separator.extend(["---:", "---:", "---:"])
+        if "old" in implementations and "new" in implementations:
+            throughput_header.extend([
+                f"R{thread} old", f"R{thread} new", f"R{thread} new/old",
+            ])
+            throughput_separator.extend(["---:", "---:", "---:"])
+        else:
+            for implementation in implementations:
+                throughput_header.append(f"R{thread} {implementation}")
+                throughput_separator.append("---:")
     lines = [
         "# Blank fixed-kernel benchmark",
         "",
@@ -229,18 +271,32 @@ def write_markdown(result: dict, path: Path) -> None:
         f"source clip. Each run processes {result['environment']['frames']:,} "
         "frames from an in-memory "
         "1920x1080 GRAYS `std.BlankClip` at fixed 810p geometry.",
+        f"Each cell has {result['environment']['warmup_runs']} untimed warm-up "
+        f"run(s) of {result['environment']['warmup_frames']} frames. Reported "
+        "throughput is external process wall time; VSPipe's internal timing is "
+        "also retained in the JSON and CSV; use that internal value for kernel "
+        "A/B decisions and wall time for end-to-end cost. Warm-up processes "
+        "warm driver, "
+        "module, page caches, and GPU clocks, but each measured fresh process "
+        "still creates its own CUDA context.",
         "",
         "## Throughput",
         "",
         "| " + " | ".join(throughput_header) + " |",
         "| " + " | ".join(throughput_separator) + " |",
     ]
-    for kernel, label in KERNELS.items():
+    for kernel in result["environment"]["kernels"]:
+        label = KERNELS[kernel]
         row = [f"`{label}`"]
         for thread in threads:
-            old = by_key[(kernel, "old", thread)]["fps"]["median"]
-            new = by_key[(kernel, "new", thread)]["fps"]["median"]
-            row.extend([f"{old:.2f}", f"{new:.2f}", f"{new / old:.3f}x"])
+            if "old" in implementations and "new" in implementations:
+                old = by_key[(kernel, "old", thread)]["fps"]["median"]
+                new = by_key[(kernel, "new", thread)]["fps"]["median"]
+                row.extend([f"{old:.2f}", f"{new:.2f}", f"{new / old:.3f}x"])
+            else:
+                for implementation in implementations:
+                    value = by_key[(kernel, implementation, thread)]["fps"]["median"]
+                    row.append(f"{value:.2f}")
         lines.append("| " + " | ".join(row) + " |")
 
     lines.extend([
@@ -282,6 +338,8 @@ def main() -> int:
     parser.add_argument("--old-plugin", required=True, type=Path)
     parser.add_argument("--new-plugin", required=True, type=Path)
     parser.add_argument("--vspipe", required=True, type=Path)
+    parser.add_argument("--implementations", nargs="+", choices=IMPLEMENTATIONS,
+                        default=list(IMPLEMENTATIONS))
     parser.add_argument("--output", type=Path, default=root / "benchmark-results" /
                         "blank-fixed-kernel-digimon-810p")
     parser.add_argument("--frames", type=int, default=8000)
@@ -290,6 +348,12 @@ def main() -> int:
     parser.add_argument("--threads", nargs="*", type=int,
                         default=list(DEFAULT_THREADS))
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--warmup-runs", type=int, default=1,
+                        help="Untimed throwaway VSPipe runs per benchmark cell.")
+    parser.add_argument("--warmup-frames", type=int, default=256,
+                        help="Frames in each warm-up run; 0 disables warm-up.")
+    parser.add_argument("--backend",
+                        choices=("auto", "cpu", "cuda"), default="cpu")
     parser.add_argument("--kernels", nargs="*", choices=tuple(KERNELS),
                         default=list(KERNELS))
     options = parser.parse_args()
@@ -297,8 +361,10 @@ def main() -> int:
     options.new_plugin = options.new_plugin.expanduser().resolve()
     options.vspipe = options.vspipe.expanduser().resolve()
     options.output = options.output.expanduser().resolve()
-    if options.frames < 1 or options.runs < 1:
-        raise ValueError("--frames and --runs must be positive")
+    if (options.frames < 1 or options.runs < 1
+            or options.warmup_runs < 0 or options.warmup_frames < 0):
+        raise ValueError(
+            "--frames and --runs must be positive; warm-up values cannot be negative")
     if not options.threads or any(value < 1 for value in options.threads):
         raise ValueError("thread counts must be positive")
     if len(set(options.threads)) != len(options.threads):
@@ -309,13 +375,27 @@ def main() -> int:
 
     script = Path(__file__).with_name("vspipe_blank_fixed_kernel.vpy")
     samples = []
+    warmups = []
     options.output.mkdir(parents=True, exist_ok=True)
     for threads in options.threads:
         for kernel in options.kernels:
+            if options.warmup_frames > 0:
+                for implementation in options.implementations:
+                    for warmup_run in range(1, options.warmup_runs + 1):
+                        warmup = run_sample(
+                            options, kernel, implementation, threads,
+                            warmup_run, options.warmup_frames, warmup=True)
+                        warmups.append(warmup)
+                        print(
+                            f"warmup {kernel} {implementation} "
+                            f"R{threads}T{threads} {warmup_run}/"
+                            f"{options.warmup_runs}: "
+                            f"{warmup['vspipe_fps']:.3f} VSPipe fps",
+                            flush=True)
             for run in range(1, options.runs + 1):
-                for implementation in IMPLEMENTATIONS:
+                for implementation in options.implementations:
                     sample = run_sample(options, kernel, implementation,
-                                        threads, run)
+                                        threads, run, options.frames)
                     samples.append(sample)
                     print(
                         f"{kernel} {implementation} R{threads}T{threads} "
@@ -342,8 +422,11 @@ def main() -> int:
         "base_height": options.base_height,
         "threads": options.threads,
         "runs": options.runs,
+        "warmup_runs": options.warmup_runs,
+        "warmup_frames": options.warmup_frames,
+        "backend": options.backend,
         "kernels": options.kernels,
-        "implementations": list(IMPLEMENTATIONS),
+        "implementations": list(options.implementations),
         "runner_sha256": sha256_file(Path(__file__).resolve()),
     }
     result = {
@@ -351,6 +434,7 @@ def main() -> int:
         "environment": environment,
         "cases": summarize_cases(samples),
         "raw_samples": samples,
+        "warmup_samples": warmups,
     }
     (options.output / "benchmark.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=True) + "\n",
@@ -358,7 +442,8 @@ def main() -> int:
     write_csv(samples, options.output / "benchmark.csv")
     write_markdown(result, options.output / "benchmark.md")
     (options.output / "commands.txt").write_text(
-        "\n".join(sample["command"] for sample in samples) + "\n",
+        "\n".join(
+            sample["command"] for sample in [*warmups, *samples]) + "\n",
         encoding="utf-8")
     print(options.output)
     return 0

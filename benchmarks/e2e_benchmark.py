@@ -34,6 +34,10 @@ SCRIPT_CASES = {
     "selectkernel": "test_selectkernel.vpy",
 }
 RESULT_PREFIX = "DSMVC_E2E_RESULT="
+OUTPUT_RE = re.compile(
+    r"Output (?P<frames>\d+) frames in (?P<seconds>[0-9.]+) seconds "
+    r"\((?P<fps>[0-9.]+) fps\)"
+)
 
 
 def repeated_arange(start: float, stop: float, step: float) -> list[float]:
@@ -326,9 +330,43 @@ def command_text(command: list[str]) -> str:
     return " ".join(subprocess.list2cmdline([item]) for item in command)
 
 
-def run_vspipe(options, case: str, implementation: str, run: int) -> dict:
+def parse_vspipe_timing(output: str, expected_frames: int) -> dict:
+    match = OUTPUT_RE.search(output)
+    if match is None:
+        raise RuntimeError("VSPipe output did not contain an Output timing line")
+    emitted_frames = int(match.group("frames"))
+    if emitted_frames != expected_frames:
+        raise RuntimeError(
+            f"VSPipe emitted {emitted_frames} frames; expected {expected_frames}")
+    return {
+        "frames": emitted_frames,
+        "seconds": float(match.group("seconds")),
+        "fps": float(match.group("fps")),
+    }
+
+
+def candidate_ranges(total: int, batch_size: int) -> list[tuple[int, int]]:
+    if total < 1:
+        return []
+    if batch_size <= 0 or batch_size >= total:
+        return [(0, total)]
+    return [(start, min(total, start + batch_size))
+            for start in range(0, total, batch_size)]
+
+
+def run_vspipe(options, case: str, implementation: str, run: int,
+               candidate_start: int = 0, candidate_end: int | None = None,
+               warmup: bool = False) -> dict:
     script = Path(__file__).with_name("vspipe_e2e.vpy").resolve()
-    candidates = recipe_candidates(case, options.profile)
+    all_candidates = recipe_candidates(case, options.profile)
+    total_candidates = len(all_candidates)
+    if candidate_end is None:
+        candidate_end = total_candidates
+    if not 0 <= candidate_start < candidate_end <= total_candidates:
+        raise ValueError(
+            f"candidate range [{candidate_start}, {candidate_end}) is outside "
+            f"0..{total_candidates}")
+    candidate_count = candidate_end - candidate_start
     command = [options.vspipe]
     args = {
         "implementation": implementation,
@@ -347,36 +385,100 @@ def run_vspipe(options, case: str, implementation: str, run: int) -> dict:
         "source_rap_verification": str(options.source_rap_verification),
         "frame": str(RECIPE_FACTS[case]["frame"]),
         "threads": str(options.threads),
+        "backend": options.backend,
+        "cache_mb": str(options.performance_cache_mb),
+        "candidate_start": str(candidate_start),
+        "candidate_end": str(candidate_end),
     }
     for key, value in args.items():
         command.extend(["--arg", f"{key}={value}"])
     command.extend([
         "--requests", str(options.requests),
         "--start", "0",
-        "--end", str(len(candidates) - 1),
+        "--end", str(candidate_count - 1),
         "--filter-time",
         str(script),
         "--",
     ])
     start = time.perf_counter_ns()
     completed = subprocess.run(
-        command, capture_output=True, text=True, errors="replace", check=False)
+        command, capture_output=True, text=True, errors="replace", check=False,
+        env={**os.environ, "DSMVC_CUDA_PLAN_CACHE_MB":
+             str(options.cuda_plan_cache_mb)})
     elapsed_ns = time.perf_counter_ns() - start
     if completed.returncode != 0:
         raise RuntimeError(
             f"VSPipe failed for {case}/{implementation}/run-{run}:\n"
             + completed.stdout + "\n" + completed.stderr)
+    output = completed.stdout + completed.stderr
+    vspipe_timing = parse_vspipe_timing(output, candidate_count)
     return {
         "case": case,
         "implementation": implementation,
         "run": run,
-        "candidate_count": len(candidates),
+        "candidate_count": candidate_count,
+        "candidate_total_count": total_candidates,
+        "candidate_start": candidate_start,
+        "candidate_end": candidate_end,
+        "warmup": warmup,
         "requests": options.requests,
         "threads": options.threads,
         "elapsed_ns": elapsed_ns,
-        "candidates_per_second": len(candidates) / (elapsed_ns / 1e9),
+        "candidates_per_second": candidate_count / (elapsed_ns / 1e9),
         "command": command_text(command),
-        "vspipe_output_tail": (completed.stdout + completed.stderr)[-4000:],
+        "vspipe_seconds": vspipe_timing["seconds"],
+        "vspipe_candidates_per_second": vspipe_timing["fps"],
+        "process_overhead_seconds": max(
+            0.0, elapsed_ns / 1e9 - vspipe_timing["seconds"]),
+        "vspipe_output_tail": output[-4000:],
+    }
+
+
+def combine_vspipe_batches(case: str, implementation: str, run: int,
+                            batches: list[dict], batch_size: int) -> dict:
+    if not batches:
+        raise ValueError("cannot combine an empty VSPipe batch list")
+    expected_start = 0
+    for batch in batches:
+        if batch["candidate_start"] != expected_start:
+            raise RuntimeError(
+                f"candidate batches for {case} are not contiguous at "
+                f"{expected_start}")
+        expected_start = batch["candidate_end"]
+    total_candidates = batches[0]["candidate_total_count"]
+    if expected_start != total_candidates:
+        raise RuntimeError(
+            f"candidate batches for {case} cover {expected_start} of "
+            f"{total_candidates}")
+    elapsed_ns = sum(batch["elapsed_ns"] for batch in batches)
+    # VSPipe prints a rounded FPS value. Sum its reported seconds directly so
+    # batch aggregation does not add rounding error, especially for short
+    # low-candidate smoke runs.
+    vspipe_seconds = sum(batch["vspipe_seconds"] for batch in batches)
+    return {
+        "case": case,
+        "implementation": implementation,
+        "run": run,
+        "candidate_count": total_candidates,
+        "candidate_total_count": total_candidates,
+        "candidate_start": 0,
+        "candidate_end": total_candidates,
+        "warmup": False,
+        "batch_count": len(batches),
+        "batch_size": (total_candidates if batch_size <= 0
+                       else min(batch_size, total_candidates)),
+        "requests": batches[0]["requests"],
+        "threads": batches[0]["threads"],
+        "elapsed_ns": elapsed_ns,
+        "candidates_per_second": total_candidates / (elapsed_ns / 1e9),
+        "vspipe_seconds": vspipe_seconds,
+        "vspipe_candidates_per_second": (
+            total_candidates / vspipe_seconds if vspipe_seconds > 0 else None),
+        "process_overhead_seconds": max(
+            0.0, elapsed_ns / 1e9 - vspipe_seconds),
+        "command": "\n".join(batch["command"] for batch in batches),
+        "batch_commands": [batch["command"] for batch in batches],
+        "batches": batches,
     }
 
 
@@ -389,10 +491,17 @@ def performance_summary(samples: list[dict], case: str,
                     if item["implementation"] == implementation]
         elapsed = [item["elapsed_ns"] / 1e9 for item in selected]
         throughput = [item["candidates_per_second"] for item in selected]
+        vspipe_elapsed = [item["vspipe_seconds"] for item in selected]
+        vspipe_throughput = [
+            item["vspipe_candidates_per_second"] for item in selected]
+        overhead = [item["process_overhead_seconds"] for item in selected]
         result[implementation] = {
             "runs": len(selected),
             "elapsed_seconds": summarize(elapsed),
             "candidates_per_second": summarize(throughput),
+            "vspipe_seconds": summarize(vspipe_elapsed),
+            "vspipe_candidates_per_second": summarize(vspipe_throughput),
+            "process_overhead_seconds": summarize(overhead),
         }
     if set(implementations) == set(IMPLEMENTATIONS):
         old_median = result["old"]["elapsed_seconds"]["median"]
@@ -443,7 +552,7 @@ def build_geometry(width: int, height: int, src_height: float,
 
 
 def build_descale(core, implementation: str, source, candidate: dict,
-                  vertical_only: bool):
+                  vertical_only: bool, backend: str):
     scaler_spec = candidate["scaler"]
     arguments = build_geometry(
         source.width, source.height, candidate["height"], vertical_only)
@@ -454,7 +563,7 @@ def build_descale(core, implementation: str, source, candidate: dict,
     elif scaler_spec["kernel"] == "lanczos":
         kwargs["taps"] = scaler_spec["taps"]
     if implementation == "new":
-        kwargs["backend"] = "cpu"
+        kwargs["backend"] = backend
     output = getattr(namespace, FUNCTIONS[scaler_spec["kernel"]])(
         source, **kwargs)
     return output, arguments
@@ -583,6 +692,9 @@ def worker_errors(options) -> int:
         numpy = None
 
     core = vs.core
+    # VapourSynth defaults to roughly half of host RAM per process. Error
+    # shards run concurrently, so leave an explicit bounded budget per worker.
+    core.max_cache_size = options.error_cache_mb
     core.num_threads = options.threads
     load_vs_plugins(core, options)
     src8 = open_source(
@@ -605,9 +717,11 @@ def worker_errors(options) -> int:
     rows = []
     for candidate in candidates:
         old, arguments = build_descale(
-            core, "old", source, candidate, facts["vertical_only"])
+            core, "old", source, candidate, facts["vertical_only"],
+            options.backend)
         new, new_arguments = build_descale(
-            core, "new", source, candidate, facts["vertical_only"])
+            core, "new", source, candidate, facts["vertical_only"],
+            options.backend)
         old_frame = old.get_frame(0)
         new_frame = new.get_frame(0)
         old_reconstructed = resize_with_scaler(
@@ -679,6 +793,9 @@ def worker_errors(options) -> int:
         "candidate_total_count": len(all_candidates),
         "source": str(Path(options.source).expanduser().resolve()),
         "threads": options.threads,
+        "backend": options.backend,
+        "cuda_plan_cache_mb": options.cuda_plan_cache_mb,
+        "error_cache_mb": options.error_cache_mb,
         "error_shard_count": shard_count,
         "error_shard_index": shard_index,
         "rows": rows,
@@ -708,6 +825,9 @@ def error_worker_command(options, case: str, output: Path,
         "--old-plugin", options.old_plugin,
         "--new-plugin", options.new_plugin,
         "--source-filter", options.source_filter,
+        "--backend", options.backend,
+        "--cuda-plan-cache-mb", str(options.cuda_plan_cache_mb),
+        "--error-cache-mb", str(options.error_cache_mb),
         "--threads", str(worker_threads),
         "--error-output", str(output),
         "--error-shard-index", str(shard_index),
@@ -739,7 +859,9 @@ def run_error_worker(options, case: str, output: Path) -> dict:
             worker_threads)
         jobs.append((shard_index, shard_output, command, subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace")))
+            text=True, errors="replace",
+            env={**os.environ, "DSMVC_CUDA_PLAN_CACHE_MB":
+                 str(options.cuda_plan_cache_mb)})))
 
     payloads = []
     commands = []
@@ -777,6 +899,8 @@ def run_error_worker(options, case: str, output: Path) -> dict:
             "candidate_total_count": len(rows),
             "source": str(Path(options.source).expanduser().resolve()),
             "threads": worker_threads,
+            "cuda_plan_cache_mb": options.cuda_plan_cache_mb,
+            "error_cache_mb": options.error_cache_mb,
             "error_shard_count": shard_count,
             "rows": rows,
         }
@@ -784,10 +908,11 @@ def run_error_worker(options, case: str, output: Path) -> dict:
     result["commands"] = commands
     result["error_processes"] = shard_count
     result["error_worker_threads"] = worker_threads
-    if shard_count > 1:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(result, indent=2, ensure_ascii=True),
-                          encoding="utf-8")
+    result["cuda_plan_cache_mb"] = options.cuda_plan_cache_mb
+    result["error_cache_mb"] = options.error_cache_mb
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2, ensure_ascii=True),
+                      encoding="utf-8")
     return result
 
 
@@ -911,7 +1036,10 @@ def write_report(result: dict, output: Path) -> None:
             "w", newline="", encoding="utf-8") as handle:
         fields = ["type", "case", "implementation", "run",
                   "candidate_count", "elapsed_seconds",
-                  "candidates_per_second", "new_speedup"]
+                  "candidates_per_second", "vspipe_seconds",
+                  "vspipe_candidates_per_second",
+                  "process_overhead_seconds", "batch_count", "batch_size",
+                  "new_speedup"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for sample in result["performance"]["raw_samples"]:
@@ -923,6 +1051,13 @@ def write_report(result: dict, output: Path) -> None:
                 "candidate_count": sample["candidate_count"],
                 "elapsed_seconds": sample["elapsed_ns"] / 1e9,
                 "candidates_per_second": sample["candidates_per_second"],
+                "vspipe_seconds": sample["vspipe_seconds"],
+                "vspipe_candidates_per_second": sample[
+                    "vspipe_candidates_per_second"],
+                "process_overhead_seconds": sample[
+                    "process_overhead_seconds"],
+                "batch_count": sample["batch_count"],
+                "batch_size": sample["batch_size"],
                 "new_speedup": "",
             })
         for item in result["performance"]["summaries"]:
@@ -937,9 +1072,28 @@ def write_report(result: dict, output: Path) -> None:
                         "elapsed_seconds"]["median"],
                     "candidates_per_second": item[implementation][
                         "candidates_per_second"]["median"],
+                    "vspipe_seconds": item[implementation][
+                        "vspipe_seconds"]["median"],
+                    "vspipe_candidates_per_second": item[implementation][
+                        "vspipe_candidates_per_second"]["median"],
+                    "process_overhead_seconds": item[implementation][
+                        "process_overhead_seconds"]["median"],
+                    "batch_count": "",
+                    "batch_size": (
+                        item["candidate_count"]
+                        if result["environment"]["performance_batch_size"] <= 0
+                        else min(
+                            item["candidate_count"],
+                            result["environment"]["performance_batch_size"])),
                     "new_speedup": item["new_speedup"],
                 })
 
+    batch_size = result["environment"]["performance_batch_size"]
+    if batch_size <= 0:
+        batch_description = "one bounded graph per complete candidate scan"
+    else:
+        batch_description = (
+            f"isolated batches of at most {batch_size} candidates")
     lines = [
         "# Descale E2E benchmark",
         "",
@@ -948,6 +1102,16 @@ def write_report(result: dict, output: Path) -> None:
         "Performance samples are fresh VSPipe processes. Wall time includes",
         "source decode, graph construction, descale planning, reconstruction,",
         "PlaneStats, plugin loading, and process shutdown.",
+        f"Each case/implementation has {result['environment']['warmup_runs']} "
+        f"untimed warm-up run(s) of "
+        f"{result['environment']['warmup_candidates']} candidates. Performance "
+        f"uses {batch_description} and a "
+        f"{result['environment']['performance_cache_mb']} MiB VapourSynth cache. "
+        f"The CUDA packed-plan cache is capped at "
+        f"{result['environment']['cuda_plan_cache_mb']} MiB. VSPipe's internal "
+        "processing time is retained separately. Throwaway warm-up processes "
+        "warm driver/module/page caches and GPU clocks, but each measured fresh "
+        "process still creates its own CUDA context.",
         "",
         "## Performance",
         "",
@@ -1088,14 +1252,31 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--cases", nargs="+", choices=CASES,
                         default=list(CASES))
     result.add_argument("--runs", type=int, default=3)
+    result.add_argument("--warmup-runs", type=int, default=1,
+                        help="Untimed throwaway VSPipe run(s) per case/implementation.")
+    result.add_argument("--warmup-candidates", type=int, default=64,
+                        help="Candidates in each warm-up run; 0 disables warm-up.")
     result.add_argument("--requests", type=int, default=32)
     result.add_argument("--threads", type=int, default=32)
+    result.add_argument("--backend", choices=("auto", "cpu", "cuda"),
+                        default="cpu")
+    result.add_argument("--performance-batch-size", type=int, default=0,
+                        help="Maximum candidates per isolated performance VSPipe process; 0 uses one graph.")
+    result.add_argument("--performance-cache-mb", type=int, default=int(
+        os.environ.get("DSMVC_PERFORMANCE_CACHE_MB", "512")),
+        help="VapourSynth cache budget for performance processes in MiB.")
+    result.add_argument("--cuda-plan-cache-mb", type=int, default=int(
+        os.environ.get("DSMVC_CUDA_PLAN_CACHE_MB", "16")),
+        help="CUDA packed-plan cache for one-shot candidate scans in MiB.")
     result.add_argument("--error-processes", type=int, default=int(
         os.environ.get("DSMVC_ERROR_PROCESSES", "1")),
         help="Parallel processes used for the per-candidate error sweep.")
     result.add_argument("--error-threads", type=int, default=int(
         os.environ.get("DSMVC_ERROR_THREADS", "0")),
         help="Threads per error worker; 0 divides --threads across workers.")
+    result.add_argument("--error-cache-mb", type=int, default=int(
+        os.environ.get("DSMVC_ERROR_CACHE_MB", "512")),
+        help="VapourSynth cache budget per error worker in MiB.")
     result.add_argument("--skip-performance", action="store_true")
     result.add_argument("--skip-errors", action="store_true")
     result.add_argument("--html", action="append", default=[],
@@ -1148,10 +1329,18 @@ def main(options) -> int:
     if options.source_rap_verification not in (-1, 0, 1):
         raise ValueError("--source-rap-verification must be -1, 0, or 1")
     if (options.runs < 1 or options.requests < 1 or options.threads < 1
-            or options.error_processes < 1 or options.error_threads < 0):
+            or options.warmup_runs < 0 or options.warmup_candidates < 0
+            or options.performance_batch_size < 0
+            or options.cuda_plan_cache_mb < 16
+            or options.cuda_plan_cache_mb > 4096
+            or options.error_processes < 1 or options.error_threads < 0
+            or options.error_cache_mb < 16
+            or options.performance_cache_mb < 16):
         raise ValueError(
             "--runs, --requests, --threads and --error-processes must be "
-            "positive; --error-threads cannot be negative")
+            "positive; warm-up and batch values cannot be negative; "
+            "VapourSynth cache budgets must be at least 16 MiB; the CUDA "
+            "plan cache must be between 16 and 4096 MiB")
     if (not options.skip_errors
             and set(options.implementations) != set(IMPLEMENTATIONS)):
         raise ValueError("error comparison requires both implementations; use --skip-errors")
@@ -1195,13 +1384,20 @@ def main(options) -> int:
         "python": options.python,
         "profile": options.profile,
         "runs": options.runs,
+        "warmup_runs": options.warmup_runs,
+        "warmup_candidates": options.warmup_candidates,
+        "performance_batch_size": options.performance_batch_size,
+        "performance_cache_mb": options.performance_cache_mb,
+        "cuda_plan_cache_mb": options.cuda_plan_cache_mb,
         "requests": options.requests,
         "threads": options.threads,
+        "backend": options.backend,
         "implementations": list(options.implementations),
         "error_processes": options.error_processes,
         "error_worker_threads": (
             options.error_threads if options.error_threads > 0 else max(
                 1, options.threads // options.error_processes)),
+        "error_cache_mb": options.error_cache_mb,
         "source": str(source),
         "source_sha256": sha256_file(source),
         "old_plugin": str(old_plugin) if old_plugin else None,
@@ -1221,17 +1417,44 @@ def main(options) -> int:
     }
 
     performance_samples = []
+    performance_warmups = []
     performance_summaries = []
     performance_commands = []
     if not options.skip_performance:
         for case in options.cases:
+            total_candidates = len(recipe_candidates(case, options.profile))
+            ranges = candidate_ranges(
+                total_candidates, options.performance_batch_size)
             case_samples = []
+            if options.warmup_candidates > 0 and options.warmup_runs > 0:
+                warmup_end = min(total_candidates, options.warmup_candidates)
+                for implementation in options.implementations:
+                    for warmup_run in range(1, options.warmup_runs + 1):
+                        warmup = run_vspipe(
+                            options, case, implementation, warmup_run,
+                            0, warmup_end, warmup=True)
+                        performance_warmups.append(warmup)
+                        performance_commands.append(warmup["command"])
+                        print(
+                            f"{case} {implementation} warmup "
+                            f"{warmup_run}/{options.warmup_runs}: "
+                            f"{warmup['vspipe_candidates_per_second']:.3f} "
+                            "VSPipe candidates/s",
+                            flush=True)
             for run in range(1, options.runs + 1):
                 for implementation in options.implementations:
-                    sample = run_vspipe(options, case, implementation, run)
+                    batches = [
+                        run_vspipe(
+                            options, case, implementation, run,
+                            start, end)
+                        for start, end in ranges
+                    ]
+                    sample = combine_vspipe_batches(
+                        case, implementation, run, batches,
+                        options.performance_batch_size)
                     case_samples.append(sample)
                     performance_samples.append(sample)
-                    performance_commands.append(sample["command"])
+                    performance_commands.extend(sample["batch_commands"])
                     print(
                         f"{case} {implementation} run {run}: "
                         f"{sample['candidates_per_second']:.3f} candidates/s",
@@ -1261,6 +1484,7 @@ def main(options) -> int:
         "performance": {
             "summaries": performance_summaries,
             "raw_samples": performance_samples,
+            "warmup_samples": performance_warmups,
             "commands": performance_commands,
         },
         "errors": {

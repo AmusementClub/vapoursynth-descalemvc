@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VapourSynth R57 integration and compatibility checks."""
+"""VapourSynth API4 integration and baseline compatibility checks."""
 
 from __future__ import annotations
 
@@ -18,6 +18,32 @@ FUNCTIONS = {
     "Despline16": {},
     "Despline36": {},
     "Despline64": {},
+}
+
+GEOMETRY_SIGNATURE = "src:vnode;width:int;height:int;"
+TAIL_SIGNATURE = (
+    "src_left:float:opt;src_top:float:opt;"
+    "src_width:float:opt;src_height:float:opt;"
+    "border_handling:int:opt;force:int:opt;force_h:int:opt;"
+    "force_v:int:opt;opt:int:opt;backend:data:opt;"
+)
+EXPECTED_SIGNATURES = {
+    "Debilinear": GEOMETRY_SIGNATURE + TAIL_SIGNATURE,
+    "Debicubic": GEOMETRY_SIGNATURE + "b:float:opt;c:float:opt;" + TAIL_SIGNATURE,
+    "Delanczos": GEOMETRY_SIGNATURE + "taps:int:opt;" + TAIL_SIGNATURE,
+    "Despline16": GEOMETRY_SIGNATURE + TAIL_SIGNATURE,
+    "Despline36": GEOMETRY_SIGNATURE + TAIL_SIGNATURE,
+    "Despline64": GEOMETRY_SIGNATURE + TAIL_SIGNATURE,
+    "Descale": (
+        GEOMETRY_SIGNATURE
+        + "kernel:data:opt;taps:int:opt;b:float:opt;c:float:opt;"
+        + "src_left:float:opt;src_top:float:opt;"
+        + "src_width:float:opt;src_height:float:opt;"
+        + "border_handling:int:opt;force:int:opt;force_h:int:opt;"
+        + "force_v:int:opt;opt:int:opt;"
+        + "custom:func:opt;support:int:opt;custom_kernel:func:opt;"
+        + "backend:data:opt;"
+    ),
 }
 
 
@@ -81,6 +107,19 @@ def direct_call(namespace, name: str, source, **overrides):
     return getattr(namespace, name)(source, **arguments)
 
 
+def baseline_call(namespace, name: str, source, **overrides):
+    if source.format.sample_type == vs.FLOAT and source.format.bits_per_sample == 32:
+        return direct_call(namespace, name, source, **overrides)
+    float_format = vs.core.query_video_format(
+        source.format.color_family, vs.FLOAT, 32,
+        source.format.subsampling_w, source.format.subsampling_h)
+    float_source = source.resize.Point(
+        format=float_format.id, dither_type="none")
+    float_output = direct_call(namespace, name, float_source, **overrides)
+    return float_output.resize.Point(
+        format=source.format.id, dither_type="none")
+
+
 def run(options) -> None:
     core = vs.core
     core.num_threads = options.threads
@@ -95,10 +134,11 @@ def run(options) -> None:
     require({function.name for function in matches[0].functions()} ==
             set(FUNCTIONS) | {"Descale"}, "public function set differs")
     for name in set(FUNCTIONS) | {"Descale"}:
-        old_signature = getattr(core.descale, name).signature
-        new_signature = getattr(core.dsmvc, name).signature
-        require(new_signature == old_signature + "backend:data:opt;",
-                f"{name}: signature differs from baseline plus backend")
+        function = getattr(core.dsmvc, name)
+        require(function.signature == EXPECTED_SIGNATURES[name],
+                f"{name}: API4 input signature differs")
+        require(function.return_signature == "clip:vnode;",
+                f"{name}: API4 return signature differs")
 
     float_source = core.std.BlankClip(
         width=96, height=64, format=vs.GRAYS, color=[0.35])
@@ -114,7 +154,7 @@ def run(options) -> None:
     )
     for format_id in formats:
         source = core.std.BlankClip(width=96, height=64, format=format_id)
-        old = direct_call(core.descale, "Debicubic", source)
+        old = baseline_call(core.descale, "Debicubic", source)
         new = direct_call(core.dsmvc, "Debicubic", source, backend="auto")
         compare_clips(old, new, f"format/{source.format.name}")
 
@@ -152,12 +192,28 @@ def run(options) -> None:
             "support": 2, "taps": 1,
         }),
     )
+    old_descale = getattr(core.descale, "Descale", None)
+    new_custom_outputs = {}
     for label, arguments in custom_cases:
-        old_custom = core.descale.Descale(
-            custom_source, width=80, height=48, **arguments)
         new_custom = core.dsmvc.Descale(
             custom_source, width=80, height=48, backend="cpu", **arguments)
-        compare_clips(old_custom, new_custom, label)
+        new_custom_outputs[label] = new_custom
+        if old_descale is not None:
+            old_custom = old_descale(
+                custom_source, width=80, height=48, **arguments)
+            compare_clips(old_custom, new_custom, label)
+        else:
+            new_custom.get_frame(0)
+    if old_descale is None:
+        compare_clips(
+            new_custom_outputs["custom-kernel"],
+            new_custom_outputs["custom-support"], "custom/aliases")
+        precedence_reference = core.dsmvc.Descale(
+            custom_source, width=80, height=48, custom=custom_alias,
+            taps=1, backend="cpu")
+        compare_clips(
+            precedence_reference, new_custom_outputs["custom-precedence"],
+            "custom/precedence")
 
     large_support_source = core.std.BlankClip(
         width=160, height=160, format=vs.GRAYS, color=[0.4])
@@ -169,14 +225,17 @@ def run(options) -> None:
             backend="cpu"),
         "lanczos/taps-16")
     large_support_kernel = lambda x: max(1.0 - abs(x), 0.0)
-    compare_clips(
-        core.descale.Descale(
-            large_support_source, width=128, height=128,
-            custom_kernel=large_support_kernel, taps=65),
-        core.dsmvc.Descale(
-            large_support_source, width=128, height=128,
-            custom_kernel=large_support_kernel, taps=65, backend="cpu"),
-        "custom/taps-65")
+    large_custom = core.dsmvc.Descale(
+        large_support_source, width=128, height=128,
+        custom_kernel=large_support_kernel, taps=65, backend="cpu")
+    if old_descale is not None:
+        compare_clips(
+            old_descale(
+                large_support_source, width=128, height=128,
+                custom_kernel=large_support_kernel, taps=65),
+            large_custom, "custom/taps-65")
+    else:
+        large_custom.get_frame(0)
 
     scalar = core.dsmvc.Debicubic(
         float_source, width=80, height=48, opt=1, backend="cpu")
@@ -184,11 +243,20 @@ def run(options) -> None:
         float_source, width=80, height=48, opt=2, backend="cpu")
     compare_clips(scalar, avx2, "opt/scalar-vs-avx2")
 
-    for backend in ("metal", "vulkan", "cuda"):
+    for backend in ("metal", "vulkan"):
         expect_error(
             lambda backend=backend: core.dsmvc.Debicubic(
                 float_source, width=80, height=48, backend=backend),
             f"backend '{backend}' is not compiled")
+    if options.cuda_enabled:
+        cuda = core.dsmvc.Debicubic(
+            float_source, width=80, height=48, backend="cuda")
+        compare_clips(scalar, cuda, "backend/cpu-vs-cuda")
+    else:
+        expect_error(
+            lambda: core.dsmvc.Debicubic(
+                float_source, width=80, height=48, backend="cuda"),
+            "backend 'cuda' is not compiled")
     expect_error(
         lambda: core.dsmvc.Debicubic(
             float_source, width=80, height=48, backend="invalid"),
@@ -207,27 +275,38 @@ def run(options) -> None:
         lambda: core.dsmvc.Debicubic(subsampled, width=79, height=48),
         "incompatible with subsampling")
 
-    old_wrapper = load_module(
-        "dsmvc_test_old_wrapper",
-        Path(options.vs_root) / "VapourSynthScripts" / "descale.py")
     new_wrapper = load_module(
-        "dsmvc_test_new_wrapper", Path(options.repo_root) / "python" / "dsmvc.py")
+        "dsmvc_test_new_wrapper", Path(options.repo_root) / "dsmvc.py")
+    old_wrapper_path = (Path(options.old_wrapper).resolve()
+                        if options.old_wrapper else
+                        Path(options.vs_root) / "VapourSynthScripts" / "descale.py")
+    old_wrapper = (
+        load_module("dsmvc_test_old_wrapper", old_wrapper_path)
+        if old_descale is not None and old_wrapper_path.is_file() else None)
     rgb = core.std.BlankClip(width=96, height=64, format=vs.RGB24)
-    compare_clips(
-        old_wrapper.Debicubic(rgb, 80, 48, b=0.0, c=1.0),
-        new_wrapper.Debicubic(
-            rgb, 80, 48, b=0.0, c=1.0,
-            opt=new_wrapper.Opt.NONE, backend="cpu"),
-        "wrapper/RGB24")
+    new_rgb = new_wrapper.Debicubic(
+        rgb, 80, 48, b=0.0, c=1.0,
+        opt=new_wrapper.Opt.NONE, backend="cpu")
     yuv = core.std.BlankClip(width=96, height=64, format=vs.YUV420P10)
-    compare_clips(
-        old_wrapper.Debicubic(yuv, 80, 48, gray=True),
-        new_wrapper.Debicubic(yuv, 80, 48, gray=True, backend="cpu"),
-        "wrapper/gray")
-    compare_clips(
-        old_wrapper.Debicubic(yuv, 80, 48, yuv444=True),
-        new_wrapper.Debicubic(yuv, 80, 48, yuv444=True, backend="cpu"),
-        "wrapper/yuv444")
+    new_gray = new_wrapper.Debicubic(
+        yuv, 80, 48, gray=True, backend="cpu")
+    new_yuv444 = new_wrapper.Debicubic(
+        yuv, 80, 48, yuv444=True, backend="cpu")
+    if old_wrapper is not None:
+        compare_clips(
+            old_wrapper.Debicubic(rgb, 80, 48, b=0.0, c=1.0),
+            new_rgb, "wrapper/RGB24")
+        compare_clips(
+            old_wrapper.Debicubic(yuv, 80, 48, gray=True),
+            new_gray, "wrapper/gray")
+        compare_clips(
+            old_wrapper.Debicubic(yuv, 80, 48, yuv444=True),
+            new_yuv444, "wrapper/yuv444")
+    else:
+        for clip in (new_rgb, new_gray, new_yuv444):
+            require((clip.width, clip.height) == (80, 48),
+                    "wrapper output dimensions differ")
+            clip.get_frame(0)
 
     large_source = core.std.BlankClip(
         width=1920, height=1080, format=vs.RGBS, color=[0.2, 0.4, 0.6])
@@ -251,9 +330,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--plugin", default=str(root / "build" / "Release" / "dsmvc.dll"))
     result.add_argument("--old-plugin", default=str(
         vs_root / "vapoursynth64" / "plugins" / "descale.dll"))
+    result.add_argument("--old-wrapper", default="")
     result.add_argument("--vs-root", default=str(vs_root))
     result.add_argument("--repo-root", default=str(root))
     result.add_argument("--threads", type=int, default=32)
+    result.add_argument("--cuda-enabled", action="store_true")
     return result
 
 

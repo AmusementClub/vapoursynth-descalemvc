@@ -1,0 +1,70 @@
+
+Installing required Python packages ... (date: [2026-08-06 01:22:29)
+Running install.py command: /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/bin/python /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/install.py --no-dask --no-jupyter --venv /home/owen/.nsightsystems/venv 
+Defaulting to user installation because normal site-packages is not writeable
+Looking in links: /tmp/tmpfc49qnkv
+Requirement already satisfied: pip in /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/lib/python3.12/site-packages (25.0.1)
+pip 25.0.1 from /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/lib/python3.12/site-packages/pip (python 3.12)
+Requirement already satisfied: pip in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (25.0.1)
+Collecting pip
+  Downloading pip-26.2.1-py3-none-any.whl.metadata (4.6 kB)
+Downloading pip-26.2.1-py3-none-any.whl (1.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.8/1.8 MB 4.0 MB/s eta 0:00:00
+Installing collected packages: pip
+  Attempting uninstall: pip
+    Found existing installation: pip 25.0.1
+    Uninstalling pip-25.0.1:
+      Successfully uninstalled pip-25.0.1
+Successfully installed pip-26.2.1
+Collecting numpy>=2.0.0 (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 1))
+  Downloading numpy-2.5.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+Collecting pandas>=2.1.0 (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 2))
+  Downloading pandas-3.0.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+Collecting psutil>=7.0.0 (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 3))
+  Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl.metadata (22 kB)
+Collecting pyarrow>=22.0.0 (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 4))
+  Downloading pyarrow-25.0.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (3.0 kB)
+Collecting python-dateutil>=2.8.2 (from pandas>=2.1.0->-r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 2))
+  Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting six>=1.5 (from python-dateutil>=2.8.2->pandas>=2.1.0->-r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 2))
+  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Downloading numpy-2.5.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (16.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.7/16.7 MB 9.3 MB/s  0:00:01
+Downloading pandas-3.0.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (11.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.0/11.0 MB 8.0 MB/s  0:00:01
+Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
+Downloading pyarrow-25.0.0-cp312-cp312-manylinux_2_28_x86_64.whl (50.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 50.1/50.1 MB 9.1 MB/s  0:00:05
+Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Installing collected packages: six, pyarrow, psutil, numpy, python-dateutil, pandas
+
+Installing required Python packages ... (date: [2026-08-06 01:22:49)
+Running install.py command: /home/owen/.nsightsystems/venv/bin/python /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/install.py --no-dask --no-jupyter --current 
+Looking in links: /tmp/tmpep424_tb
+Requirement already satisfied: pip in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (26.2.1)
+pip 26.2.1 from /home/owen/.nsightsystems/venv/lib/python3.12/site-packages/pip (python 3.12)
+Requirement already satisfied: pip in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (26.2.1)
+Requirement already satisfied: numpy>=2.0.0 in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 1)) (2.5.1)
+Collecting pandas>=2.1.0 (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 2))
+  Using cached pandas-3.0.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+Requirement already satisfied: psutil>=7.0.0 in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 3)) (7.2.2)
+Requirement already satisfied: pyarrow>=22.0.0 in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (from -r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 4)) (25.0.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (from pandas>=2.1.0->-r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 2)) (2.9.0.post0)
+Requirement already satisfied: six>=1.5 in /home/owen/.nsightsystems/venv/lib/python3.12/site-packages (from python-dateutil>=2.8.2->pandas>=2.1.0->-r /opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/python/packages/nsys_recipe/requirements/common.txt (line 2)) (1.17.0)
+Using cached pandas-3.0.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (11.0 MB)
+Installing collected packages: pandas
+
+Successfully installed numpy-2.5.1 pandas-3.0.5 psutil-7.2.2 pyarrow-25.0.0 python-dateutil-2.9.0.post0 six-1.17.0
+Using Python from '/home/owen/.nsightsystems/venv/bin/python3'.
+Success: Packages were installed in the venv '/home/owen/.nsightsystems/venv'.
+Activate the venv with this command before running 'nsys recipe':
+source '/home/owen/.nsightsystems/venv/bin/activate'
+install.py command result exit code: 0
+Dependency installation succeeded.
+Successfully installed pandas-3.0.5
+Using Python from '/home/owen/.nsightsystems/venv/bin/python'.
+Success: Packages were installed in the current venv '/home/owen/.nsightsystems/venv'.
+It is required to be active before running 'nsys recipe'.
+install.py command result exit code: 0
+Dependency installation succeeded.

@@ -1,6 +1,6 @@
 {
     global:
-        VapourSynthPluginInit;
+        VapourSynthPluginInit2;
     local:
         *;
 };

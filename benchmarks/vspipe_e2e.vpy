@@ -74,6 +74,14 @@ def candidates(case, profile):
     return [(item, height) for item in scalers for height in heights]
 
 
+def selected_candidates(case, profile, start, end):
+    all_items = candidates(case, profile)
+    if start < 0 or end < start or end > len(all_items):
+        raise ValueError(
+            f"candidate range [{start}, {end}) is outside 0..{len(all_items)}")
+    return all_items[start:end]
+
+
 def descale_args(width, height, src_width, src_height, base_height):
     base_width = round(width / height * base_height)
     output_width = base_width - 2 * int((base_width - src_width) / 2)
@@ -117,7 +125,7 @@ def build_descale(source, scaler_spec, height, vertical_only):
     elif scaler_spec["kernel"] == "lanczos":
         kwargs["taps"] = scaler_spec["taps"]
     if implementation == "new":
-        kwargs["backend"] = "cpu"
+        kwargs["backend"] = backend
     return getattr(namespace, FUNCTIONS[scaler_spec["kernel"]])(
         source, **kwargs), arguments
 
@@ -178,6 +186,11 @@ def statistics_segment(source, scaler_spec, heights, vertical_only, ex_thr):
 
 core = vs.core
 core.num_threads = int(threads)
+backend = globals().get("backend", "cpu")
+cache_mb = int(globals().get("cache_mb", "512") or 512)
+if cache_mb < 16:
+    raise ValueError("cache_mb must be at least 16")
+core.max_cache_size = cache_mb
 source_decoder = globals().get("source_decoder", "")
 source_prefer_hw = int(globals().get("source_prefer_hw", "0") or 0)
 source_ff_loglevel = int(globals().get("source_ff_loglevel", "0") or 0)
@@ -198,28 +211,44 @@ source_frame = src8[int(frame)]
 source_frame = core.std.ShufflePlanes(source_frame, 0, vs.GRAY)
 source_frame = source_frame.resize.Point(format=vs.GRAYS)
 
+candidate_start = int(globals().get("candidate_start", "0") or 0)
+candidate_end = int(globals().get(
+    "candidate_end", str(len(candidates(case, profile)))
+) or 0)
+selected = selected_candidates(case, profile, candidate_start, candidate_end)
+
+
+def grouped_segments(items, vertical_only, ex_thr):
+    segments = []
+    current_scaler = None
+    current_heights = []
+    for scaler_spec, height in items:
+        if current_scaler is not None and scaler_spec != current_scaler:
+            segments.append(statistics_segment(
+                source_frame, current_scaler, current_heights,
+                vertical_only, ex_thr))
+            current_heights = []
+        current_scaler = scaler_spec
+        current_heights.append(height)
+    if current_scaler is not None:
+        segments.append(statistics_segment(
+            source_frame, current_scaler, current_heights,
+            vertical_only, ex_thr))
+    return segments
+
 if case == "getfnative":
-    case_heights = (repeated_arange(700.0, 980.0, 0.1)
-                    if profile == "full" else SMOKE_HEIGHTS[case])
-    segments = [
-        statistics_segment(source_frame, item, case_heights, False, 0.015)
-        for item in GETFNATIVE_SCALERS
-    ]
+    segments = grouped_segments(selected, False, 0.015)
     output = core.std.Splice(segments)
 elif case == "getfnative_v2":
-    case_heights = (repeated_arange(840.0, 880.0, 0.1)
-                    if profile == "full" else SMOKE_HEIGHTS[case])
-    segments = [
-        statistics_segment(source_frame, item, case_heights, True, 0.015)
-        for item in GETFNATIVE_V2_SCALERS
-    ]
+    segments = grouped_segments(selected, True, 0.015)
     output = core.std.Splice(segments)
 elif case == "selectkernel":
-    looped = core.std.Loop(source_frame, times=len(SELECTKERNEL_SCALERS))
+    selected_scalers = [item[0] for item in selected]
+    looped = core.std.Loop(source_frame, times=len(selected_scalers))
     reconstructed = core.std.FrameEval(
         looped,
         lambda n: reconstruct(
-            looped, SELECTKERNEL_SCALERS[n], 719.8, False))
+            looped, selected_scalers[n], 719.8, False))
     difference = core.std.Expr(
         [looped, reconstructed], ["x y - abs dup 0.012 > swap 0 ?"])
     output = core.std.CropRel(difference, 5, 5, 5, 5).std.PlaneStats()

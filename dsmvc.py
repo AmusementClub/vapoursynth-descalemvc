@@ -93,7 +93,7 @@ def Descale(src, width, height, kernel=None, custom_kernel=None, taps=None,
         return rgb.resize.Point(format=src_f.id)
 
     y = core.dsmvc.Descale(to_grays(src), width, height, **call_args)
-    y_f = core.register_format(GRAY, src_st, src_bits, 0, 0)
+    y_f = core.query_video_format(GRAY, src_st, src_bits, 0, 0)
     y = y.resize.Point(format=y_f.id)
 
     if src_cf == GRAY or gray:

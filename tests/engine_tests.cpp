@@ -402,11 +402,389 @@ void test_backend_selection() {
             "automatic backend did not select CPU");
     bool rejected = false;
     try {
-        (void)dsmvc::resolve_backend(dsmvc::BackendKind::cuda);
+        require(dsmvc::resolve_backend(dsmvc::BackendKind::cuda)
+                    == dsmvc::BackendKind::cuda,
+                "available CUDA backend did not resolve to CUDA");
     } catch (const std::runtime_error &) {
         rejected = true;
     }
-    require(rejected, "uncompiled CUDA backend was not rejected");
+    require(rejected != dsmvc::cuda_available(),
+            "CUDA resolution disagrees with runtime availability");
+    const auto capabilities = dsmvc::backend_capabilities();
+    const auto cuda = std::find_if(
+        capabilities.begin(), capabilities.end(), [](const auto &capability) {
+            return capability.kind == dsmvc::BackendKind::cuda;
+        });
+    require(cuda != capabilities.end(), "CUDA capability is missing");
+    require(cuda->compiled == dsmvc::cuda_compiled()
+                && cuda->device_available == dsmvc::cuda_available(),
+            "CUDA capability reporting is inconsistent");
+}
+
+void test_cuda_executor_agreement() {
+    if (!dsmvc::cuda_available()) {
+        std::cout << "CUDA executor tests skipped: no compatible device\n";
+        return;
+    }
+
+    constexpr std::int32_t source_width = 97;
+    constexpr std::int32_t destination_width = 67;
+    constexpr std::int32_t source_height = 73;
+    constexpr std::int32_t destination_height = 51;
+    constexpr std::int32_t input_stride = 104;
+    constexpr std::int32_t output_stride = 72;
+
+    struct PlanPair {
+        const char *name;
+        std::shared_ptr<const dsmvc::AxisPlan> horizontal;
+        std::shared_ptr<const dsmvc::AxisPlan> vertical;
+    };
+    std::vector<PlanPair> pairs;
+    for (const auto &[kind, name] : {
+             std::pair{dsmvc::KernelKind::bilinear, "b1"},
+             std::pair{dsmvc::KernelKind::bicubic, "b3"},
+             std::pair{dsmvc::KernelKind::lanczos, "b5"},
+             std::pair{dsmvc::KernelKind::spline64, "b7"},
+         }) {
+        pairs.push_back({
+            name,
+            std::make_shared<const dsmvc::AxisPlan>(make_plan(
+                kind, source_width, destination_width, 66.75, 0.125)),
+            std::make_shared<const dsmvc::AxisPlan>(make_plan(
+                kind, source_height, destination_height, 50.5, 0.25)),
+        });
+    }
+
+    dsmvc::AxisRequest generic_horizontal_request;
+    generic_horizontal_request.source_size = source_width;
+    generic_horizontal_request.destination_size = destination_width;
+    generic_horizontal_request.active_length = 66.75;
+    generic_horizontal_request.shift = 0.125;
+    generic_horizontal_request.kernel.kind = dsmvc::KernelKind::lanczos;
+    generic_horizontal_request.kernel.taps = 5;
+    auto generic_vertical_request = generic_horizontal_request;
+    generic_vertical_request.source_size = source_height;
+    generic_vertical_request.destination_size = destination_height;
+    generic_vertical_request.active_length = 50.5;
+    generic_vertical_request.shift = 0.25;
+    pairs.push_back({
+        "generic-b9",
+        std::make_shared<const dsmvc::AxisPlan>(
+            dsmvc::build_axis_plan(generic_horizontal_request)),
+        std::make_shared<const dsmvc::AxisPlan>(
+            dsmvc::build_axis_plan(generic_vertical_request)),
+    });
+    require(pairs.back().horizontal->half_bandwidth > 7,
+            "CUDA generic fixture did not exceed the specialized bandwidths");
+
+    dsmvc::Executor cuda(dsmvc::BackendKind::cuda);
+    require(cuda.backend() == dsmvc::BackendKind::cuda,
+            "CUDA executor resolved to the wrong backend");
+    for (const auto &pair : pairs) {
+        cuda.prepare(pair.horizontal);
+        cuda.prepare(pair.vertical);
+    }
+    cuda.seal();
+    cuda.seal();
+
+    std::vector<float> input(
+        static_cast<std::size_t>(source_height)
+            * static_cast<std::size_t>(input_stride));
+    fill_deterministic(input.data(), input.size(), 0xc001d00dU);
+    const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
+    std::vector<float> reference(
+        static_cast<std::size_t>(destination_height)
+            * static_cast<std::size_t>(output_stride),
+        output_fill);
+    std::vector<float> candidate(reference.size(), output_fill);
+
+    for (const auto &pair : pairs) {
+        std::fill(reference.begin(), reference.end(), output_fill);
+        std::fill(candidate.begin(), candidate.end(), output_fill);
+        scalar.inverse_2d(
+            *pair.horizontal, *pair.vertical, input.data(), input_stride,
+            reference.data(), output_stride);
+        cuda.inverse_2d(
+            *pair.horizontal, *pair.vertical, input.data(), input_stride,
+            candidate.data(), output_stride);
+        const auto stats = compare_matrix(
+            reference.data(), candidate.data(), destination_height,
+            destination_width, output_stride);
+        std::cout << "CUDA " << pair.name << " 2D: max_error="
+                  << stats.maximum << " mean_error=" << stats.mean
+                  << " non_finite=" << stats.non_finite << '\n';
+        require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
+                std::string("CUDA ") + pair.name
+                    + " 2D differs from the scalar executor");
+    }
+
+    const auto &separate = pairs[3];
+    constexpr std::int32_t intermediate_stride = 72;
+    std::vector<float> cpu_intermediate(
+        static_cast<std::size_t>(source_height)
+            * static_cast<std::size_t>(intermediate_stride),
+        output_fill);
+    std::vector<float> cuda_intermediate(cpu_intermediate.size(), output_fill);
+    scalar.inverse_rows(
+        *separate.horizontal, input.data(), input_stride,
+        cpu_intermediate.data(), intermediate_stride, source_height);
+    cuda.inverse_rows(
+        *separate.horizontal, input.data(), input_stride,
+        cuda_intermediate.data(), intermediate_stride, source_height);
+    auto stats = compare_matrix(
+        cpu_intermediate.data(), cuda_intermediate.data(), source_height,
+        destination_width, intermediate_stride);
+    require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
+            "CUDA row executor differs from scalar");
+
+    const dsmvc::AxisPlan unprepared_horizontal = *separate.horizontal;
+    std::fill(cuda_intermediate.begin(), cuda_intermediate.end(), output_fill);
+    cuda.inverse_rows(
+        unprepared_horizontal, input.data(), input_stride,
+        cuda_intermediate.data(), intermediate_stride, source_height);
+    stats = compare_matrix(
+        cpu_intermediate.data(), cuda_intermediate.data(), source_height,
+        destination_width, intermediate_stride);
+    require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
+            "CUDA direct unprepared plan differs from scalar");
+
+    std::fill(reference.begin(), reference.end(), output_fill);
+    std::fill(candidate.begin(), candidate.end(), output_fill);
+    scalar.inverse_columns(
+        *separate.vertical, cpu_intermediate.data(), intermediate_stride,
+        reference.data(), output_stride, destination_width);
+    cuda.inverse_columns(
+        *separate.vertical, cpu_intermediate.data(), intermediate_stride,
+        candidate.data(), output_stride, destination_width);
+    stats = compare_matrix(
+        reference.data(), candidate.data(), destination_height,
+        destination_width, output_stride);
+    require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
+            "CUDA column executor differs from scalar");
+    const std::vector<float> concurrency_reference = reference;
+
+    auto cached_column_input =
+        std::make_shared<std::vector<float>>(cpu_intermediate);
+    const std::shared_ptr<const void> cached_column_lifetime(
+        cached_column_input,
+        static_cast<const void *>(cached_column_input->data()));
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        std::fill(candidate.begin(), candidate.end(), output_fill);
+        cuda.inverse_columns(
+            *separate.vertical, cached_column_input->data(),
+            intermediate_stride, candidate.data(), output_stride,
+            destination_width, cached_column_lifetime);
+        stats = compare_matrix(
+            concurrency_reference.data(), candidate.data(), destination_height,
+            destination_width, output_stride);
+        require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
+                "cached CUDA column executor differs from scalar");
+    }
+
+    const dsmvc::IntegerConversion u8_conversion{
+        16.0F, 1.0F / 219.0F, 219.0F, 16.0F, 255U};
+    std::vector<std::uint8_t> integer_input(input.size());
+    std::vector<float> normalized(input.size());
+    for (std::size_t index = 0; index < integer_input.size(); ++index) {
+        integer_input[index] = static_cast<std::uint8_t>(
+            16U + (index * 37U + 11U) % 220U);
+        normalized[index] =
+            (static_cast<float>(integer_input[index])
+                 - u8_conversion.input_offset)
+            * u8_conversion.input_scale;
+    }
+    scalar.inverse_2d(
+        *separate.horizontal, *separate.vertical,
+        normalized.data(), input_stride, reference.data(), output_stride);
+    std::vector<std::uint8_t> integer_reference(reference.size());
+    std::vector<std::uint8_t> integer_candidate(reference.size(), 0U);
+    const auto maximum_integer_difference = [=](
+        const auto &left, const auto &right) {
+        std::uint32_t maximum = 0U;
+        for (std::int32_t row = 0; row < destination_height; ++row) {
+            for (std::int32_t column = 0; column < destination_width; ++column) {
+                const auto index = static_cast<std::ptrdiff_t>(row)
+                    * output_stride + column;
+                const auto lhs = static_cast<std::uint32_t>(left[index]);
+                const auto rhs = static_cast<std::uint32_t>(right[index]);
+                maximum = std::max(
+                    maximum, lhs > rhs ? lhs - rhs : rhs - lhs);
+            }
+        }
+        return maximum;
+    };
+    for (std::int32_t row = 0; row < destination_height; ++row) {
+        for (std::int32_t column = 0; column < destination_width; ++column) {
+            const auto index = static_cast<std::ptrdiff_t>(row)
+                * output_stride + column;
+            const float converted = std::clamp(
+                reference[index] * u8_conversion.output_scale
+                    + u8_conversion.output_offset,
+                0.0F, 255.0F);
+            integer_reference[index] =
+                static_cast<std::uint8_t>(std::nearbyint(converted));
+        }
+    }
+    cuda.inverse_2d_u8(
+        *separate.horizontal, *separate.vertical,
+        integer_input.data(), input_stride,
+        integer_candidate.data(), output_stride, u8_conversion);
+    std::uint32_t maximum_integer_error = maximum_integer_difference(
+        integer_reference, integer_candidate);
+    require(maximum_integer_error <= 1U,
+            "CUDA u8 conversion differs from the Float32 reference by more than one");
+
+    auto cached_u8_input =
+        std::make_shared<std::vector<std::uint8_t>>(integer_input);
+    const std::shared_ptr<const void> cached_u8_lifetime(
+        cached_u8_input, static_cast<const void *>(cached_u8_input->data()));
+    std::fill(integer_candidate.begin(), integer_candidate.end(), 0U);
+    cuda.inverse_2d_u8(
+        *separate.horizontal, *separate.vertical,
+        cached_u8_input->data(), input_stride,
+        integer_candidate.data(), output_stride, u8_conversion,
+        cached_u8_lifetime);
+    require(maximum_integer_difference(
+                integer_reference, integer_candidate) <= 1U,
+            "cached CUDA u8 conversion differs from the Float32 reference");
+
+    const dsmvc::IntegerConversion full_range_u8_conversion{
+        0.0F, 1.0F / 255.0F, 255.0F, 0.0F, 255U};
+    for (std::size_t index = 0; index < cached_u8_input->size(); ++index) {
+        normalized[index] = static_cast<float>((*cached_u8_input)[index])
+            * full_range_u8_conversion.input_scale;
+    }
+    scalar.inverse_2d(
+        *separate.horizontal, *separate.vertical,
+        normalized.data(), input_stride, reference.data(), output_stride);
+    std::vector<std::uint8_t> full_range_reference(reference.size());
+    std::vector<std::uint8_t> full_range_candidate(reference.size(), 0U);
+    for (std::int32_t row = 0; row < destination_height; ++row) {
+        for (std::int32_t column = 0; column < destination_width; ++column) {
+            const auto index = static_cast<std::ptrdiff_t>(row)
+                * output_stride + column;
+            full_range_reference[index] = static_cast<std::uint8_t>(
+                std::nearbyint(std::clamp(
+                    reference[index] * full_range_u8_conversion.output_scale,
+                    0.0F, 255.0F)));
+        }
+    }
+    cuda.inverse_2d_u8(
+        *separate.horizontal, *separate.vertical,
+        cached_u8_input->data(), input_stride,
+        full_range_candidate.data(), output_stride, full_range_u8_conversion,
+        cached_u8_lifetime);
+    require(maximum_integer_difference(
+                full_range_reference, full_range_candidate) <= 1U,
+            "CUDA input cache reused the wrong u8 conversion");
+
+    const dsmvc::IntegerConversion u16_conversion{
+        512.0F, 1.0F / 896.0F, 896.0F, 512.0F, 1023U};
+    std::vector<std::uint16_t> u16_input(input.size());
+    for (std::size_t index = 0; index < u16_input.size(); ++index) {
+        u16_input[index] = static_cast<std::uint16_t>(
+            (index * 73U + 19U) % 1024U);
+        normalized[index] =
+            (static_cast<float>(u16_input[index])
+                 - u16_conversion.input_offset)
+            * u16_conversion.input_scale;
+    }
+    scalar.inverse_2d(
+        *separate.horizontal, *separate.vertical,
+        normalized.data(), input_stride, reference.data(), output_stride);
+    std::vector<std::uint16_t> u16_reference(reference.size());
+    std::vector<std::uint16_t> u16_candidate(reference.size(), 0U);
+    for (std::int32_t row = 0; row < destination_height; ++row) {
+        for (std::int32_t column = 0; column < destination_width; ++column) {
+            const auto index = static_cast<std::ptrdiff_t>(row)
+                * output_stride + column;
+            const float converted = std::clamp(
+                reference[index] * u16_conversion.output_scale
+                    + u16_conversion.output_offset,
+                0.0F, 1023.0F);
+            u16_reference[index] =
+                static_cast<std::uint16_t>(std::nearbyint(converted));
+        }
+    }
+    cuda.inverse_2d_u16(
+        *separate.horizontal, *separate.vertical,
+        u16_input.data(), input_stride,
+        u16_candidate.data(), output_stride, u16_conversion);
+    maximum_integer_error = maximum_integer_difference(
+        u16_reference, u16_candidate);
+    require(maximum_integer_error <= 1U,
+            "CUDA u16 conversion differs from the Float32 reference by more than one");
+
+    auto cached_u16_input =
+        std::make_shared<std::vector<std::uint16_t>>(u16_input);
+    const std::shared_ptr<const void> cached_u16_lifetime(
+        cached_u16_input, static_cast<const void *>(cached_u16_input->data()));
+    std::fill(u16_candidate.begin(), u16_candidate.end(), 0U);
+    cuda.inverse_2d_u16(
+        *separate.horizontal, *separate.vertical,
+        cached_u16_input->data(), input_stride,
+        u16_candidate.data(), output_stride, u16_conversion,
+        cached_u16_lifetime);
+    require(maximum_integer_difference(u16_reference, u16_candidate) <= 1U,
+            "cached CUDA u16 conversion differs from the Float32 reference");
+
+    auto cached_input = std::make_shared<std::vector<float>>(input);
+    const std::shared_ptr<const void> cached_input_lifetime(
+        cached_input, static_cast<const void *>(cached_input->data()));
+    const auto check_concurrent = [&](
+        const PlanPair &pair, const std::vector<float> &expected,
+        const char *label) {
+        std::vector<std::exception_ptr> errors(6U);
+        std::barrier start(static_cast<std::ptrdiff_t>(errors.size()));
+        std::vector<std::jthread> callers;
+        callers.reserve(errors.size());
+        for (std::size_t index = 0; index < errors.size(); ++index) {
+            callers.emplace_back([&, index] {
+                try {
+                    std::vector<float> concurrent(candidate.size(), output_fill);
+                    start.arrive_and_wait();
+                    cuda.inverse_2d(
+                        *pair.horizontal, *pair.vertical,
+                        cached_input->data(), input_stride,
+                        concurrent.data(), output_stride, cached_input_lifetime);
+                    const auto concurrent_stats = compare_matrix(
+                        expected.data(), concurrent.data(), destination_height,
+                        destination_width, output_stride);
+                    require(
+                        concurrent_stats.non_finite == 0U
+                            && concurrent_stats.maximum < 1.0e-4F,
+                        std::string("concurrent CUDA ") + label
+                            + " execution differs from scalar");
+                } catch (...) {
+                    errors[index] = std::current_exception();
+                }
+            });
+        }
+        callers.clear();
+        for (const auto &error : errors) {
+            if (error) std::rethrow_exception(error);
+        }
+    };
+    check_concurrent(separate, concurrency_reference, "b7");
+
+    const auto &limited = pairs[1];
+    std::vector<float> limited_reference(reference.size(), output_fill);
+    scalar.inverse_2d(
+        *limited.horizontal, *limited.vertical,
+        cached_input->data(), input_stride,
+        limited_reference.data(), output_stride);
+    check_concurrent(limited, limited_reference, "b3");
+
+    std::fill(cuda_intermediate.begin(), cuda_intermediate.end(), output_fill);
+    cuda.inverse_rows(
+        *separate.horizontal, cached_input->data(), input_stride,
+        cuda_intermediate.data(), intermediate_stride, source_height,
+        cached_input_lifetime);
+    stats = compare_matrix(
+        cpu_intermediate.data(), cuda_intermediate.data(), source_height,
+        destination_width, intermediate_stride);
+    require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
+            "cached CUDA row executor differs from scalar");
 }
 
 void test_identity_bilinear() {
@@ -822,6 +1200,7 @@ void test_concurrent_prepare_and_seal() {
 int main() {
     try {
         test_backend_selection();
+        test_cuda_executor_agreement();
         test_identity_bilinear();
         test_custom_plan();
         test_inverse_only_cache();

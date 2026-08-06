@@ -1,5 +1,9 @@
 #include <dsmvc/engine.hpp>
 
+#if defined(DSMVC_HAS_CUDA)
+#include "cuda/cuda_executor.hpp"
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
@@ -34,17 +38,41 @@ BackendKind resolve_backend(BackendKind requested) {
     if (requested == BackendKind::automatic || requested == BackendKind::cpu) {
         return BackendKind::cpu;
     }
+#if defined(DSMVC_HAS_CUDA)
+    if (requested == BackendKind::cuda) {
+        if (cuda_detail::backend_available()) return BackendKind::cuda;
+        throw std::runtime_error(
+            "backend 'cuda' is compiled but no compatible CUDA device is available");
+    }
+#endif
     throw std::runtime_error(std::string{"backend '"} + backend_name(requested)
                              + "' is not compiled in this build");
 }
 
 std::vector<BackendCapability> backend_capabilities() {
+    const bool cuda_device = cuda_available();
     return {
         {BackendKind::cpu, "cpu", true, true},
         {BackendKind::metal, "metal", false, false},
         {BackendKind::vulkan, "vulkan", false, false},
-        {BackendKind::cuda, "cuda", false, false},
+        {BackendKind::cuda, "cuda", cuda_compiled(), cuda_device},
     };
+}
+
+bool cuda_compiled() noexcept {
+#if defined(DSMVC_HAS_CUDA)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool cuda_available() noexcept {
+#if defined(DSMVC_HAS_CUDA)
+    return cuda_detail::backend_available();
+#else
+    return false;
+#endif
 }
 
 } // namespace dsmvc
