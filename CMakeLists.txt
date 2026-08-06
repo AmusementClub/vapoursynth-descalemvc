@@ -24,6 +24,8 @@ set(DSMVC_CUDA_ARCHITECTURES
 set(DSMVC_CUDA_PTX_ARCHITECTURES "75;121" CACHE STRING
     "Virtual compute targets embedded as CUDA PTX fallbacks")
 option(DSMVC_BUILD_BENCHMARKS "Build the fixed-recipe CPU benchmark" OFF)
+option(DSMVC_BUILD_METAL_EXPERIMENTS
+    "Build the experimental Apple Silicon Metal backend" OFF)
 
 set(DSMVC_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
@@ -308,5 +310,106 @@ if(DSMVC_BUILD_BENCHMARKS)
     else()
         target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
             -Wall -Wextra -Wpedantic -ffp-contract=off)
+    endif()
+endif()
+
+if(DSMVC_BUILD_METAL_EXPERIMENTS)
+    if(NOT APPLE OR NOT DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        message(FATAL_ERROR
+            "DSMVC_BUILD_METAL_EXPERIMENTS requires a native Apple ARM64 build")
+    endif()
+
+    find_program(DSMVC_XCRUN xcrun REQUIRED)
+    execute_process(
+        COMMAND "${DSMVC_XCRUN}" metal --version
+        RESULT_VARIABLE DSMVC_METAL_COMPILER_RESULT
+        OUTPUT_QUIET ERROR_QUIET)
+    execute_process(
+        COMMAND "${DSMVC_XCRUN}" metallib --version
+        RESULT_VARIABLE DSMVC_METALLIB_RESULT
+        OUTPUT_QUIET ERROR_QUIET)
+    if(NOT DSMVC_METAL_COMPILER_RESULT EQUAL 0
+       OR NOT DSMVC_METALLIB_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "DSMVC_BUILD_METAL_EXPERIMENTS requires the Xcode Metal toolchain")
+    endif()
+
+    enable_language(OBJCXX)
+    find_library(DSMVC_METAL_FRAMEWORK Metal REQUIRED)
+    find_library(DSMVC_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+
+    set(DSMVC_METAL_GENERATED_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/metal-routes")
+    set(DSMVC_METAL_AIR
+        "${DSMVC_METAL_GENERATED_DIR}/dsmvc_metal_routes.air")
+    set(DSMVC_METALLIB
+        "${DSMVC_METAL_GENERATED_DIR}/dsmvc_metal_routes.metallib")
+    set(DSMVC_METALLIB_HEADER
+        "${DSMVC_METAL_GENERATED_DIR}/dsmvc_metal_routes_metallib.hpp")
+
+    add_custom_command(
+        OUTPUT "${DSMVC_METAL_AIR}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "${DSMVC_METAL_GENERATED_DIR}"
+        COMMAND "${DSMVC_XCRUN}" -sdk macosx metal
+                -Werror -fno-fast-math -ffp-contract=off
+                -c "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/metal_routes.metal"
+                -o "${DSMVC_METAL_AIR}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/metal_routes.metal"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DSMVC_METALLIB}"
+        COMMAND "${DSMVC_XCRUN}" -sdk macosx metallib
+                "${DSMVC_METAL_AIR}" -o "${DSMVC_METALLIB}"
+        DEPENDS "${DSMVC_METAL_AIR}"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DSMVC_METALLIB_HEADER}"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${DSMVC_METALLIB}"
+                "-DOUTPUT=${DSMVC_METALLIB_HEADER}"
+                -DSYMBOL=dsmvc_metal_routes_metallib
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        DEPENDS "${DSMVC_METALLIB}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        VERBATIM)
+
+    target_sources(dsmvc PRIVATE
+        src/hybrid_batch_coordinator.cpp
+        src/metal_float_executor_apple.mm
+        src/metal_yuv_executor_apple.mm
+        "${DSMVC_METALLIB_HEADER}")
+    target_include_directories(dsmvc PRIVATE "${DSMVC_METAL_GENERATED_DIR}")
+    target_compile_definitions(dsmvc PRIVATE
+        DSMVC_HAS_EXPERIMENTAL_METAL=1)
+    set_source_files_properties(
+        src/metal_float_executor_apple.mm
+        src/metal_yuv_executor_apple.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(dsmvc PRIVATE
+        "${DSMVC_METAL_FRAMEWORK}"
+        "${DSMVC_FOUNDATION_FRAMEWORK}")
+
+    if(BUILD_TESTING)
+        add_executable(dsmvc_hybrid_batch_coordinator_tests
+            tests/hybrid_batch_coordinator_tests.cpp
+            src/hybrid_batch_coordinator.cpp)
+        target_compile_features(
+            dsmvc_hybrid_batch_coordinator_tests PRIVATE cxx_std_23)
+        target_compile_options(dsmvc_hybrid_batch_coordinator_tests PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME dsmvc_hybrid_batch_coordinator_tests
+            COMMAND dsmvc_hybrid_batch_coordinator_tests)
+
+        add_executable(dsmvc_metal_yuv_staging_tests
+            tests/metal_yuv_staging_tests.cpp)
+        target_compile_features(dsmvc_metal_yuv_staging_tests PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_metal_yuv_staging_tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        target_compile_options(dsmvc_metal_yuv_staging_tests PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME dsmvc_metal_yuv_staging_tests
+            COMMAND dsmvc_metal_yuv_staging_tests)
     endif()
 endif()

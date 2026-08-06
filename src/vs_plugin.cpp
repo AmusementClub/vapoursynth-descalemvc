@@ -1,23 +1,36 @@
 #include <dsmvc/engine.hpp>
 
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+#include "hybrid_batch_coordinator.hpp"
+#include "metal_float_executor_apple.hpp"
+#include "metal_yuv_executor_apple.hpp"
+#include <os/signpost.h>
+#endif
+
 #include <VapourSynth4.h>
 #include <VSHelper4.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <charconv>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -32,6 +45,22 @@ using dsmvc::KernelKind;
 using dsmvc::KernelSpec;
 
 constexpr const char *plugin_id = "com.dsmvc.descale";
+
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+struct ExperimentalMetalFrameTask {
+    dsmvc::experimental::MetalYuvFrame frame;
+    std::size_t metal_batch_size = 0U;
+    std::size_t staging_memcpy_calls = 0U;
+    std::size_t staging_copied_bytes = 0U;
+};
+
+struct ExperimentalMetalFloatFrameTask {
+    dsmvc::experimental::MetalFloatFrame frame;
+    std::size_t metal_batch_size = 0U;
+    std::size_t staging_memcpy_calls = 0U;
+    std::size_t staging_copied_bytes = 0U;
+};
+#endif
 
 struct ParsedArguments {
     KernelSpec kernel{};
@@ -85,6 +114,16 @@ struct FilterData {
     CustomKernel custom_callback;
     Executor executor{};
     std::atomic<std::uint32_t> active_2d_frames{0};
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+    bool experimental_metal = false;
+    bool experimental_metal_auto = false;
+    bool experimental_metal_profile_signposts = false;
+    std::unique_ptr<dsmvc::experimental::MetalFloatExecutor>
+        metal_float_executor;
+    std::unique_ptr<dsmvc::experimental::MetalYuvExecutor> metal_executor;
+    std::unique_ptr<dsmvc::experimental::HybridBatchCoordinator>
+        metal_coordinator;
+#endif
 };
 
 class ActiveFrameGuard {
@@ -136,6 +175,111 @@ const MemoryPhaseConfig &memory_phase_config() noexcept {
     }();
     return config;
 }
+
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+std::chrono::microseconds experimental_metal_flush_timeout() noexcept {
+    static const auto timeout = [] {
+        constexpr std::size_t default_microseconds = 500U;
+        constexpr std::size_t maximum_microseconds = 100000U;
+        const char *environment = std::getenv("DSMVC_METAL_BATCH_TIMEOUT_US");
+        if (!environment) {
+            return std::chrono::microseconds{default_microseconds};
+        }
+        const std::string_view text(environment);
+        std::size_t parsed = 0U;
+        const auto conversion = std::from_chars(
+            text.data(), text.data() + text.size(), parsed);
+        if (conversion.ec != std::errc{}
+            || conversion.ptr != text.data() + text.size()
+            || parsed > maximum_microseconds) {
+            return std::chrono::microseconds{default_microseconds};
+        }
+        return std::chrono::microseconds{parsed};
+    }();
+    return timeout;
+}
+
+std::size_t experimental_metal_float_batch_size() noexcept {
+    static const std::size_t batch_size = [] {
+        constexpr std::size_t default_batch_size = 16U;
+        const char *environment = std::getenv(
+            "DSMVC_METAL_FLOAT_BATCH_SIZE");
+        if (!environment) return default_batch_size;
+
+        const std::string_view text(environment);
+        std::size_t parsed = 0U;
+        const auto conversion = std::from_chars(
+            text.data(), text.data() + text.size(), parsed);
+        if (conversion.ec != std::errc{}
+            || conversion.ptr != text.data() + text.size()
+            || parsed < 2U || parsed > 64U) {
+            return default_batch_size;
+        }
+        return parsed;
+    }();
+    return batch_size;
+}
+
+std::size_t experimental_metal_float_cpu_frames(
+    std::size_t batch_size) noexcept {
+    const std::size_t default_cpu_frames = batch_size > 4U
+        ? batch_size - 4U : batch_size - 1U;
+    static const auto configured = []() -> std::optional<std::size_t> {
+        const char *environment = std::getenv(
+            "DSMVC_METAL_FLOAT_CPU_FRAMES");
+        if (!environment) return std::nullopt;
+
+        const std::string_view text(environment);
+        std::size_t parsed = 0U;
+        const auto conversion = std::from_chars(
+            text.data(), text.data() + text.size(), parsed);
+        if (conversion.ec != std::errc{}
+            || conversion.ptr != text.data() + text.size()
+            || parsed == 0U) return std::nullopt;
+        return parsed;
+    }();
+    return configured && *configured < batch_size
+        ? *configured : default_cpu_frames;
+}
+
+bool experimental_metal_profile_signposts() noexcept {
+    static const bool enabled = [] {
+        const char *environment = std::getenv(
+            "DSMVC_METAL_PROFILE_SIGNPOSTS");
+        return environment != nullptr
+            && std::string_view(environment) == "1";
+    }();
+    return enabled;
+}
+
+[[nodiscard]] os_log_t experimental_metal_profile_log() noexcept {
+    static os_log_t log = os_log_create(
+        "com.dsmvc.plugin", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+    return log;
+}
+
+template <class Work>
+void run_profiled_cpu_frame(bool enabled, Work &&work) {
+    if (!enabled) {
+        std::forward<Work>(work)();
+        return;
+    }
+
+    const os_log_t log = experimental_metal_profile_log();
+    const os_signpost_id_t profile_id = os_signpost_id_generate(log);
+    os_signpost_interval_begin(
+        log, profile_id, "DSMVCPluginCpuFrame");
+    try {
+        std::forward<Work>(work)();
+    } catch (...) {
+        os_signpost_interval_end(
+            log, profile_id, "DSMVCPluginCpuFrame");
+        throw;
+    }
+    os_signpost_interval_end(
+        log, profile_id, "DSMVCPluginCpuFrame");
+}
+#endif
 
 class MemoryPhaseLimiter {
 public:
@@ -292,7 +436,13 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
 #endif
     parsed.backend_text = get_data(in, "backend", "auto", vsapi);
     parsed.backend = dsmvc::parse_backend(parsed.backend_text);
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+    if (parsed.backend != BackendKind::metal) {
+        (void)dsmvc::resolve_backend(parsed.backend);
+    }
+#else
     (void)dsmvc::resolve_backend(parsed.backend);
+#endif
 
     if (fixed_mode != 0) {
         parsed.kernel.kind = static_cast<KernelKind>(fixed_mode - 1);
@@ -357,6 +507,74 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     custom_guard.dismiss();
     return parsed;
 }
+
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+bool supports_experimental_metal(
+    const ParsedArguments &parsed, const VSVideoInfo &source,
+    bool process_horizontal, bool process_vertical, bool fused_integer) {
+    const auto near = [](double left, double right) {
+        return std::abs(left - right) <= 1.0e-9;
+    };
+    const bool yuv_format_supported = fused_integer
+        && source.format.colorFamily == cfYUV
+        && source.format.subSamplingW == 1
+        && source.format.subSamplingH == 1
+        && source.format.numPlanes == 3
+        && (source.format.bitsPerSample == 8
+            || source.format.bitsPerSample == 10);
+    const bool float_format_supported = !fused_integer
+        && source.format.sampleType == stFloat
+        && source.format.bitsPerSample == 32
+        && source.format.colorFamily == cfGray
+        && source.format.numPlanes == 1;
+    const bool geometry_supported = source.width == 1920
+        && source.height == 1080
+        && parsed.width == 1692
+        && parsed.height == 952
+        && process_horizontal && process_vertical
+        && near(parsed.src_left, 0.2222222222221717)
+        && near(parsed.src_top, 0.25)
+        && near(parsed.src_width, 1691.5555555555557)
+        && near(parsed.src_height, 951.5);
+    const bool yuv_kernel_supported = parsed.kernel.kind == KernelKind::bilinear
+        || parsed.kernel.kind == KernelKind::spline16
+        || parsed.kernel.kind == KernelKind::spline36
+        || parsed.kernel.kind == KernelKind::spline64
+        || (parsed.kernel.kind == KernelKind::bicubic
+            && near(parsed.kernel.b, 0.0) && near(parsed.kernel.c, 0.5))
+        || (parsed.kernel.kind == KernelKind::lanczos
+            && parsed.kernel.taps == 3);
+    const bool float_kernel_supported = parsed.kernel.kind == KernelKind::bilinear
+        || parsed.kernel.kind == KernelKind::spline36
+        || parsed.kernel.kind == KernelKind::spline64
+        || (parsed.kernel.kind == KernelKind::bicubic
+            && near(parsed.kernel.b, 0.0) && near(parsed.kernel.c, 0.5))
+        || (parsed.kernel.kind == KernelKind::lanczos
+            && parsed.kernel.taps == 3);
+    const bool format_and_kernel_supported =
+        (yuv_format_supported && yuv_kernel_supported)
+        || (float_format_supported && float_kernel_supported);
+    return format_and_kernel_supported && geometry_supported
+        && parsed.border == BorderMode::mirror
+        && parsed.custom_kernel == nullptr;
+}
+
+bool experimental_metal_auto_kernel(const KernelSpec &kernel) noexcept {
+    return kernel.kind == KernelKind::spline36
+        || kernel.kind == KernelKind::spline64
+        || (kernel.kind == KernelKind::lanczos && kernel.taps == 3);
+}
+
+void validate_experimental_metal(
+    const ParsedArguments &parsed, bool supported) {
+    if (parsed.backend == BackendKind::metal && !supported) {
+        throw std::invalid_argument(
+            "experimental Metal supports only the measured two-axis "
+            "1920x1080 to 1692x952 GRAYS or YUV420P8/P10 "
+            "mirror-border recipes and kernels");
+    }
+}
+#endif
 
 void copy_common_arguments(VSMap *map, const ParsedArguments &parsed,
                            const VSAPI *vsapi) {
@@ -557,6 +775,87 @@ void ensure_filter_plans(FilterData &data, const VSAPI *vsapi) {
                 if (plan) data.executor.prepare(plan);
             }
             data.executor.seal();
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+            if (data.experimental_metal) {
+                const std::size_t batch_size = data.fused_integer
+                    ? 16U : experimental_metal_float_batch_size();
+                const bool wide = data.vertical[0]->half_bandwidth >= 5;
+                const std::size_t cpu_frames = data.fused_integer
+                    ? (wide ? 9U : 12U)
+                    : experimental_metal_float_cpu_frames(batch_size);
+                const std::size_t gpu_frames = batch_size - cpu_frames;
+                const std::size_t activation_threshold =
+                    data.experimental_metal_auto ? batch_size : 0U;
+                if (data.fused_integer) {
+                    data.metal_coordinator = std::make_unique<
+                        dsmvc::experimental::HybridBatchCoordinator>(
+                        batch_size, cpu_frames, activation_threshold,
+                        experimental_metal_flush_timeout(),
+                        [&data, gpu_frames](std::span<void *const> payloads) {
+                            if (!data.metal_executor) {
+                                data.metal_executor = std::make_unique<
+                                    dsmvc::experimental::MetalYuvExecutor>(
+                                    std::array{
+                                        data.horizontal[0], data.horizontal[1]},
+                                    std::array{
+                                        data.vertical[0], data.vertical[1]},
+                                    static_cast<std::uint32_t>(
+                                        data.bytes_per_sample),
+                                    gpu_frames, 128U,
+                                    data.experimental_metal_profile_signposts);
+                            }
+                            std::vector<dsmvc::experimental::MetalYuvFrame> frames;
+                            frames.reserve(payloads.size());
+                            for (void *payload : payloads) {
+                                auto &task = *static_cast<
+                                    ExperimentalMetalFrameTask *>(payload);
+                                task.metal_batch_size = payloads.size();
+                                frames.push_back(task.frame);
+                            }
+                            data.metal_executor->execute(frames);
+                            const auto staging =
+                                data.metal_executor->last_staging_stats();
+                            for (void *payload : payloads) {
+                                auto &task = *static_cast<
+                                    ExperimentalMetalFrameTask *>(payload);
+                                task.staging_memcpy_calls = staging.memcpy_calls;
+                                task.staging_copied_bytes = staging.copied_bytes;
+                            }
+                        });
+                } else {
+                    data.metal_coordinator = std::make_unique<
+                        dsmvc::experimental::HybridBatchCoordinator>(
+                        batch_size, cpu_frames, activation_threshold,
+                        experimental_metal_flush_timeout(),
+                        [&data, gpu_frames](std::span<void *const> payloads) {
+                            if (!data.metal_float_executor) {
+                                data.metal_float_executor = std::make_unique<
+                                    dsmvc::experimental::MetalFloatExecutor>(
+                                    data.horizontal[0], data.vertical[0],
+                                    gpu_frames, 32U,
+                                    data.experimental_metal_profile_signposts);
+                            }
+                            std::vector<dsmvc::experimental::MetalFloatFrame> frames;
+                            frames.reserve(payloads.size());
+                            for (void *payload : payloads) {
+                                auto &task = *static_cast<
+                                    ExperimentalMetalFloatFrameTask *>(payload);
+                                task.metal_batch_size = payloads.size();
+                                frames.push_back(task.frame);
+                            }
+                            data.metal_float_executor->execute(frames);
+                            const auto staging =
+                                data.metal_float_executor->last_staging_stats();
+                            for (void *payload : payloads) {
+                                auto &task = *static_cast<
+                                    ExperimentalMetalFloatFrameTask *>(payload);
+                                task.staging_memcpy_calls = staging.memcpy_calls;
+                                task.staging_copied_bytes = staging.copied_bytes;
+                            }
+                        });
+                }
+            }
+#endif
         } catch (...) {
             data.planning_error = std::current_exception();
         }
@@ -602,6 +901,143 @@ IntegerConversion integer_conversion(const FilterData &data, int plane,
     };
 }
 
+void process_integer_frame(
+    FilterData &data, const VSFrame *source, VSFrame *destination,
+    int range, bool buffered,
+    const std::shared_ptr<const void> &source_lifetime,
+    const VSAPI *vsapi) {
+    for (int plane = 0; plane < data.num_planes; ++plane) {
+        const int horizontal_index = plane != 0 && data.subsampling_w > 0;
+        const int vertical_index = plane != 0 && data.subsampling_h > 0;
+        const auto conversion = integer_conversion(data, plane, range);
+        const auto source_stride = vsapi->getStride(source, plane)
+            / data.bytes_per_sample;
+        const auto destination_stride = vsapi->getStride(destination, plane)
+            / data.bytes_per_sample;
+        if (data.bytes_per_sample == 1) {
+            if (buffered) {
+                data.executor.inverse_2d_u8(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index],
+                    vsapi->getReadPtr(source, plane), source_stride,
+                    vsapi->getWritePtr(destination, plane),
+                    destination_stride, conversion, source_lifetime);
+            } else {
+                data.executor.inverse_2d_u8_streamed(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index],
+                    vsapi->getReadPtr(source, plane), source_stride,
+                    vsapi->getWritePtr(destination, plane),
+                    destination_stride, conversion, source_lifetime);
+            }
+        } else if (buffered) {
+            data.executor.inverse_2d_u16(
+                *data.horizontal[horizontal_index],
+                *data.vertical[vertical_index],
+                reinterpret_cast<const std::uint16_t *>(
+                    vsapi->getReadPtr(source, plane)),
+                source_stride,
+                reinterpret_cast<std::uint16_t *>(
+                    vsapi->getWritePtr(destination, plane)),
+                destination_stride, conversion, source_lifetime);
+        } else {
+            data.executor.inverse_2d_u16_streamed(
+                *data.horizontal[horizontal_index],
+                *data.vertical[vertical_index],
+                reinterpret_cast<const std::uint16_t *>(
+                    vsapi->getReadPtr(source, plane)),
+                source_stride,
+                reinterpret_cast<std::uint16_t *>(
+                    vsapi->getWritePtr(destination, plane)),
+                destination_stride, conversion, source_lifetime);
+        }
+    }
+}
+
+void process_float_frame(
+    FilterData &data, const VSFrame *source, VSFrame *intermediate,
+    VSFrame *destination, bool buffered,
+    const std::shared_ptr<const void> &source_lifetime,
+    const VSAPI *vsapi) {
+    for (int plane = 0; plane < data.num_planes; ++plane) {
+        const int horizontal_index = plane != 0 && data.subsampling_w > 0;
+        const int vertical_index = plane != 0 && data.subsampling_h > 0;
+        const auto source_stride = vsapi->getStride(source, plane)
+            / static_cast<int>(sizeof(float));
+        const auto destination_stride = vsapi->getStride(destination, plane)
+            / static_cast<int>(sizeof(float));
+        const auto *source_ptr = reinterpret_cast<const float *>(
+            vsapi->getReadPtr(source, plane));
+        auto *destination_ptr = reinterpret_cast<float *>(
+            vsapi->getWritePtr(destination, plane));
+        if (data.process_horizontal && data.process_vertical) {
+            if (buffered) {
+                if (!intermediate) {
+                    throw std::logic_error(
+                        "buffered Float32 frame has no scratch frame");
+                }
+                const auto intermediate_stride =
+                    vsapi->getStride(intermediate, plane)
+                    / static_cast<int>(sizeof(float));
+                auto *intermediate_ptr = reinterpret_cast<float *>(
+                    vsapi->getWritePtr(intermediate, plane));
+                const auto row_count = data.source_height
+                    >> (plane != 0 ? data.subsampling_h : 0);
+                data.executor.inverse_rows(
+                    *data.horizontal[horizontal_index],
+                    source_ptr, source_stride,
+                    intermediate_ptr, intermediate_stride, row_count,
+                    source_lifetime);
+                const auto column_count = data.destination_width
+                    >> (plane != 0 ? data.subsampling_w : 0);
+                data.executor.inverse_columns(
+                    *data.vertical[vertical_index],
+                    intermediate_ptr, intermediate_stride,
+                    destination_ptr, destination_stride, column_count);
+            } else {
+                data.executor.inverse_2d(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index],
+                    source_ptr, source_stride,
+                    destination_ptr, destination_stride, source_lifetime);
+            }
+        } else if (data.process_horizontal) {
+            const auto row_count = data.source_height
+                >> (plane != 0 ? data.subsampling_h : 0);
+            data.executor.inverse_rows(
+                *data.horizontal[horizontal_index], source_ptr, source_stride,
+                destination_ptr, destination_stride, row_count,
+                source_lifetime);
+        } else {
+            const auto column_count = data.source_width
+                >> (plane != 0 ? data.subsampling_w : 0);
+            data.executor.inverse_columns(
+                *data.vertical[vertical_index], source_ptr, source_stride,
+                destination_ptr, destination_stride, column_count,
+                source_lifetime);
+        }
+    }
+}
+
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+template <class Task>
+void set_experimental_metal_properties(
+    VSFrame *destination, const Task &task, const VSAPI *vsapi) {
+    VSMap *properties = vsapi->getFramePropertiesRW(destination);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetal", task.metal_batch_size != 0U, maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalBatch",
+        static_cast<std::int64_t>(task.metal_batch_size), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalStagingCopies",
+        static_cast<std::int64_t>(task.staging_memcpy_calls), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalStagingBytes",
+        static_cast<std::int64_t>(task.staging_copied_bytes), maReplace);
+}
+#endif
+
 const VSFrame *VS_CC filter_get_frame(
     int frame_number, int activation_reason, void *instance_data, void **,
     VSFrameContext *frame_context, VSCore *core, const VSAPI *vsapi) {
@@ -637,8 +1073,14 @@ const VSFrame *VS_CC filter_get_frame(
         const auto &memory_config = memory_phase_config();
         const bool wide_kernel = adaptive_2d
             && data->vertical[0]->half_bandwidth >= 5;
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+        const bool use_experimental_metal = data->experimental_metal;
+#else
+        constexpr bool use_experimental_metal = false;
+#endif
         MemoryPhaseGuard memory_phase(
-            !uses_cuda && adaptive_2d && memory_config.limit > 0U
+            !uses_cuda && !use_experimental_metal
+            && adaptive_2d && memory_config.limit > 0U
             && static_cast<std::size_t>(data->core_threads) > memory_config.limit
             && (wide_kernel || memory_config.all_kernels));
         const bool allow_streamed_integer = !data->fused_integer
@@ -671,104 +1113,78 @@ const VSFrame *VS_CC filter_get_frame(
                 range, maReplace);
         }
 
-        for (int plane = 0; plane < data->num_planes; ++plane) {
-            const int horizontal_index = plane != 0 && data->subsampling_w > 0;
-            const int vertical_index = plane != 0 && data->subsampling_h > 0;
-            if (data->fused_integer) {
-                const auto conversion = integer_conversion(*data, plane, range);
-                const auto source_stride = vsapi->getStride(source, plane)
-                    / data->bytes_per_sample;
-                const auto destination_stride = vsapi->getStride(destination, plane)
-                    / data->bytes_per_sample;
-                if (data->bytes_per_sample == 1) {
-                    if (first_2d_frame) {
-                        data->executor.inverse_2d_u8(
-                            *data->horizontal[horizontal_index],
-                            *data->vertical[vertical_index],
-                            vsapi->getReadPtr(source, plane), source_stride,
-                            vsapi->getWritePtr(destination, plane),
-                            destination_stride, conversion, source_lifetime);
-                    } else {
-                        data->executor.inverse_2d_u8_streamed(
-                            *data->horizontal[horizontal_index],
-                            *data->vertical[vertical_index],
-                            vsapi->getReadPtr(source, plane), source_stride,
-                            vsapi->getWritePtr(destination, plane),
-                            destination_stride, conversion, source_lifetime);
-                    }
-                } else {
-                    if (first_2d_frame) {
-                        data->executor.inverse_2d_u16(
-                            *data->horizontal[horizontal_index],
-                            *data->vertical[vertical_index],
-                            reinterpret_cast<const std::uint16_t *>(
-                                vsapi->getReadPtr(source, plane)),
-                            source_stride,
-                            reinterpret_cast<std::uint16_t *>(
-                                vsapi->getWritePtr(destination, plane)),
-                            destination_stride, conversion, source_lifetime);
-                    } else {
-                        data->executor.inverse_2d_u16_streamed(
-                            *data->horizontal[horizontal_index],
-                            *data->vertical[vertical_index],
-                            reinterpret_cast<const std::uint16_t *>(
-                                vsapi->getReadPtr(source, plane)),
-                            source_stride,
-                            reinterpret_cast<std::uint16_t *>(
-                                vsapi->getWritePtr(destination, plane)),
-                            destination_stride, conversion, source_lifetime);
-                    }
+        if (data->fused_integer) {
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+            if (use_experimental_metal) {
+                ExperimentalMetalFrameTask metal_task;
+                for (int plane = 0; plane < data->num_planes; ++plane) {
+                    const auto index = static_cast<std::size_t>(plane);
+                    metal_task.frame.source_planes[index] =
+                        vsapi->getReadPtr(source, plane);
+                    metal_task.frame.source_strides_bytes[index] =
+                        vsapi->getStride(source, plane);
+                    metal_task.frame.destination_planes[index] =
+                        vsapi->getWritePtr(destination, plane);
+                    metal_task.frame.destination_strides_bytes[index] =
+                        vsapi->getStride(destination, plane);
+                    metal_task.frame.conversions[index] =
+                        integer_conversion(*data, plane, range);
                 }
-                continue;
+                data->metal_coordinator->run(&metal_task, [&] {
+                    MemoryPhaseGuard cpu_memory_phase(
+                        adaptive_2d && memory_config.limit > 0U
+                        && static_cast<std::size_t>(data->core_threads)
+                            > memory_config.limit
+                        && (wide_kernel || memory_config.all_kernels));
+                    run_profiled_cpu_frame(
+                        data->experimental_metal_profile_signposts, [&] {
+                            process_integer_frame(
+                                *data, source, destination, range,
+                                first_2d_frame, source_lifetime, vsapi);
+                        });
+                });
+                set_experimental_metal_properties(
+                    destination, metal_task, vsapi);
+            } else
+#endif
+            {
+                process_integer_frame(
+                    *data, source, destination, range,
+                    first_2d_frame, source_lifetime, vsapi);
             }
-            const auto source_stride = vsapi->getStride(source, plane)
-                / static_cast<int>(sizeof(float));
-            const auto destination_stride = vsapi->getStride(destination, plane)
-                / static_cast<int>(sizeof(float));
-            const auto *source_ptr = reinterpret_cast<const float *>(
-                vsapi->getReadPtr(source, plane));
-            auto *destination_ptr = reinterpret_cast<float *>(
-                vsapi->getWritePtr(destination, plane));
-            if (data->process_horizontal && data->process_vertical) {
-                if (buffered_float_2d) {
-                    const auto intermediate_stride =
-                        vsapi->getStride(intermediate, plane)
-                        / static_cast<int>(sizeof(float));
-                    auto *intermediate_ptr = reinterpret_cast<float *>(
-                        vsapi->getWritePtr(intermediate, plane));
-                    const auto row_count = data->source_height
-                        >> (plane != 0 ? data->subsampling_h : 0);
-                    data->executor.inverse_rows(
-                        *data->horizontal[horizontal_index],
-                        source_ptr, source_stride,
-                        intermediate_ptr, intermediate_stride, row_count);
-                    const auto column_count = data->destination_width
-                        >> (plane != 0 ? data->subsampling_w : 0);
-                    data->executor.inverse_columns(
-                        *data->vertical[vertical_index],
-                        intermediate_ptr, intermediate_stride,
-                        destination_ptr, destination_stride, column_count);
-                } else {
-                    data->executor.inverse_2d(
-                        *data->horizontal[horizontal_index],
-                        *data->vertical[vertical_index],
-                        source_ptr, source_stride,
-                        destination_ptr, destination_stride, source_lifetime);
-                }
-            } else if (data->process_horizontal) {
-                const auto row_count = data->source_height
-                    >> (plane != 0 ? data->subsampling_h : 0);
-                data->executor.inverse_rows(
-                    *data->horizontal[horizontal_index], source_ptr, source_stride,
-                    destination_ptr, destination_stride, row_count,
-                    source_lifetime);
-            } else {
-                const auto column_count = data->source_width
-                    >> (plane != 0 ? data->subsampling_w : 0);
-                data->executor.inverse_columns(
-                    *data->vertical[vertical_index], source_ptr, source_stride,
-                    destination_ptr, destination_stride, column_count,
-                    source_lifetime);
+        } else {
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+            if (use_experimental_metal) {
+                ExperimentalMetalFloatFrameTask metal_task;
+                metal_task.frame.source = reinterpret_cast<const float *>(
+                    vsapi->getReadPtr(source, 0));
+                metal_task.frame.source_stride_bytes =
+                    vsapi->getStride(source, 0);
+                metal_task.frame.destination = reinterpret_cast<float *>(
+                    vsapi->getWritePtr(destination, 0));
+                metal_task.frame.destination_stride_bytes =
+                    vsapi->getStride(destination, 0);
+                data->metal_coordinator->run(&metal_task, [&] {
+                    MemoryPhaseGuard cpu_memory_phase(
+                        adaptive_2d && memory_config.limit > 0U
+                        && static_cast<std::size_t>(data->core_threads)
+                            > memory_config.limit
+                        && memory_config.all_kernels);
+                    run_profiled_cpu_frame(
+                        data->experimental_metal_profile_signposts, [&] {
+                            process_float_frame(
+                                *data, source, intermediate, destination,
+                                buffered_float_2d, source_lifetime, vsapi);
+                        });
+                });
+                set_experimental_metal_properties(
+                    destination, metal_task, vsapi);
+            } else
+#endif
+            {
+                process_float_frame(
+                    *data, source, intermediate, destination,
+                    buffered_float_2d, source_lifetime, vsapi);
             }
         }
         if (intermediate) vsapi->freeFrame(intermediate);
@@ -824,6 +1240,12 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             || parsed.src_height != static_cast<double>(parsed.height)
             || parsed.force_v != 0;
         if (!process_horizontal && !process_vertical) {
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+            if (parsed.backend == BackendKind::metal) {
+                throw std::invalid_argument(
+                    "experimental Metal requires the measured two-axis recipe");
+            }
+#endif
             vsapi->mapConsumeNode(out, "clip", source, maReplace);
             source = nullptr;
             if (custom) vsapi->freeFunction(custom);
@@ -837,6 +1259,19 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             && (source_info->format.bytesPerSample == 1
                 || source_info->format.bytesPerSample == 2)
             && process_horizontal && process_vertical;
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+        const bool experimental_metal_supported = supports_experimental_metal(
+            parsed, *source_info, process_horizontal,
+            process_vertical, fused_integer);
+        validate_experimental_metal(parsed, experimental_metal_supported);
+        const bool experimental_metal_auto =
+            parsed.backend == BackendKind::automatic
+            && fused_integer
+            && experimental_metal_supported
+            && experimental_metal_auto_kernel(parsed.kernel)
+            && dsmvc::experimental::apple_m_series_metal_available()
+            && source_info->numFrames >= 256;
+#endif
         if (!fused_integer
             && (source_info->format.sampleType != stFloat
                 || source_info->format.bitsPerSample != 32)) {
@@ -846,8 +1281,14 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             return;
         }
 
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+        const BackendKind executor_backend = parsed.backend == BackendKind::metal
+            ? BackendKind::cpu : parsed.backend;
+#else
+        const BackendKind executor_backend = parsed.backend;
+#endif
         auto data = std::make_unique<FilterData>(
-            parsed.backend, parsed.cpu_path);
+            executor_backend, parsed.cpu_path);
         data->node = source;
         data->vi = *source_info;
         data->source_width = source_info->width;
@@ -866,6 +1307,14 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         data->process_horizontal = process_horizontal;
         data->process_vertical = process_vertical;
         data->fused_integer = fused_integer;
+#if defined(DSMVC_HAS_EXPERIMENTAL_METAL)
+        data->experimental_metal_auto = experimental_metal_auto
+            && data->core_threads >= 16;
+        data->experimental_metal = parsed.backend == BackendKind::metal
+            || data->experimental_metal_auto;
+        data->experimental_metal_profile_signposts = data->experimental_metal
+            && experimental_metal_profile_signposts();
+#endif
         data->vi.width = parsed.width;
         data->vi.height = parsed.height;
         prepare_filter_requests(*data, parsed);
