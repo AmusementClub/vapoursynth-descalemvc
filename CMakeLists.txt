@@ -110,6 +110,7 @@ if(DSMVC_ENABLE_CUDA)
     set(_dsmvc_cuda_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/cuda")
     set(_dsmvc_cuda_fatbin "${_dsmvc_cuda_generated_dir}/dsmvc_cuda.fatbin")
     set(_dsmvc_cuda_header "${_dsmvc_cuda_generated_dir}/dsmvc_cuda_fatbin.hpp")
+    set(_dsmvc_cuda_resource "${_dsmvc_cuda_generated_dir}/dsmvc_cuda_fatbin.rc")
     set(_dsmvc_cuda_host_options)
     if(CMAKE_HOST_WIN32)
         list(APPEND _dsmvc_cuda_host_options -Xcompiler=/utf-8)
@@ -129,19 +130,34 @@ if(DSMVC_ENABLE_CUDA)
             src/cuda/cuda_kernel.hpp
         COMMENT "Building the dsmvc CUDA fatbin"
         VERBATIM)
-    add_custom_command(
-        OUTPUT "${_dsmvc_cuda_header}"
-        COMMAND "${CMAKE_COMMAND}"
-                "-DINPUT=${_dsmvc_cuda_fatbin}"
-                "-DOUTPUT=${_dsmvc_cuda_header}"
-                -DSYMBOL=dsmvc_cuda_fatbin
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
-        DEPENDS
-            "${_dsmvc_cuda_fatbin}"
-            cmake/embed_binary.cmake
-        VERBATIM)
+    if(WIN32)
+        enable_language(RC)
+        configure_file(
+            cmake/cuda_fatbin_resource.hpp.in
+            "${_dsmvc_cuda_header}" @ONLY)
+        configure_file(
+            cmake/cuda_fatbin.rc.in
+            "${_dsmvc_cuda_resource}" @ONLY)
+        set_source_files_properties(
+            "${_dsmvc_cuda_resource}" PROPERTIES OBJECT_DEPENDS "${_dsmvc_cuda_fatbin}")
+        set(_dsmvc_cuda_embed_outputs "${_dsmvc_cuda_header}")
+        list(APPEND DSMVC_ENGINE_SOURCES src/cuda/cuda_fatbin_resource.cpp)
+    else()
+        add_custom_command(
+            OUTPUT "${_dsmvc_cuda_header}"
+            COMMAND "${CMAKE_COMMAND}"
+                    "-DINPUT=${_dsmvc_cuda_fatbin}"
+                    "-DOUTPUT=${_dsmvc_cuda_header}"
+                    -DSYMBOL=dsmvc_cuda_fatbin
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            DEPENDS
+                "${_dsmvc_cuda_fatbin}"
+                cmake/embed_binary.cmake
+            VERBATIM)
+        set(_dsmvc_cuda_embed_outputs "${_dsmvc_cuda_header}")
+    endif()
     add_custom_target(dsmvc_cuda_fatbin
-        DEPENDS "${_dsmvc_cuda_fatbin}" "${_dsmvc_cuda_header}")
+        DEPENDS "${_dsmvc_cuda_fatbin}" ${_dsmvc_cuda_embed_outputs})
     list(APPEND DSMVC_ENGINE_SOURCES
         src/cuda/cuda_driver.cpp
         src/cuda/cuda_executor.cpp
@@ -182,6 +198,10 @@ target_compile_features(dsmvc PRIVATE cxx_std_23)
 target_include_directories(dsmvc PRIVATE "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}")
 target_link_libraries(dsmvc PRIVATE dsmvc_engine)
 set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
+if(DSMVC_ENABLE_CUDA AND WIN32)
+    target_sources(dsmvc PRIVATE "${_dsmvc_cuda_resource}")
+    add_dependencies(dsmvc dsmvc_cuda_fatbin)
+endif()
 
 foreach(_target dsmvc_engine dsmvc)
     if(MSVC)
@@ -200,6 +220,10 @@ if(BUILD_TESTING)
     add_executable(dsmvc_engine_tests tests/engine_tests.cpp)
     target_compile_features(dsmvc_engine_tests PRIVATE cxx_std_23)
     target_link_libraries(dsmvc_engine_tests PRIVATE dsmvc_engine)
+    if(DSMVC_ENABLE_CUDA AND WIN32)
+        target_sources(dsmvc_engine_tests PRIVATE "${_dsmvc_cuda_resource}")
+        add_dependencies(dsmvc_engine_tests dsmvc_cuda_fatbin)
+    endif()
     add_test(NAME dsmvc_engine_tests COMMAND dsmvc_engine_tests)
 
     if(DSMVC_ENABLE_CUDA)

@@ -25,16 +25,6 @@ jobs:
             cmake-architecture: -A x64
             enable-cuda: true
             cuda-subpackages: '["nvcc", "nvvm", "cuobjdump", "cudart", "crt"]'
-          - os: macos-15
-            artifact: dsmvc-macos-arm64
-            cmake-architecture: -DCMAKE_OSX_ARCHITECTURES=arm64
-            enable-cuda: false
-            cuda-subpackages: '[]'
-          - os: ubuntu-24.04
-            artifact: dsmvc-linux-x64
-            cmake-architecture: ""
-            enable-cuda: true
-            cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt"]'
 
     steps:
       - name: Check out dsmvc

@@ -1,0 +1,9 @@
+#pragma once
+
+namespace dsmvc::cuda_detail {
+
+[[nodiscard]] const void *embedded_cuda_fatbin();
+
+} // namespace dsmvc::cuda_detail
+
+#define dsmvc_cuda_fatbin (::dsmvc::cuda_detail::embedded_cuda_fatbin())
