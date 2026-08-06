@@ -759,6 +759,71 @@ extern "C" __global__ void dsmvc_cuda_solve_vertical(
         output + column, source_width);
 }
 
+extern "C" __global__ void dsmvc_cuda_inverse_axis_batch(
+    const kernel::AxisBatchJobDescriptor *__restrict__ jobs) {
+    const auto &job = jobs[blockIdx.y];
+    const std::uint32_t vector =
+        blockIdx.x * blockDim.x + threadIdx.x;
+    if (vector >= job.vector_count) return;
+    const auto *input = reinterpret_cast<const float *>(job.input);
+    auto *output = reinterpret_cast<float *>(job.output);
+    inverse_axis(
+        job.plan,
+        reinterpret_cast<const std::uint32_t *>(job.transpose_offsets),
+        reinterpret_cast<const std::int32_t *>(job.transpose_indices),
+        reinterpret_cast<const float *>(job.transpose_weights),
+        reinterpret_cast<const float *>(job.lower_ld),
+        reinterpret_cast<const float *>(job.upper_l),
+        reinterpret_cast<const float *>(job.inverse_diagonal),
+        input + vector, job.vector_count,
+        output + vector, job.vector_count);
+}
+
+extern "C" __global__ void dsmvc_cuda_rhs_axis_batch(
+    const kernel::AxisBatchJobDescriptor *__restrict__ jobs) {
+    const auto &job = jobs[blockIdx.z];
+    const std::uint32_t vector =
+        blockIdx.x * blockDim.x + threadIdx.x;
+    const std::uint32_t index =
+        blockIdx.y * blockDim.y + threadIdx.y;
+    if (vector >= job.vector_count
+        || index >= job.plan.destination_size) return;
+
+    const auto *offsets = reinterpret_cast<const std::uint32_t *>(
+        job.transpose_offsets);
+    const auto *indices = reinterpret_cast<const std::int32_t *>(
+        job.transpose_indices);
+    const auto *weights = reinterpret_cast<const float *>(
+        job.transpose_weights);
+    const auto *input = reinterpret_cast<const float *>(job.input);
+    auto *output = reinterpret_cast<float *>(job.output);
+    float sum = 0.0F;
+    const std::uint32_t begin = offsets[index];
+    const std::uint32_t end = offsets[index + 1U];
+    for (std::uint32_t position = begin; position < end; ++position) {
+        const auto source = static_cast<std::uint32_t>(indices[position]);
+        sum = fmaf(
+            weights[position],
+            input[source * job.vector_count + vector], sum);
+    }
+    output[index * job.vector_count + vector] = sum;
+}
+
+extern "C" __global__ void dsmvc_cuda_solve_axis_batch(
+    const kernel::AxisBatchJobDescriptor *__restrict__ jobs) {
+    const auto &job = jobs[blockIdx.y];
+    const std::uint32_t vector =
+        blockIdx.x * blockDim.x + threadIdx.x;
+    if (vector >= job.vector_count) return;
+    auto *output = reinterpret_cast<float *>(job.output);
+    solve_axis(
+        job.plan,
+        reinterpret_cast<const float *>(job.lower_ld),
+        reinterpret_cast<const float *>(job.upper_l),
+        reinterpret_cast<const float *>(job.inverse_diagonal),
+        output + vector, job.vector_count);
+}
+
 extern "C" __global__ void dsmvc_cuda_convert_u8(
     const float *__restrict__ source,
     std::uint32_t element_count,

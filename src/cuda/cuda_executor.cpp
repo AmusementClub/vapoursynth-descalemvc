@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <iterator>
@@ -27,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -46,6 +48,21 @@ constexpr unsigned int default_inverse_threads = 64U;
 constexpr unsigned int conversion_threads = 256U;
 constexpr unsigned int rhs_vector_threads = 32U;
 constexpr unsigned int rhs_index_threads = 8U;
+
+[[nodiscard]] std::size_t batch_frame_count() noexcept {
+    constexpr std::size_t fallback = 8U;
+    const char *text = std::getenv("DSMVC_CUDA_BATCH_FRAMES");
+    if (!text) return fallback;
+    std::size_t value = 0U;
+    const std::string_view view{text};
+    const auto parsed = std::from_chars(
+        view.data(), view.data() + view.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != view.data() + view.size()
+        || value < 1U || value > 8U) {
+        return fallback;
+    }
+    return value;
+}
 
 [[nodiscard]] std::size_t checked_product(
     std::size_t left, std::size_t right, const char *label) {
@@ -1101,11 +1118,16 @@ public:
             load_function(solve_vertical, "dsmvc_cuda_solve_vertical");
             load_function(convert_u8, "dsmvc_cuda_convert_u8");
             load_function(convert_u16, "dsmvc_cuda_convert_u16");
+            load_function(
+                inverse_axis_batch, "dsmvc_cuda_inverse_axis_batch");
+            load_function(rhs_axis_batch, "dsmvc_cuda_rhs_axis_batch");
+            load_function(solve_axis_batch, "dsmvc_cuda_solve_axis_batch");
 
             const auto slot_configuration = execution_slot_configuration();
             limited_slot_count = slot_configuration.limited;
             adaptive_slots = slot_configuration.adaptive;
-            maximum_slot_count = slot_configuration.total;
+            maximum_slot_count = std::max(
+                slot_configuration.total, batch_frame_count() * 2U);
             slots.reserve(maximum_slot_count);
             const std::size_t initial_slot_count = adaptive_slots
                 ? limited_slot_count : maximum_slot_count;
@@ -1233,6 +1255,9 @@ public:
     CUfunction solve_vertical = nullptr;
     CUfunction convert_u8 = nullptr;
     CUfunction convert_u16 = nullptr;
+    CUfunction inverse_axis_batch = nullptr;
+    CUfunction rhs_axis_batch = nullptr;
+    CUfunction solve_axis_batch = nullptr;
     unsigned int horizontal_threads = default_inverse_threads;
     unsigned int vertical_threads = default_inverse_threads;
     unsigned int split_horizontal_threads = 32U;
@@ -1632,7 +1657,8 @@ void launch_transpose(
     std::uint32_t width, std::uint32_t height,
     const cuda_kernel::IntegerConversionDescriptor *conversion,
     CUdeviceptr requested_source = 0U,
-    CUdeviceptr requested_destination = 0U) {
+    CUdeviceptr requested_destination = 0U,
+    CUstream requested_stream = nullptr) {
     CUdeviceptr source = requested_source != 0U
         ? requested_source : slot.source.pointer();
     CUdeviceptr transposed = requested_destination != 0U
@@ -1642,11 +1668,12 @@ void launch_transpose(
     if (conversion) converted = *conversion;
     void *integer_arguments[]{
         &source, &width, &height, &converted, &transposed};
+    CUstream stream = requested_stream ? requested_stream : slot.stream;
     cuda_check(
         *runtime.api,
         runtime.api->launch_kernel(
             function, divide_up(width, 32U), divide_up(height, 32U), 1U,
-            32U, 8U, 1U, 0U, slot.stream,
+            32U, 8U, 1U, 0U, stream,
             conversion ? integer_arguments : float_arguments, nullptr),
         "cuLaunchKernel(transpose)");
 }
@@ -1795,18 +1822,20 @@ void launch_vertical_split(
 template <class Sample>
 void launch_conversion(
     Runtime &runtime, ExecutionSlot &slot, std::uint32_t element_count,
-    const cuda_kernel::IntegerConversionDescriptor &conversion) {
+    const cuda_kernel::IntegerConversionDescriptor &conversion,
+    CUstream requested_stream = nullptr) {
     CUdeviceptr source = slot.destination.pointer();
     CUdeviceptr output = slot.integer_output.pointer();
     auto descriptor = conversion;
     void *arguments[]{&source, &element_count, &descriptor, &output};
     const CUfunction function = std::is_same_v<Sample, std::uint8_t>
         ? runtime.convert_u8 : runtime.convert_u16;
+    CUstream stream = requested_stream ? requested_stream : slot.stream;
     cuda_check(
         *runtime.api,
         runtime.api->launch_kernel(
             function, divide_up(element_count, conversion_threads), 1U, 1U,
-            conversion_threads, 1U, 1U, 0U, slot.stream, arguments, nullptr),
+            conversion_threads, 1U, 1U, 0U, stream, arguments, nullptr),
         "cuLaunchKernel(integer conversion)");
 }
 
