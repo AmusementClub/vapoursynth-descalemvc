@@ -621,6 +621,8 @@ const VSFrame *VS_CC filter_get_frame(
     try {
         const bool uses_cuda =
             data->executor.backend() == BackendKind::cuda;
+        const bool uses_gpu = uses_cuda
+            || data->executor.backend() == BackendKind::vulkan;
 #if defined(DSMVC_HAS_CUDA)
         std::optional<dsmvc::cuda_detail::NvtxRange> frame_trace;
         if (uses_cuda) {
@@ -646,7 +648,7 @@ const VSFrame *VS_CC filter_get_frame(
         if (data->executor.input_cache_enabled()) {
             const VSFrame *retained = vsapi->addFrameRef(source);
             if (!retained) {
-                throw std::runtime_error("failed to retain the CUDA source frame");
+                throw std::runtime_error("failed to retain the GPU source frame");
             }
             const auto free_frame = vsapi->freeFrame;
             source_lifetime = std::shared_ptr<const void>(
@@ -658,13 +660,13 @@ const VSFrame *VS_CC filter_get_frame(
         const bool wide_kernel = adaptive_2d
             && data->vertical[0]->half_bandwidth >= 5;
         MemoryPhaseGuard memory_phase(
-            !uses_cuda && adaptive_2d && memory_config.limit > 0U
+            !uses_gpu && adaptive_2d && memory_config.limit > 0U
             && static_cast<std::size_t>(data->core_threads) > memory_config.limit
             && (wide_kernel || memory_config.all_kernels));
         const bool allow_streamed_integer = !data->fused_integer
             || data->vertical[0]->half_bandwidth < 7
             || data->core_threads > 8;
-        const bool track_overlapping_frames = !uses_cuda && adaptive_2d
+        const bool track_overlapping_frames = !uses_gpu && adaptive_2d
             && data->core_threads > 1 && allow_streamed_integer;
         ActiveFrameGuard active_frame(track_overlapping_frames
             ? &data->active_2d_frames : nullptr);
@@ -673,7 +675,7 @@ const VSFrame *VS_CC filter_get_frame(
         const bool first_2d_frame = adaptive_2d
             && (!track_overlapping_frames || active_frame.first());
         const bool buffered_float_2d =
-            !uses_cuda && !data->fused_integer && first_2d_frame;
+            !uses_gpu && !data->fused_integer && first_2d_frame;
         if (buffered_float_2d) {
             intermediate = vsapi->newVideoFrame(
                 &data->vi.format, data->destination_width, data->source_height,

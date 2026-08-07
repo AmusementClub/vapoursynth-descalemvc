@@ -543,7 +543,7 @@ def main() -> int:
     parser.add_argument("--warmup-frames", type=int, default=256,
                         help="Frames in each warm-up run; 0 disables warm-up.")
     parser.add_argument("--backend",
-                        choices=("auto", "cpu", "cuda"), default="cpu")
+                        choices=("auto", "cpu", "vulkan", "cuda"), default="cpu")
     parser.add_argument("--implementations", nargs="+", choices=IMPLEMENTATIONS,
                         default=list(IMPLEMENTATIONS))
     parser.add_argument("--kernels", nargs="*",

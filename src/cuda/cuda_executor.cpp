@@ -915,7 +915,7 @@ public:
         scheduled_ready_.notify_all();
     }
 
-    void wait_on(cudaStream_t stream) const {
+    void wait_until_scheduled() const {
         std::exception_ptr error;
         {
             std::unique_lock lock(mutex_);
@@ -923,6 +923,10 @@ public:
             error = error_;
         }
         if (error) std::rethrow_exception(error);
+    }
+
+    void wait_on(cudaStream_t stream) const {
+        wait_until_scheduled();
         cuda_check(
             *api_, api_->stream_wait_event(stream, ready_.event(), 0U),
             "cudaStreamWaitEvent(shared input)");
@@ -2011,6 +2015,11 @@ struct CudaExecutor::Impl {
             acquire_cached_input();
         }
         const bool reused_input = cached_input && !cache_producer;
+        if (reused_input) {
+            // Consumers must not occupy every slot while the producer still
+            // needs one to record the shared-input event.
+            cached_input->wait_until_scheduled();
+        }
 
         std::optional<StagingRelease> staging_release;
         PinnedBlockPool::Allocation staged_source;

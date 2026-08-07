@@ -1,0 +1,56 @@
+#version 460
+
+#ifndef DSMVC_LOCAL_SIZE
+#define DSMVC_LOCAL_SIZE 256
+#endif
+
+layout(local_size_x = DSMVC_LOCAL_SIZE, local_size_y = 1,
+       local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer PlanBuffer {
+    uint plan_data[];
+};
+layout(set = 0, binding = 1, std430) buffer WorkspaceBuffer {
+    uint workspace_data[];
+};
+layout(set = 0, binding = 2, std430) buffer CacheBuffer {
+    uint cache_data[];
+};
+layout(push_constant, std430) uniform PushConstants {
+    uint value[32];
+} pc;
+
+uint converted_sample(uint index) {
+    if (index >= pc.value[0]) {
+        return 0U;
+    }
+    float sample_value = uintBitsToFloat(workspace_data[pc.value[1] + index]);
+    sample_value = fma(
+        sample_value, uintBitsToFloat(pc.value[4]),
+        uintBitsToFloat(pc.value[5]));
+    sample_value = clamp(sample_value, 0.0, float(pc.value[6]));
+    return uint(roundEven(sample_value));
+}
+
+void main() {
+    const uint word = gl_GlobalInvocationID.x;
+    if (pc.value[3] == 1U) {
+        const uint base = word * 4U;
+        if (base >= pc.value[0]) {
+            return;
+        }
+        const uint packed = converted_sample(base)
+            | (converted_sample(base + 1U) << 8U)
+            | (converted_sample(base + 2U) << 16U)
+            | (converted_sample(base + 3U) << 24U);
+        workspace_data[pc.value[2] + word] = packed;
+    } else {
+        const uint base = word * 2U;
+        if (base >= pc.value[0]) {
+            return;
+        }
+        const uint packed = converted_sample(base)
+            | (converted_sample(base + 1U) << 16U);
+        workspace_data[pc.value[2] + word] = packed;
+    }
+}

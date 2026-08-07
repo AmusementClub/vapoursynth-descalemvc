@@ -135,6 +135,8 @@ inline void inverse_axis_f32(const AxisPlan &plan,
 
 [[nodiscard]] bool cpu_avx2_compiled() noexcept;
 [[nodiscard]] bool cpu_avx2_available() noexcept;
+[[nodiscard]] bool vulkan_compiled() noexcept;
+[[nodiscard]] bool vulkan_available() noexcept;
 [[nodiscard]] bool cuda_compiled() noexcept;
 [[nodiscard]] bool cuda_available() noexcept;
 
@@ -212,7 +214,7 @@ private:
 };
 
 // Backend-neutral executor used by the plugin. Automatic dispatch deliberately
-// remains CPU-first; callers opt in to CUDA with BackendKind::cuda.
+// remains CPU-first; callers opt in to a GPU backend explicitly.
 class Executor {
 public:
     explicit Executor(

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <limits>
@@ -439,11 +440,31 @@ void test_backend_selection() {
     require(cuda->compiled == dsmvc::cuda_compiled()
                 && cuda->device_available == dsmvc::cuda_available(),
             "CUDA capability reporting is inconsistent");
+    rejected = false;
+    try {
+        require(dsmvc::resolve_backend(dsmvc::BackendKind::vulkan)
+                    == dsmvc::BackendKind::vulkan,
+                "available Vulkan backend did not resolve to Vulkan");
+    } catch (const std::runtime_error &) {
+        rejected = true;
+    }
+    require(rejected != dsmvc::vulkan_available(),
+            "Vulkan resolution disagrees with runtime availability");
+    const auto vulkan = std::find_if(
+        capabilities.begin(), capabilities.end(), [](const auto &capability) {
+            return capability.kind == dsmvc::BackendKind::vulkan;
+        });
+    require(vulkan != capabilities.end(), "Vulkan capability is missing");
+    require(vulkan->compiled == dsmvc::vulkan_compiled()
+                && vulkan->device_available == dsmvc::vulkan_available(),
+            "Vulkan capability reporting is inconsistent");
 }
 
-void test_cuda_executor_agreement() {
-    if (!dsmvc::cuda_available()) {
-        std::cout << "CUDA executor tests skipped: no compatible device\n";
+void test_accelerator_executor_agreement(
+    dsmvc::BackendKind backend, bool available, const char *backend_label) {
+    if (!available) {
+        std::cout << backend_label
+                  << " executor tests skipped: no compatible device\n";
         return;
     }
 
@@ -495,17 +516,17 @@ void test_cuda_executor_agreement() {
             dsmvc::build_axis_plan(generic_vertical_request)),
     });
     require(pairs.back().horizontal->half_bandwidth > 7,
-            "CUDA generic fixture did not exceed the specialized bandwidths");
+            "accelerator generic fixture did not exceed the specialized bandwidths");
 
-    dsmvc::Executor cuda(dsmvc::BackendKind::cuda);
-    require(cuda.backend() == dsmvc::BackendKind::cuda,
-            "CUDA executor resolved to the wrong backend");
+    dsmvc::Executor accelerator(backend);
+    require(accelerator.backend() == backend,
+            "accelerator executor resolved to the wrong backend");
     for (const auto &pair : pairs) {
-        cuda.prepare(pair.horizontal);
-        cuda.prepare(pair.vertical);
+        accelerator.prepare(pair.horizontal);
+        accelerator.prepare(pair.vertical);
     }
-    cuda.seal();
-    cuda.seal();
+    accelerator.seal();
+    accelerator.seal();
 
     std::vector<float> input(
         static_cast<std::size_t>(source_height)
@@ -524,17 +545,17 @@ void test_cuda_executor_agreement() {
         scalar.inverse_2d(
             *pair.horizontal, *pair.vertical, input.data(), input_stride,
             reference.data(), output_stride);
-        cuda.inverse_2d(
+        accelerator.inverse_2d(
             *pair.horizontal, *pair.vertical, input.data(), input_stride,
             candidate.data(), output_stride);
         const auto stats = compare_matrix(
             reference.data(), candidate.data(), destination_height,
             destination_width, output_stride);
-        std::cout << "CUDA " << pair.name << " 2D: max_error="
+        std::cout << backend_label << ' ' << pair.name << " 2D: max_error="
                   << stats.maximum << " mean_error=" << stats.mean
                   << " non_finite=" << stats.non_finite << '\n';
         require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
-                std::string("CUDA ") + pair.name
+                std::string(backend_label) + ' ' + pair.name
                     + " 2D differs from the scalar executor");
     }
 
@@ -544,43 +565,45 @@ void test_cuda_executor_agreement() {
         static_cast<std::size_t>(source_height)
             * static_cast<std::size_t>(intermediate_stride),
         output_fill);
-    std::vector<float> cuda_intermediate(cpu_intermediate.size(), output_fill);
+    std::vector<float> accelerator_intermediate(
+        cpu_intermediate.size(), output_fill);
     scalar.inverse_rows(
         *separate.horizontal, input.data(), input_stride,
         cpu_intermediate.data(), intermediate_stride, source_height);
-    cuda.inverse_rows(
+    accelerator.inverse_rows(
         *separate.horizontal, input.data(), input_stride,
-        cuda_intermediate.data(), intermediate_stride, source_height);
+        accelerator_intermediate.data(), intermediate_stride, source_height);
     auto stats = compare_matrix(
-        cpu_intermediate.data(), cuda_intermediate.data(), source_height,
+        cpu_intermediate.data(), accelerator_intermediate.data(), source_height,
         destination_width, intermediate_stride);
     require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
-            "CUDA row executor differs from scalar");
+            "accelerator row executor differs from scalar");
 
     const dsmvc::AxisPlan unprepared_horizontal = *separate.horizontal;
-    std::fill(cuda_intermediate.begin(), cuda_intermediate.end(), output_fill);
-    cuda.inverse_rows(
+    std::fill(
+        accelerator_intermediate.begin(), accelerator_intermediate.end(), output_fill);
+    accelerator.inverse_rows(
         unprepared_horizontal, input.data(), input_stride,
-        cuda_intermediate.data(), intermediate_stride, source_height);
+        accelerator_intermediate.data(), intermediate_stride, source_height);
     stats = compare_matrix(
-        cpu_intermediate.data(), cuda_intermediate.data(), source_height,
+        cpu_intermediate.data(), accelerator_intermediate.data(), source_height,
         destination_width, intermediate_stride);
     require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
-            "CUDA direct unprepared plan differs from scalar");
+            "accelerator direct unprepared plan differs from scalar");
 
     std::fill(reference.begin(), reference.end(), output_fill);
     std::fill(candidate.begin(), candidate.end(), output_fill);
     scalar.inverse_columns(
         *separate.vertical, cpu_intermediate.data(), intermediate_stride,
         reference.data(), output_stride, destination_width);
-    cuda.inverse_columns(
+    accelerator.inverse_columns(
         *separate.vertical, cpu_intermediate.data(), intermediate_stride,
         candidate.data(), output_stride, destination_width);
     stats = compare_matrix(
         reference.data(), candidate.data(), destination_height,
         destination_width, output_stride);
     require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
-            "CUDA column executor differs from scalar");
+            "accelerator column executor differs from scalar");
     const std::vector<float> concurrency_reference = reference;
 
     auto cached_column_input =
@@ -590,7 +613,7 @@ void test_cuda_executor_agreement() {
         static_cast<const void *>(cached_column_input->data()));
     for (int repeat = 0; repeat < 2; ++repeat) {
         std::fill(candidate.begin(), candidate.end(), output_fill);
-        cuda.inverse_columns(
+        accelerator.inverse_columns(
             *separate.vertical, cached_column_input->data(),
             intermediate_stride, candidate.data(), output_stride,
             destination_width, cached_column_lifetime);
@@ -598,7 +621,7 @@ void test_cuda_executor_agreement() {
             concurrency_reference.data(), candidate.data(), destination_height,
             destination_width, output_stride);
         require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
-                "cached CUDA column executor differs from scalar");
+                "cached accelerator column executor differs from scalar");
     }
 
     const dsmvc::IntegerConversion u8_conversion{
@@ -645,28 +668,28 @@ void test_cuda_executor_agreement() {
                 static_cast<std::uint8_t>(std::nearbyint(converted));
         }
     }
-    cuda.inverse_2d_u8(
+    accelerator.inverse_2d_u8(
         *separate.horizontal, *separate.vertical,
         integer_input.data(), input_stride,
         integer_candidate.data(), output_stride, u8_conversion);
     std::uint32_t maximum_integer_error = maximum_integer_difference(
         integer_reference, integer_candidate);
     require(maximum_integer_error <= 1U,
-            "CUDA u8 conversion differs from the Float32 reference by more than one");
+            "accelerator u8 conversion differs from the Float32 reference by more than one");
 
     auto cached_u8_input =
         std::make_shared<std::vector<std::uint8_t>>(integer_input);
     const std::shared_ptr<const void> cached_u8_lifetime(
         cached_u8_input, static_cast<const void *>(cached_u8_input->data()));
     std::fill(integer_candidate.begin(), integer_candidate.end(), 0U);
-    cuda.inverse_2d_u8(
+    accelerator.inverse_2d_u8(
         *separate.horizontal, *separate.vertical,
         cached_u8_input->data(), input_stride,
         integer_candidate.data(), output_stride, u8_conversion,
         cached_u8_lifetime);
     require(maximum_integer_difference(
                 integer_reference, integer_candidate) <= 1U,
-            "cached CUDA u8 conversion differs from the Float32 reference");
+            "cached accelerator u8 conversion differs from the Float32 reference");
 
     const dsmvc::IntegerConversion full_range_u8_conversion{
         0.0F, 1.0F / 255.0F, 255.0F, 0.0F, 255U};
@@ -689,14 +712,14 @@ void test_cuda_executor_agreement() {
                     0.0F, 255.0F)));
         }
     }
-    cuda.inverse_2d_u8(
+    accelerator.inverse_2d_u8(
         *separate.horizontal, *separate.vertical,
         cached_u8_input->data(), input_stride,
         full_range_candidate.data(), output_stride, full_range_u8_conversion,
         cached_u8_lifetime);
     require(maximum_integer_difference(
                 full_range_reference, full_range_candidate) <= 1U,
-            "CUDA input cache reused the wrong u8 conversion");
+            "accelerator input cache reused the wrong u8 conversion");
 
     const dsmvc::IntegerConversion u16_conversion{
         512.0F, 1.0F / 896.0F, 896.0F, 512.0F, 1023U};
@@ -726,35 +749,38 @@ void test_cuda_executor_agreement() {
                 static_cast<std::uint16_t>(std::nearbyint(converted));
         }
     }
-    cuda.inverse_2d_u16(
+    accelerator.inverse_2d_u16(
         *separate.horizontal, *separate.vertical,
         u16_input.data(), input_stride,
         u16_candidate.data(), output_stride, u16_conversion);
     maximum_integer_error = maximum_integer_difference(
         u16_reference, u16_candidate);
     require(maximum_integer_error <= 1U,
-            "CUDA u16 conversion differs from the Float32 reference by more than one");
+            "accelerator u16 conversion differs from the Float32 reference by more than one");
 
     auto cached_u16_input =
         std::make_shared<std::vector<std::uint16_t>>(u16_input);
     const std::shared_ptr<const void> cached_u16_lifetime(
         cached_u16_input, static_cast<const void *>(cached_u16_input->data()));
     std::fill(u16_candidate.begin(), u16_candidate.end(), 0U);
-    cuda.inverse_2d_u16(
+    accelerator.inverse_2d_u16(
         *separate.horizontal, *separate.vertical,
         cached_u16_input->data(), input_stride,
         u16_candidate.data(), output_stride, u16_conversion,
         cached_u16_lifetime);
     require(maximum_integer_difference(u16_reference, u16_candidate) <= 1U,
-            "cached CUDA u16 conversion differs from the Float32 reference");
+            "cached accelerator u16 conversion differs from the Float32 reference");
 
     auto cached_input = std::make_shared<std::vector<float>>(input);
     const std::shared_ptr<const void> cached_input_lifetime(
         cached_input, static_cast<const void *>(cached_input->data()));
     const auto check_concurrent = [&](
         const PlanPair &pair, const std::vector<float> &expected,
-        const char *label) {
-        std::vector<std::exception_ptr> errors(6U);
+        const std::shared_ptr<std::vector<float>> &shared_input,
+        std::size_t caller_count, const char *label) {
+        const std::shared_ptr<const void> shared_lifetime(
+            shared_input, static_cast<const void *>(shared_input->data()));
+        std::vector<std::exception_ptr> errors(caller_count);
         std::barrier start(static_cast<std::ptrdiff_t>(errors.size()));
         std::vector<JoiningThread> callers;
         callers.reserve(errors.size());
@@ -763,17 +789,17 @@ void test_cuda_executor_agreement() {
                 try {
                     std::vector<float> concurrent(candidate.size(), output_fill);
                     start.arrive_and_wait();
-                    cuda.inverse_2d(
+                    accelerator.inverse_2d(
                         *pair.horizontal, *pair.vertical,
-                        cached_input->data(), input_stride,
-                        concurrent.data(), output_stride, cached_input_lifetime);
+                        shared_input->data(), input_stride,
+                        concurrent.data(), output_stride, shared_lifetime);
                     const auto concurrent_stats = compare_matrix(
                         expected.data(), concurrent.data(), destination_height,
                         destination_width, output_stride);
                     require(
                         concurrent_stats.non_finite == 0U
                             && concurrent_stats.maximum < 1.0e-4F,
-                        std::string("concurrent CUDA ") + label
+                        std::string("concurrent ") + backend_label + ' ' + label
                             + " execution differs from scalar");
                 } catch (...) {
                     errors[index] = std::current_exception();
@@ -785,7 +811,8 @@ void test_cuda_executor_agreement() {
             if (error) std::rethrow_exception(error);
         }
     };
-    check_concurrent(separate, concurrency_reference, "b7");
+    check_concurrent(
+        separate, concurrency_reference, cached_input, 6U, "b7");
 
     const auto &limited = pairs[1];
     std::vector<float> limited_reference(reference.size(), output_fill);
@@ -793,18 +820,63 @@ void test_cuda_executor_agreement() {
         *limited.horizontal, *limited.vertical,
         cached_input->data(), input_stride,
         limited_reference.data(), output_stride);
-    check_concurrent(limited, limited_reference, "b3");
+    auto fresh_limited_input = std::make_shared<std::vector<float>>(input);
+    check_concurrent(
+        limited, limited_reference, fresh_limited_input, 16U,
+        "fresh-cache b3");
 
-    std::fill(cuda_intermediate.begin(), cuda_intermediate.end(), output_fill);
-    cuda.inverse_rows(
+    std::fill(
+        accelerator_intermediate.begin(), accelerator_intermediate.end(), output_fill);
+    accelerator.inverse_rows(
         *separate.horizontal, cached_input->data(), input_stride,
-        cuda_intermediate.data(), intermediate_stride, source_height,
+        accelerator_intermediate.data(), intermediate_stride, source_height,
         cached_input_lifetime);
     stats = compare_matrix(
-        cpu_intermediate.data(), cuda_intermediate.data(), source_height,
+        cpu_intermediate.data(), accelerator_intermediate.data(), source_height,
         destination_width, intermediate_stride);
     require(stats.non_finite == 0U && stats.maximum < 1.0e-4F,
-            "cached CUDA row executor differs from scalar");
+            "cached accelerator row executor differs from scalar");
+
+    const char *eviction = std::getenv("DSMVC_TEST_VULKAN_CACHE_EVICTION");
+    if (backend == dsmvc::BackendKind::vulkan && eviction
+        && std::string_view{eviction} == "1") {
+        std::vector<std::shared_ptr<std::vector<float>>> cache_inputs;
+        cache_inputs.reserve(40U);
+        for (std::size_t index = 0U; index < 40U; ++index) {
+            auto cache_input = std::make_shared<std::vector<float>>(input);
+            const std::shared_ptr<const void> cache_lifetime(
+                cache_input, static_cast<const void *>(cache_input->data()));
+            std::fill(candidate.begin(), candidate.end(), output_fill);
+            accelerator.inverse_2d(
+                *limited.horizontal, *limited.vertical,
+                cache_input->data(), input_stride, candidate.data(), output_stride,
+                cache_lifetime);
+            const auto eviction_stats = compare_matrix(
+                limited_reference.data(), candidate.data(), destination_height,
+                destination_width, output_stride);
+            require(
+                eviction_stats.non_finite == 0U
+                    && eviction_stats.maximum < 1.0e-4F,
+                "Vulkan input-cache eviction execution differs from scalar");
+            cache_inputs.push_back(std::move(cache_input));
+        }
+
+        const std::shared_ptr<const void> first_lifetime(
+            cache_inputs.front(),
+            static_cast<const void *>(cache_inputs.front()->data()));
+        std::fill(candidate.begin(), candidate.end(), output_fill);
+        accelerator.inverse_2d(
+            *limited.horizontal, *limited.vertical,
+            cache_inputs.front()->data(), input_stride,
+            candidate.data(), output_stride, first_lifetime);
+        const auto reupload_stats = compare_matrix(
+            limited_reference.data(), candidate.data(), destination_height,
+            destination_width, output_stride);
+        require(
+            reupload_stats.non_finite == 0U
+                && reupload_stats.maximum < 1.0e-4F,
+            "Vulkan evicted input re-upload differs from scalar");
+    }
 }
 
 void test_identity_bilinear() {
@@ -1220,7 +1292,10 @@ void test_concurrent_prepare_and_seal() {
 int main() {
     try {
         test_backend_selection();
-        test_cuda_executor_agreement();
+        test_accelerator_executor_agreement(
+            dsmvc::BackendKind::cuda, dsmvc::cuda_available(), "CUDA");
+        test_accelerator_executor_agreement(
+            dsmvc::BackendKind::vulkan, dsmvc::vulkan_available(), "Vulkan");
         test_identity_bilinear();
         test_custom_plan();
         test_inverse_only_cache();

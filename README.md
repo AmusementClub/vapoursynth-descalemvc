@@ -14,6 +14,9 @@ output = core.dsmvc.Debicubic(source, 1280, 720, b=0.0, c=0.5)
 # CUDA-enabled builds opt in explicitly:
 gpu_output = core.dsmvc.Debicubic(
     source, 1280, 720, b=0.0, c=0.5, backend="cuda")
+# Vulkan-enabled builds use the same explicit backend contract:
+vulkan_output = core.dsmvc.Debicubic(
+    source, 1280, 720, b=0.0, c=0.5, backend="vulkan")
 ```
 
 The plugin identifier is `com.dsmvc.descale`. It intentionally exports the
@@ -38,10 +41,9 @@ one optional `backend:data` argument appended at the end:
 preserved: `custom` wins over `custom_kernel`, and `taps` wins over `support`.
 
 `backend` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. `auto` continues
-to select the CPU implementation. A CUDA-enabled build accepts `cuda` on a
-compatible NVIDIA device; an unavailable or uncompiled explicit backend raises
-an error and never silently falls back to CPU. Metal and Vulkan remain stable
-capability stubs.
+to select the CPU implementation. Enabled builds accept `cuda` or `vulkan` on
+a compatible device; an unavailable or uncompiled explicit backend raises an
+error and never silently falls back to CPU. Metal remains a capability stub.
 
 For the CPU backend, `opt=1` selects the scalar path and `opt=2` strictly
 requires AVX2 and FMA. The default selects AVX2/FMA when available. Other
@@ -129,6 +131,36 @@ execution. `DSMVC_CUDA_SPLIT_HORIZONTAL_THREADS` and
 default.
 CUDA uses hardware fused multiply-add, so Float32 output is numerically checked
 against the scalar backend but is not promised to be bit-identical.
+
+The Vulkan 1.2 backend is optional on Windows and Linux. A build requires the
+Vulkan SDK headers, loader, and `glslc`; test builds also require `spirv-val`:
+
+```sh
+cmake -S . -B build-vulkan \
+  -DDSMVC_VAPOURSYNTH_SDK=/path/to/vapoursynth \
+  -DDSMVC_ENABLE_VULKAN=ON
+cmake --build build-vulkan --config Release --parallel
+```
+
+GLSL is compiled with `--target-env=vulkan1.2 -O`, validated in test builds,
+and embedded in the plugin. Installed packages need only the system Vulkan
+loader and a Vulkan 1.2 driver; they do not load shader sidecars or a runtime
+compiler. Devices need a compute queue and the Vulkan core compute limits. No
+FP16/FP64, subgroup, narrow storage, descriptor indexing, or synchronization2
+feature is required.
+
+By default device selection scores discrete, integrated, virtual, and CPU
+devices in that order and prefers a compute-only queue. Set
+`DSMVC_VULKAN_DEVICE` to a Vulkan enumeration index or hexadecimal
+`vendor_id:device_id`; an invalid or ineligible explicit selection reports all
+detected devices and does not fall back. `DSMVC_VULKAN_SLOTS=1..16` overrides
+the adaptive four-slot default and eight-slot heavy-plan expansion.
+`DSMVC_VULKAN_PLAN_CACHE_MB` and `DSMVC_VULKAN_INPUT_CACHE_MB` default to 16
+and 64 MiB. `DSMVC_VULKAN_SPLIT_RHS=0|adaptive|force` controls fused versus
+split RHS execution. `DSMVC_VULKAN_VALIDATION=1` enables the Khronos validation
+layer when installed. `DSMVC_VULKAN_WORKGROUP=128` forces the core-limit
+fallback variants for diagnostics. Float32 results use explicit shader `fma`
+and are numerically checked, not promised to be bit-identical to CPU or CUDA.
 
 ## Benchmark
 

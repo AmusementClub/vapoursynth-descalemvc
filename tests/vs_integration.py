@@ -243,11 +243,29 @@ def run(options) -> None:
         float_source, width=80, height=48, opt=2, backend="cpu")
     compare_clips(scalar, avx2, "opt/scalar-vs-avx2")
 
-    for backend in ("metal", "vulkan"):
+    expect_error(
+        lambda: core.dsmvc.Debicubic(
+            float_source, width=80, height=48, backend="metal"),
+        "backend 'metal' is not compiled")
+    if options.vulkan_enabled:
+        for name in FUNCTIONS:
+            cpu = direct_call(core.dsmvc, name, float_source, backend="cpu")
+            vulkan = direct_call(
+                core.dsmvc, name, float_source, backend="vulkan")
+            compare_clips(cpu, vulkan, f"backend/cpu-vs-vulkan/{name}")
+        for format_id in formats:
+            source = core.std.BlankClip(width=96, height=64, format=format_id)
+            cpu = direct_call(
+                core.dsmvc, "Debicubic", source, backend="cpu")
+            vulkan = direct_call(
+                core.dsmvc, "Debicubic", source, backend="vulkan")
+            compare_clips(
+                cpu, vulkan, f"backend/cpu-vs-vulkan/{source.format.name}")
+    else:
         expect_error(
-            lambda backend=backend: core.dsmvc.Debicubic(
-                float_source, width=80, height=48, backend=backend),
-            f"backend '{backend}' is not compiled")
+            lambda: core.dsmvc.Debicubic(
+                float_source, width=80, height=48, backend="vulkan"),
+            "backend 'vulkan' is not compiled")
     if options.cuda_enabled:
         cuda = core.dsmvc.Debicubic(
             float_source, width=80, height=48, backend="cuda")
@@ -335,6 +353,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--repo-root", default=str(root))
     result.add_argument("--threads", type=int, default=32)
     result.add_argument("--cuda-enabled", action="store_true")
+    result.add_argument("--vulkan-enabled", action="store_true")
     return result
 
 

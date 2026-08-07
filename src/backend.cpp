@@ -3,6 +3,9 @@
 #if defined(DSMVC_HAS_CUDA)
 #include "cuda/cuda_executor.hpp"
 #endif
+#if defined(DSMVC_HAS_VULKAN)
+#include "vulkan/vulkan_executor.hpp"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -38,6 +41,12 @@ BackendKind resolve_backend(BackendKind requested) {
     if (requested == BackendKind::automatic || requested == BackendKind::cpu) {
         return BackendKind::cpu;
     }
+#if defined(DSMVC_HAS_VULKAN)
+    if (requested == BackendKind::vulkan) {
+        vulkan_detail::require_backend_available();
+        return BackendKind::vulkan;
+    }
+#endif
 #if defined(DSMVC_HAS_CUDA)
     if (requested == BackendKind::cuda) {
         if (cuda_detail::backend_available()) return BackendKind::cuda;
@@ -50,13 +59,30 @@ BackendKind resolve_backend(BackendKind requested) {
 }
 
 std::vector<BackendCapability> backend_capabilities() {
+    const bool vulkan_device = vulkan_available();
     const bool cuda_device = cuda_available();
     return {
         {BackendKind::cpu, "cpu", true, true},
         {BackendKind::metal, "metal", false, false},
-        {BackendKind::vulkan, "vulkan", false, false},
+        {BackendKind::vulkan, "vulkan", vulkan_compiled(), vulkan_device},
         {BackendKind::cuda, "cuda", cuda_compiled(), cuda_device},
     };
+}
+
+bool vulkan_compiled() noexcept {
+#if defined(DSMVC_HAS_VULKAN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool vulkan_available() noexcept {
+#if defined(DSMVC_HAS_VULKAN)
+    return vulkan_detail::backend_available();
+#else
+    return false;
+#endif
 }
 
 bool cuda_compiled() noexcept {

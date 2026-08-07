@@ -16,6 +16,8 @@ set(DSMVC_BASELINE_PLUGIN "" CACHE FILEPATH "Baseline descale plugin used by int
 set(DSMVC_BASELINE_WRAPPER "" CACHE FILEPATH "Baseline descale.py used by integration tests")
 option(DSMVC_ENABLE_CUDA
        "Build the optional CUDA backend on Windows or Linux" OFF)
+option(DSMVC_ENABLE_VULKAN
+       "Build the optional Vulkan 1.2 backend on Windows or Linux" OFF)
 set(DSMVC_CUDA_ARCHITECTURES
     "75;86;89;120" CACHE STRING
     "Native SM targets embedded in the CUDA module")
@@ -95,6 +97,99 @@ if(DSMVC_ENABLE_CUDA)
         src/cuda/dsmvc_cuda.cu)
 endif()
 
+if(DSMVC_ENABLE_VULKAN)
+    if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "DSMVC_ENABLE_VULKAN requires Windows or Linux")
+    endif()
+    find_package(Vulkan 1.2 REQUIRED)
+    if(NOT DSMVC_GLSLC_EXECUTABLE AND Vulkan_GLSLC_EXECUTABLE)
+        set(DSMVC_GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}"
+            CACHE FILEPATH "Path to the glslc shader compiler")
+    endif()
+    if(NOT DSMVC_GLSLC_EXECUTABLE)
+        find_program(DSMVC_GLSLC_EXECUTABLE
+            NAMES glslc.exe glslc
+            HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+    endif()
+    if(NOT DSMVC_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "Vulkan builds require glslc")
+    endif()
+    if(BUILD_TESTING)
+        find_program(DSMVC_SPIRV_VAL_EXECUTABLE
+            NAMES spirv-val.exe spirv-val
+            HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+        if(NOT DSMVC_SPIRV_VAL_EXECUTABLE)
+            message(FATAL_ERROR "Vulkan test builds require spirv-val")
+        endif()
+    endif()
+
+    set(_dsmvc_vulkan_generated_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan")
+    file(MAKE_DIRECTORY "${_dsmvc_vulkan_generated_dir}")
+    function(dsmvc_compile_vulkan_shader name source)
+        set(_definitions ${ARGN})
+        set(_spv "${_dsmvc_vulkan_generated_dir}/${name}.spv")
+        set(_header
+            "${_dsmvc_vulkan_generated_dir}/vulkan_${name}_spv.hpp")
+        set(_symbol "vulkan_${name}_spv")
+        add_custom_command(
+            OUTPUT "${_spv}"
+            COMMAND "${DSMVC_GLSLC_EXECUTABLE}"
+                --target-env=vulkan1.2 -O ${_definitions}
+                -o "${_spv}" "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+            VERBATIM)
+        add_custom_command(
+            OUTPUT "${_header}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${_spv}"
+                "-DOUTPUT=${_header}"
+                "-DSYMBOL=${_symbol}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake"
+            DEPENDS "${_spv}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake"
+            VERBATIM)
+        set(DSMVC_VULKAN_SPIRV
+            ${DSMVC_VULKAN_SPIRV} "${_spv}" PARENT_SCOPE)
+        set(DSMVC_VULKAN_GENERATED_HEADERS
+            ${DSMVC_VULKAN_GENERATED_HEADERS} "${_header}" PARENT_SCOPE)
+    endfunction()
+
+    dsmvc_compile_vulkan_shader(
+        transpose_256 src/vulkan/shaders/transpose.comp
+        -DDSMVC_LOCAL_X=32 -DDSMVC_LOCAL_Y=8)
+    dsmvc_compile_vulkan_shader(
+        transpose_128 src/vulkan/shaders/transpose.comp
+        -DDSMVC_LOCAL_X=16 -DDSMVC_LOCAL_Y=8)
+    dsmvc_compile_vulkan_shader(
+        rhs_256 src/vulkan/shaders/rhs.comp
+        -DDSMVC_LOCAL_X=32 -DDSMVC_LOCAL_Y=8)
+    dsmvc_compile_vulkan_shader(
+        rhs_128 src/vulkan/shaders/rhs.comp
+        -DDSMVC_LOCAL_X=16 -DDSMVC_LOCAL_Y=8)
+    dsmvc_compile_vulkan_shader(
+        inverse_32 src/vulkan/shaders/inverse.comp
+        -DDSMVC_LOCAL_SIZE=32 -DDSMVC_SOLVE_ONLY=0)
+    dsmvc_compile_vulkan_shader(
+        inverse_64 src/vulkan/shaders/inverse.comp
+        -DDSMVC_LOCAL_SIZE=64 -DDSMVC_SOLVE_ONLY=0)
+    dsmvc_compile_vulkan_shader(
+        solve_32 src/vulkan/shaders/inverse.comp
+        -DDSMVC_LOCAL_SIZE=32 -DDSMVC_SOLVE_ONLY=1)
+    dsmvc_compile_vulkan_shader(
+        solve_64 src/vulkan/shaders/inverse.comp
+        -DDSMVC_LOCAL_SIZE=64 -DDSMVC_SOLVE_ONLY=1)
+    dsmvc_compile_vulkan_shader(
+        convert_256 src/vulkan/shaders/convert.comp
+        -DDSMVC_LOCAL_SIZE=256)
+    dsmvc_compile_vulkan_shader(
+        convert_128 src/vulkan/shaders/convert.comp
+        -DDSMVC_LOCAL_SIZE=128)
+
+    list(APPEND DSMVC_ENGINE_SOURCES
+        src/vulkan/vulkan_executor.cpp
+        ${DSMVC_VULKAN_GENERATED_HEADERS})
+endif()
+
 add_library(dsmvc_engine STATIC ${DSMVC_ENGINE_SOURCES})
 target_compile_features(dsmvc_engine PUBLIC cxx_std_23)
 target_include_directories(dsmvc_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -113,6 +208,14 @@ if(DSMVC_ENABLE_CUDA)
         CUDA_STANDARD_REQUIRED ON)
     target_compile_options(dsmvc_engine PRIVATE
         "$<$<COMPILE_LANGUAGE:CUDA>:-O3;-lineinfo>")
+endif()
+
+if(DSMVC_ENABLE_VULKAN)
+    target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_VULKAN=1)
+    target_include_directories(dsmvc_engine PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan"
+        "${_dsmvc_vulkan_generated_dir}")
+    target_link_libraries(dsmvc_engine PRIVATE Vulkan::Vulkan)
 endif()
 
 if(DSMVC_CAN_BUILD_AVX2)
@@ -134,6 +237,9 @@ if(DSMVC_ENABLE_CUDA)
     target_include_directories(dsmvc PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda")
     target_link_libraries(dsmvc PRIVATE ${_dsmvc_nvtx_target})
+endif()
+if(DSMVC_ENABLE_VULKAN)
+    target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_VULKAN=1)
 endif()
 set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
 
@@ -168,6 +274,31 @@ if(BUILD_TESTING)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_cuda_fatbin.cmake")
     endif()
 
+    if(DSMVC_ENABLE_VULKAN)
+        foreach(_spirv IN LISTS DSMVC_VULKAN_SPIRV)
+            get_filename_component(_shader_name "${_spirv}" NAME_WE)
+            add_test(NAME "dsmvc_vulkan_spirv_${_shader_name}"
+                COMMAND "${DSMVC_SPIRV_VAL_EXECUTABLE}"
+                    --target-env vulkan1.2 "${_spirv}")
+        endforeach()
+
+        function(dsmvc_add_vulkan_runtime_test suffix)
+            add_test(NAME "dsmvc_vulkan_${suffix}" COMMAND dsmvc_engine_tests)
+            set_tests_properties("dsmvc_vulkan_${suffix}" PROPERTIES
+                ENVIRONMENT "${ARGN}")
+        endfunction()
+        dsmvc_add_vulkan_runtime_test(
+            forced_fused "DSMVC_VULKAN_SPLIT_RHS=0")
+        dsmvc_add_vulkan_runtime_test(
+            forced_split_fallback
+            "DSMVC_VULKAN_SPLIT_RHS=force;DSMVC_VULKAN_WORKGROUP=128;DSMVC_VULKAN_TIMELINE=0")
+        dsmvc_add_vulkan_runtime_test(
+            non_coherent "DSMVC_VULKAN_FORCE_NON_COHERENT=1")
+        dsmvc_add_vulkan_runtime_test(
+            cache_eviction
+            "DSMVC_VULKAN_PLAN_CACHE_MB=1;DSMVC_VULKAN_INPUT_CACHE_MB=1;DSMVC_TEST_VULKAN_CACHE_EVICTION=1")
+    endif()
+
     if(NOT DSMVC_VS_PYTHON AND EXISTS "D:/okegui/OKEGui/tools/vapoursynth/python.exe")
         set(DSMVC_VS_PYTHON "D:/okegui/OKEGui/tools/vapoursynth/python.exe")
     endif()
@@ -186,6 +317,9 @@ if(BUILD_TESTING)
         endif()
         if(DSMVC_ENABLE_CUDA)
             list(APPEND _dsmvc_vs_integration_args --cuda-enabled)
+        endif()
+        if(DSMVC_ENABLE_VULKAN)
+            list(APPEND _dsmvc_vs_integration_args --vulkan-enabled)
         endif()
         add_test(
             NAME dsmvc_vs_integration

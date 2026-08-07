@@ -3,6 +3,9 @@
 #if defined(DSMVC_HAS_CUDA)
 #include "cuda/cuda_executor.hpp"
 #endif
+#if defined(DSMVC_HAS_VULKAN)
+#include "vulkan/vulkan_executor.hpp"
+#endif
 
 #include <memory>
 #include <stdexcept>
@@ -22,6 +25,12 @@ struct Executor::Impl {
             return;
         }
 #endif
+#if defined(DSMVC_HAS_VULKAN)
+        if (backend == BackendKind::vulkan) {
+            vulkan = std::make_unique<vulkan_detail::VulkanExecutor>();
+            return;
+        }
+#endif
         throw std::logic_error("resolved backend has no executor");
     }
 
@@ -29,6 +38,9 @@ struct Executor::Impl {
     std::unique_ptr<CpuExecutor> cpu;
 #if defined(DSMVC_HAS_CUDA)
     std::unique_ptr<cuda_detail::CudaExecutor> cuda;
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    std::unique_ptr<vulkan_detail::VulkanExecutor> vulkan;
 #endif
 };
 
@@ -44,10 +56,16 @@ const char *Executor::name() const noexcept {
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) return impl_->cuda->name();
 #endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) return impl_->vulkan->name();
+#endif
     return "unknown";
 }
 
 bool Executor::input_cache_enabled() const noexcept {
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) return impl_->vulkan->input_cache_enabled();
+#endif
 #if defined(DSMVC_HAS_CUDA)
     return impl_->cuda && impl_->cuda->input_cache_enabled();
 #else
@@ -61,7 +79,10 @@ void Executor::prepare(std::shared_ptr<const AxisPlan> plan) const {
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->prepare(std::move(plan));
+    if (impl_->cuda) impl_->cuda->prepare(std::move(plan));
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) impl_->vulkan->prepare(std::move(plan));
 #endif
 }
 
@@ -71,7 +92,10 @@ void Executor::seal() const {
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->seal();
+    if (impl_->cuda) impl_->cuda->seal();
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) impl_->vulkan->seal();
 #endif
 }
 
@@ -87,9 +111,18 @@ void Executor::inverse_rows(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_rows(
-        plan, input, input_row_stride, output, output_row_stride, row_count,
-        std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_rows(
+            plan, input, input_row_stride, output, output_row_stride, row_count,
+            std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_rows(
+            plan, input, input_row_stride, output, output_row_stride, row_count,
+            std::move(input_lifetime));
+    }
 #endif
 }
 
@@ -106,9 +139,18 @@ void Executor::inverse_columns(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_columns(
-        plan, input, input_row_stride, output, output_row_stride, column_count,
-        std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_columns(
+            plan, input, input_row_stride, output, output_row_stride, column_count,
+            std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_columns(
+            plan, input, input_row_stride, output, output_row_stride,
+            column_count, std::move(input_lifetime));
+    }
 #endif
 }
 
@@ -124,9 +166,18 @@ void Executor::inverse_2d(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_2d(
-        horizontal, vertical, input, input_row_stride,
-        output, output_row_stride, std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_2d(
+            horizontal, vertical, input, input_row_stride,
+            output, output_row_stride, std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_2d(
+            horizontal, vertical, input, input_row_stride, output,
+            output_row_stride, std::move(input_lifetime));
+    }
 #endif
 }
 
@@ -143,9 +194,18 @@ void Executor::inverse_2d_u8(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_2d_u8(
-        horizontal, vertical, input, input_row_stride,
-        output, output_row_stride, conversion, std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_2d_u8(
+            horizontal, vertical, input, input_row_stride,
+            output, output_row_stride, conversion, std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_2d_u8(
+            horizontal, vertical, input, input_row_stride, output,
+            output_row_stride, conversion, std::move(input_lifetime));
+    }
 #endif
 }
 
@@ -162,9 +222,18 @@ void Executor::inverse_2d_u16(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_2d_u16(
-        horizontal, vertical, input, input_row_stride,
-        output, output_row_stride, conversion, std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_2d_u16(
+            horizontal, vertical, input, input_row_stride,
+            output, output_row_stride, conversion, std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_2d_u16(
+            horizontal, vertical, input, input_row_stride, output,
+            output_row_stride, conversion, std::move(input_lifetime));
+    }
 #endif
 }
 
@@ -181,9 +250,18 @@ void Executor::inverse_2d_u8_streamed(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_2d_u8(
-        horizontal, vertical, input, input_row_stride,
-        output, output_row_stride, conversion, std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_2d_u8(
+            horizontal, vertical, input, input_row_stride,
+            output, output_row_stride, conversion, std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_2d_u8(
+            horizontal, vertical, input, input_row_stride, output,
+            output_row_stride, conversion, std::move(input_lifetime));
+    }
 #endif
 }
 
@@ -200,9 +278,18 @@ void Executor::inverse_2d_u16_streamed(
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    impl_->cuda->inverse_2d_u16(
-        horizontal, vertical, input, input_row_stride,
-        output, output_row_stride, conversion, std::move(input_lifetime));
+    if (impl_->cuda) {
+        impl_->cuda->inverse_2d_u16(
+            horizontal, vertical, input, input_row_stride,
+            output, output_row_stride, conversion, std::move(input_lifetime));
+    }
+#endif
+#if defined(DSMVC_HAS_VULKAN)
+    if (impl_->vulkan) {
+        impl_->vulkan->inverse_2d_u16(
+            horizontal, vertical, input, input_row_stride, output,
+            output_row_stride, conversion, std::move(input_lifetime));
+    }
 #endif
 }
 

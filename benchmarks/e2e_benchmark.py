@@ -1258,7 +1258,7 @@ def parser() -> argparse.ArgumentParser:
                         help="Candidates in each warm-up run; 0 disables warm-up.")
     result.add_argument("--requests", type=int, default=32)
     result.add_argument("--threads", type=int, default=32)
-    result.add_argument("--backend", choices=("auto", "cpu", "cuda"),
+    result.add_argument("--backend", choices=("auto", "cpu", "vulkan", "cuda"),
                         default="cpu")
     result.add_argument("--performance-batch-size", type=int, default=0,
                         help="Maximum candidates per isolated performance VSPipe process; 0 uses one graph.")

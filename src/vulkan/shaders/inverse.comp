@@ -1,0 +1,124 @@
+#version 460
+
+#ifndef DSMVC_LOCAL_SIZE
+#define DSMVC_LOCAL_SIZE 32
+#endif
+#ifndef DSMVC_SOLVE_ONLY
+#define DSMVC_SOLVE_ONLY 0
+#endif
+
+layout(local_size_x = DSMVC_LOCAL_SIZE, local_size_y = 1,
+       local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer PlanBuffer {
+    uint plan_data[];
+};
+layout(set = 0, binding = 1, std430) buffer WorkspaceBuffer {
+    uint workspace_data[];
+};
+layout(set = 0, binding = 2, std430) buffer CacheBuffer {
+    uint cache_data[];
+};
+layout(push_constant, std430) uniform PushConstants {
+    uint value[32];
+} pc;
+
+float source_value(uint vector, uint index) {
+    uint linear;
+    if (pc.value[7] == 0U) {
+        linear = pc.value[4] + index * pc.value[3] + vector;
+    } else {
+        linear = pc.value[4] + vector * pc.value[0] + index;
+    }
+    const uint bits = pc.value[6] == 0U
+        ? workspace_data[linear] : cache_data[linear];
+    return uintBitsToFloat(bits);
+}
+
+uint output_index(uint vector, uint index) {
+    if (pc.value[8] == 0U) {
+        return pc.value[5] + index * pc.value[3] + vector;
+    }
+    return pc.value[5] + vector * pc.value[1] + index;
+}
+
+float output_value(uint vector, uint index) {
+    return uintBitsToFloat(workspace_data[output_index(vector, index)]);
+}
+
+void store_output(uint vector, uint index, float result) {
+    workspace_data[output_index(vector, index)] = floatBitsToUint(result);
+}
+
+void inverse_axis(uint vector, uint bandwidth) {
+    const uint size = pc.value[1];
+    for (uint index = 0U; index < size; ++index) {
+#if DSMVC_SOLVE_ONLY
+        float sum = output_value(vector, index);
+#else
+        float sum = 0.0;
+        const uint begin = plan_data[pc.value[9] + index];
+        const uint end = plan_data[pc.value[9] + index + 1U];
+        for (uint position = begin; position < end; ++position) {
+            const uint source = plan_data[pc.value[10] + position];
+            sum = fma(
+                uintBitsToFloat(plan_data[pc.value[11] + position]),
+                source_value(vector, source), sum);
+        }
+#endif
+        const uint available = min(bandwidth, index);
+        for (uint distance = available; distance > 0U; --distance) {
+            sum = fma(
+                -uintBitsToFloat(plan_data[
+                    pc.value[12] + (distance - 1U) * size + index]),
+                output_value(vector, index - distance), sum);
+        }
+        store_output(
+            vector, index,
+            sum * uintBitsToFloat(plan_data[pc.value[14] + index]));
+    }
+
+    if (size < 2U) {
+        return;
+    }
+    for (uint reverse = size - 1U; reverse > 0U; --reverse) {
+        const uint index = reverse - 1U;
+        const uint available = min(bandwidth, size - index - 1U);
+        float sum = 0.0;
+        if (bandwidth == 3U) {
+            for (uint distance = 1U; distance <= available; ++distance) {
+                sum = fma(
+                    uintBitsToFloat(plan_data[
+                        pc.value[13] + (distance - 1U) * size + index]),
+                    output_value(vector, index + distance), sum);
+            }
+        } else {
+            for (uint distance = available; distance > 0U; --distance) {
+                sum = fma(
+                    uintBitsToFloat(plan_data[
+                        pc.value[13] + (distance - 1U) * size + index]),
+                    output_value(vector, index + distance), sum);
+            }
+        }
+        store_output(vector, index, output_value(vector, index) - sum);
+    }
+}
+
+void main() {
+    const uint vector = gl_GlobalInvocationID.x;
+    if (vector >= pc.value[3]) {
+        return;
+    }
+    const uint bandwidth = pc.value[2];
+    if (bandwidth == 1U) {
+        inverse_axis(vector, 1U);
+    } else if (bandwidth == 3U) {
+        inverse_axis(vector, 3U);
+    } else if (bandwidth == 5U) {
+        inverse_axis(vector, 5U);
+    } else if (bandwidth == 7U) {
+        inverse_axis(vector, 7U);
+    } else {
+        inverse_axis(vector, bandwidth);
+    }
+}
