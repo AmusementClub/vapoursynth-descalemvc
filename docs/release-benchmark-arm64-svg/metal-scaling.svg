@@ -1,0 +1,302 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1248" height="1297" viewBox="0 0 1248 1297" role="img" aria-labelledby="title desc">
+<title id="title">Explicit Metal throughput</title>
+<desc id="desc">CPU and explicit Metal wall-clock FPS across every measured format and kernel.</desc>
+<rect width="1248" height="1297" fill="#ffffff"/>
+<text x="624.0" y="30" text-anchor="middle" font-family="sans-serif" font-size="23" font-weight="700" fill="#111827">Explicit Metal throughput</text>
+<text x="624.0" y="53" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#475569">512 frames per cell; full-resource configuration; higher FPS is better</text>
+<line x1="495.0" y1="75" x2="525.0" y2="75" stroke="#2563eb" stroke-width="3"/>
+<circle cx="510.0" cy="75" r="4" fill="#2563eb"/>
+<text x="536.0" y="80" font-family="sans-serif" font-size="13" fill="#374151">CPU</text>
+<line x1="645.0" y1="75" x2="675.0" y2="75" stroke="#dc2626" stroke-width="3"/>
+<circle cx="660.0" cy="75" r="4" fill="#dc2626"/>
+<text x="686.0" y="80" font-family="sans-serif" font-size="13" fill="#374151">explicit Metal</text>
+<g font-family="sans-serif">
+<rect x="24" y="94" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="169.0" y="114" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">GRAYS Float32 / bilinear</text>
+<line x1="67" y1="124" x2="67" y2="276" stroke="#334155"/>
+<line x1="67" y1="276" x2="307" y2="276" stroke="#334155"/>
+<line x1="67" y1="276.00" x2="307" y2="276.00" stroke="#e2e8f0"/>
+<text x="61" y="280.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="67" y1="200.00" x2="307" y2="200.00" stroke="#e2e8f0"/>
+<text x="61" y="204.00" text-anchor="end" font-size="9" fill="#475569">1215</text>
+<line x1="67" y1="124.00" x2="307" y2="124.00" stroke="#e2e8f0"/>
+<text x="61" y="128.00" text-anchor="end" font-size="9" fill="#475569">2431</text>
+<text x="187.00" y="292" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="169.50" y="140.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="177.00" y="136.29" text-anchor="middle" font-size="8" fill="#374151">2170</text>
+<rect x="189.50" y="180.08" width="15" height="95.92" fill="#dc2626"/>
+<text x="197.00" y="176.08" text-anchor="middle" font-size="8" fill="#374151">1534</text>
+</g>
+<g font-family="sans-serif">
+<rect x="324" y="94" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="469.0" y="114" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">GRAYS Float32 / bicubic</text>
+<line x1="367" y1="124" x2="367" y2="276" stroke="#334155"/>
+<line x1="367" y1="276" x2="607" y2="276" stroke="#334155"/>
+<line x1="367" y1="276.00" x2="607" y2="276.00" stroke="#e2e8f0"/>
+<text x="361" y="280.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="367" y1="200.00" x2="607" y2="200.00" stroke="#e2e8f0"/>
+<text x="361" y="204.00" text-anchor="end" font-size="9" fill="#475569">1113</text>
+<line x1="367" y1="124.00" x2="607" y2="124.00" stroke="#e2e8f0"/>
+<text x="361" y="128.00" text-anchor="end" font-size="9" fill="#475569">2227</text>
+<text x="487.00" y="292" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="469.50" y="140.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="477.00" y="136.29" text-anchor="middle" font-size="8" fill="#374151">1988</text>
+<rect x="489.50" y="186.14" width="15" height="89.86" fill="#dc2626"/>
+<text x="497.00" y="182.14" text-anchor="middle" font-size="8" fill="#374151">1316</text>
+</g>
+<g font-family="sans-serif">
+<rect x="624" y="94" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="769.0" y="114" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">GRAYS Float32 / spline36</text>
+<line x1="667" y1="124" x2="667" y2="276" stroke="#334155"/>
+<line x1="667" y1="276" x2="907" y2="276" stroke="#334155"/>
+<line x1="667" y1="276.00" x2="907" y2="276.00" stroke="#e2e8f0"/>
+<text x="661" y="280.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="667" y1="200.00" x2="907" y2="200.00" stroke="#e2e8f0"/>
+<text x="661" y="204.00" text-anchor="end" font-size="9" fill="#475569">798</text>
+<line x1="667" y1="124.00" x2="907" y2="124.00" stroke="#e2e8f0"/>
+<text x="661" y="128.00" text-anchor="end" font-size="9" fill="#475569">1597</text>
+<text x="787.00" y="292" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="769.50" y="140.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="777.00" y="136.29" text-anchor="middle" font-size="8" fill="#374151">1426</text>
+<rect x="789.50" y="159.79" width="15" height="116.21" fill="#dc2626"/>
+<text x="797.00" y="155.79" text-anchor="middle" font-size="8" fill="#374151">1221</text>
+</g>
+<g font-family="sans-serif">
+<rect x="924" y="94" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="1069.0" y="114" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">GRAYS Float32 / lanczos3</text>
+<line x1="967" y1="124" x2="967" y2="276" stroke="#334155"/>
+<line x1="967" y1="276" x2="1207" y2="276" stroke="#334155"/>
+<line x1="967" y1="276.00" x2="1207" y2="276.00" stroke="#e2e8f0"/>
+<text x="961" y="280.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="967" y1="200.00" x2="1207" y2="200.00" stroke="#e2e8f0"/>
+<text x="961" y="204.00" text-anchor="end" font-size="9" fill="#475569">816</text>
+<line x1="967" y1="124.00" x2="1207" y2="124.00" stroke="#e2e8f0"/>
+<text x="961" y="128.00" text-anchor="end" font-size="9" fill="#475569">1632</text>
+<text x="1087.00" y="292" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="1069.50" y="140.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="1077.00" y="136.29" text-anchor="middle" font-size="8" fill="#374151">1457</text>
+<rect x="1089.50" y="159.65" width="15" height="116.35" fill="#dc2626"/>
+<text x="1097.00" y="155.65" text-anchor="middle" font-size="8" fill="#374151">1250</text>
+</g>
+<g font-family="sans-serif">
+<rect x="24" y="329" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="169.0" y="349" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">GRAYS Float32 / spline64</text>
+<line x1="67" y1="359" x2="67" y2="511" stroke="#334155"/>
+<line x1="67" y1="511" x2="307" y2="511" stroke="#334155"/>
+<line x1="67" y1="511.00" x2="307" y2="511.00" stroke="#e2e8f0"/>
+<text x="61" y="515.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="67" y1="435.00" x2="307" y2="435.00" stroke="#e2e8f0"/>
+<text x="61" y="439.00" text-anchor="end" font-size="9" fill="#475569">721</text>
+<line x1="67" y1="359.00" x2="307" y2="359.00" stroke="#e2e8f0"/>
+<text x="61" y="363.00" text-anchor="end" font-size="9" fill="#475569">1443</text>
+<text x="187.00" y="527" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="169.50" y="375.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="177.00" y="371.29" text-anchor="middle" font-size="8" fill="#374151">1288</text>
+<rect x="189.50" y="393.38" width="15" height="117.62" fill="#dc2626"/>
+<text x="197.00" y="389.38" text-anchor="middle" font-size="8" fill="#374151">1116</text>
+</g>
+<g font-family="sans-serif">
+<rect x="324" y="329" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="469.0" y="349" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P8 / bilinear</text>
+<line x1="367" y1="359" x2="367" y2="511" stroke="#334155"/>
+<line x1="367" y1="511" x2="607" y2="511" stroke="#334155"/>
+<line x1="367" y1="511.00" x2="607" y2="511.00" stroke="#e2e8f0"/>
+<text x="361" y="515.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="367" y1="435.00" x2="607" y2="435.00" stroke="#e2e8f0"/>
+<text x="361" y="439.00" text-anchor="end" font-size="9" fill="#475569">1057</text>
+<line x1="367" y1="359.00" x2="607" y2="359.00" stroke="#e2e8f0"/>
+<text x="361" y="363.00" text-anchor="end" font-size="9" fill="#475569">2113</text>
+<text x="487.00" y="527" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="469.50" y="375.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="477.00" y="371.29" text-anchor="middle" font-size="8" fill="#374151">1887</text>
+<rect x="489.50" y="402.19" width="15" height="108.81" fill="#dc2626"/>
+<text x="497.00" y="398.19" text-anchor="middle" font-size="8" fill="#374151">1513</text>
+</g>
+<g font-family="sans-serif">
+<rect x="624" y="329" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="769.0" y="349" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P8 / spline16</text>
+<line x1="667" y1="359" x2="667" y2="511" stroke="#334155"/>
+<line x1="667" y1="511" x2="907" y2="511" stroke="#334155"/>
+<line x1="667" y1="511.00" x2="907" y2="511.00" stroke="#e2e8f0"/>
+<text x="661" y="515.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="667" y1="435.00" x2="907" y2="435.00" stroke="#e2e8f0"/>
+<text x="661" y="439.00" text-anchor="end" font-size="9" fill="#475569">761</text>
+<line x1="667" y1="359.00" x2="907" y2="359.00" stroke="#e2e8f0"/>
+<text x="661" y="363.00" text-anchor="end" font-size="9" fill="#475569">1523</text>
+<text x="787.00" y="527" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="769.50" y="375.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="777.00" y="371.29" text-anchor="middle" font-size="8" fill="#374151">1360</text>
+<rect x="789.50" y="395.43" width="15" height="115.57" fill="#dc2626"/>
+<text x="797.00" y="391.43" text-anchor="middle" font-size="8" fill="#374151">1158</text>
+</g>
+<g font-family="sans-serif">
+<rect x="924" y="329" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="1069.0" y="349" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P8 / bicubic</text>
+<line x1="967" y1="359" x2="967" y2="511" stroke="#334155"/>
+<line x1="967" y1="511" x2="1207" y2="511" stroke="#334155"/>
+<line x1="967" y1="511.00" x2="1207" y2="511.00" stroke="#e2e8f0"/>
+<text x="961" y="515.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="967" y1="435.00" x2="1207" y2="435.00" stroke="#e2e8f0"/>
+<text x="961" y="439.00" text-anchor="end" font-size="9" fill="#475569">744</text>
+<line x1="967" y1="359.00" x2="1207" y2="359.00" stroke="#e2e8f0"/>
+<text x="961" y="363.00" text-anchor="end" font-size="9" fill="#475569">1488</text>
+<text x="1087.00" y="527" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="1069.50" y="375.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="1077.00" y="371.29" text-anchor="middle" font-size="8" fill="#374151">1329</text>
+<rect x="1089.50" y="392.70" width="15" height="118.30" fill="#dc2626"/>
+<text x="1097.00" y="388.70" text-anchor="middle" font-size="8" fill="#374151">1158</text>
+</g>
+<g font-family="sans-serif">
+<rect x="24" y="564" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="169.0" y="584" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P8 / spline36</text>
+<line x1="67" y1="594" x2="67" y2="746" stroke="#334155"/>
+<line x1="67" y1="746" x2="307" y2="746" stroke="#334155"/>
+<line x1="67" y1="746.00" x2="307" y2="746.00" stroke="#e2e8f0"/>
+<text x="61" y="750.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="67" y1="670.00" x2="307" y2="670.00" stroke="#e2e8f0"/>
+<text x="61" y="674.00" text-anchor="end" font-size="9" fill="#475569">572</text>
+<line x1="67" y1="594.00" x2="307" y2="594.00" stroke="#e2e8f0"/>
+<text x="61" y="598.00" text-anchor="end" font-size="9" fill="#475569">1143</text>
+<text x="187.00" y="762" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="169.50" y="654.61" width="15" height="91.39" fill="#2563eb"/>
+<text x="177.00" y="650.61" text-anchor="middle" font-size="8" fill="#374151">687</text>
+<rect x="189.50" y="610.29" width="15" height="135.71" fill="#dc2626"/>
+<text x="197.00" y="606.29" text-anchor="middle" font-size="8" fill="#374151">1021</text>
+</g>
+<g font-family="sans-serif">
+<rect x="324" y="564" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="469.0" y="584" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P8 / lanczos3</text>
+<line x1="367" y1="594" x2="367" y2="746" stroke="#334155"/>
+<line x1="367" y1="746" x2="607" y2="746" stroke="#334155"/>
+<line x1="367" y1="746.00" x2="607" y2="746.00" stroke="#e2e8f0"/>
+<text x="361" y="750.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="367" y1="670.00" x2="607" y2="670.00" stroke="#e2e8f0"/>
+<text x="361" y="674.00" text-anchor="end" font-size="9" fill="#475569">563</text>
+<line x1="367" y1="594.00" x2="607" y2="594.00" stroke="#e2e8f0"/>
+<text x="361" y="598.00" text-anchor="end" font-size="9" fill="#475569">1126</text>
+<text x="487.00" y="762" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="469.50" y="654.51" width="15" height="91.49" fill="#2563eb"/>
+<text x="477.00" y="650.51" text-anchor="middle" font-size="8" fill="#374151">678</text>
+<rect x="489.50" y="610.29" width="15" height="135.71" fill="#dc2626"/>
+<text x="497.00" y="606.29" text-anchor="middle" font-size="8" fill="#374151">1005</text>
+</g>
+<g font-family="sans-serif">
+<rect x="624" y="564" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="769.0" y="584" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P8 / spline64</text>
+<line x1="667" y1="594" x2="667" y2="746" stroke="#334155"/>
+<line x1="667" y1="746" x2="907" y2="746" stroke="#334155"/>
+<line x1="667" y1="746.00" x2="907" y2="746.00" stroke="#e2e8f0"/>
+<text x="661" y="750.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="667" y1="670.00" x2="907" y2="670.00" stroke="#e2e8f0"/>
+<text x="661" y="674.00" text-anchor="end" font-size="9" fill="#475569">477</text>
+<line x1="667" y1="594.00" x2="907" y2="594.00" stroke="#e2e8f0"/>
+<text x="661" y="598.00" text-anchor="end" font-size="9" fill="#475569">954</text>
+<text x="787.00" y="762" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="769.50" y="655.19" width="15" height="90.81" fill="#2563eb"/>
+<text x="777.00" y="651.19" text-anchor="middle" font-size="8" fill="#374151">570</text>
+<rect x="789.50" y="610.29" width="15" height="135.71" fill="#dc2626"/>
+<text x="797.00" y="606.29" text-anchor="middle" font-size="8" fill="#374151">852</text>
+</g>
+<g font-family="sans-serif">
+<rect x="924" y="564" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="1069.0" y="584" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P10 / bilinear</text>
+<line x1="967" y1="594" x2="967" y2="746" stroke="#334155"/>
+<line x1="967" y1="746" x2="1207" y2="746" stroke="#334155"/>
+<line x1="967" y1="746.00" x2="1207" y2="746.00" stroke="#e2e8f0"/>
+<text x="961" y="750.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="967" y1="670.00" x2="1207" y2="670.00" stroke="#e2e8f0"/>
+<text x="961" y="674.00" text-anchor="end" font-size="9" fill="#475569">939</text>
+<line x1="967" y1="594.00" x2="1207" y2="594.00" stroke="#e2e8f0"/>
+<text x="961" y="598.00" text-anchor="end" font-size="9" fill="#475569">1879</text>
+<text x="1087.00" y="762" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="1069.50" y="610.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="1077.00" y="606.29" text-anchor="middle" font-size="8" fill="#374151">1678</text>
+<rect x="1089.50" y="637.63" width="15" height="108.37" fill="#dc2626"/>
+<text x="1097.00" y="633.63" text-anchor="middle" font-size="8" fill="#374151">1340</text>
+</g>
+<g font-family="sans-serif">
+<rect x="24" y="799" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="169.0" y="819" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P10 / spline16</text>
+<line x1="67" y1="829" x2="67" y2="981" stroke="#334155"/>
+<line x1="67" y1="981" x2="307" y2="981" stroke="#334155"/>
+<line x1="67" y1="981.00" x2="307" y2="981.00" stroke="#e2e8f0"/>
+<text x="61" y="985.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="67" y1="905.00" x2="307" y2="905.00" stroke="#e2e8f0"/>
+<text x="61" y="909.00" text-anchor="end" font-size="9" fill="#475569">692</text>
+<line x1="67" y1="829.00" x2="307" y2="829.00" stroke="#e2e8f0"/>
+<text x="61" y="833.00" text-anchor="end" font-size="9" fill="#475569">1384</text>
+<text x="187.00" y="997" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="169.50" y="845.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="177.00" y="841.29" text-anchor="middle" font-size="8" fill="#374151">1236</text>
+<rect x="189.50" y="862.19" width="15" height="118.81" fill="#dc2626"/>
+<text x="197.00" y="858.19" text-anchor="middle" font-size="8" fill="#374151">1082</text>
+</g>
+<g font-family="sans-serif">
+<rect x="324" y="799" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="469.0" y="819" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P10 / bicubic</text>
+<line x1="367" y1="829" x2="367" y2="981" stroke="#334155"/>
+<line x1="367" y1="981" x2="607" y2="981" stroke="#334155"/>
+<line x1="367" y1="981.00" x2="607" y2="981.00" stroke="#e2e8f0"/>
+<text x="361" y="985.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="367" y1="905.00" x2="607" y2="905.00" stroke="#e2e8f0"/>
+<text x="361" y="909.00" text-anchor="end" font-size="9" fill="#475569">688</text>
+<line x1="367" y1="829.00" x2="607" y2="829.00" stroke="#e2e8f0"/>
+<text x="361" y="833.00" text-anchor="end" font-size="9" fill="#475569">1376</text>
+<text x="487.00" y="997" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="469.50" y="845.29" width="15" height="135.71" fill="#2563eb"/>
+<text x="477.00" y="841.29" text-anchor="middle" font-size="8" fill="#374151">1228</text>
+<rect x="489.50" y="863.15" width="15" height="117.85" fill="#dc2626"/>
+<text x="497.00" y="859.15" text-anchor="middle" font-size="8" fill="#374151">1067</text>
+</g>
+<g font-family="sans-serif">
+<rect x="624" y="799" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="769.0" y="819" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P10 / spline36</text>
+<line x1="667" y1="829" x2="667" y2="981" stroke="#334155"/>
+<line x1="667" y1="981" x2="907" y2="981" stroke="#334155"/>
+<line x1="667" y1="981.00" x2="907" y2="981.00" stroke="#e2e8f0"/>
+<text x="661" y="985.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="667" y1="905.00" x2="907" y2="905.00" stroke="#e2e8f0"/>
+<text x="661" y="909.00" text-anchor="end" font-size="9" fill="#475569">528</text>
+<line x1="667" y1="829.00" x2="907" y2="829.00" stroke="#e2e8f0"/>
+<text x="661" y="833.00" text-anchor="end" font-size="9" fill="#475569">1055</text>
+<text x="787.00" y="997" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="769.50" y="885.36" width="15" height="95.64" fill="#2563eb"/>
+<text x="777.00" y="881.36" text-anchor="middle" font-size="8" fill="#374151">664</text>
+<rect x="789.50" y="845.29" width="15" height="135.71" fill="#dc2626"/>
+<text x="797.00" y="841.29" text-anchor="middle" font-size="8" fill="#374151">942</text>
+</g>
+<g font-family="sans-serif">
+<rect x="924" y="799" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="1069.0" y="819" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P10 / lanczos3</text>
+<line x1="967" y1="829" x2="967" y2="981" stroke="#334155"/>
+<line x1="967" y1="981" x2="1207" y2="981" stroke="#334155"/>
+<line x1="967" y1="981.00" x2="1207" y2="981.00" stroke="#e2e8f0"/>
+<text x="961" y="985.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="967" y1="905.00" x2="1207" y2="905.00" stroke="#e2e8f0"/>
+<text x="961" y="909.00" text-anchor="end" font-size="9" fill="#475569">527</text>
+<line x1="967" y1="829.00" x2="1207" y2="829.00" stroke="#e2e8f0"/>
+<text x="961" y="833.00" text-anchor="end" font-size="9" fill="#475569">1054</text>
+<text x="1087.00" y="997" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="1069.50" y="885.18" width="15" height="95.82" fill="#2563eb"/>
+<text x="1077.00" y="881.18" text-anchor="middle" font-size="8" fill="#374151">664</text>
+<rect x="1089.50" y="845.29" width="15" height="135.71" fill="#dc2626"/>
+<text x="1097.00" y="841.29" text-anchor="middle" font-size="8" fill="#374151">941</text>
+</g>
+<g font-family="sans-serif">
+<rect x="24" y="1034" width="290" height="212" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="169.0" y="1054" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">YUV420P10 / spline64</text>
+<line x1="67" y1="1064" x2="67" y2="1216" stroke="#334155"/>
+<line x1="67" y1="1216" x2="307" y2="1216" stroke="#334155"/>
+<line x1="67" y1="1216.00" x2="307" y2="1216.00" stroke="#e2e8f0"/>
+<text x="61" y="1220.00" text-anchor="end" font-size="9" fill="#475569">0</text>
+<line x1="67" y1="1140.00" x2="307" y2="1140.00" stroke="#e2e8f0"/>
+<text x="61" y="1144.00" text-anchor="end" font-size="9" fill="#475569">449</text>
+<line x1="67" y1="1064.00" x2="307" y2="1064.00" stroke="#e2e8f0"/>
+<text x="61" y="1068.00" text-anchor="end" font-size="9" fill="#475569">897</text>
+<text x="187.00" y="1232" text-anchor="middle" font-size="9" fill="#475569">full resources</text>
+<rect x="169.50" y="1120.66" width="15" height="95.34" fill="#2563eb"/>
+<text x="177.00" y="1116.66" text-anchor="middle" font-size="8" fill="#374151">563</text>
+<rect x="189.50" y="1080.29" width="15" height="135.71" fill="#dc2626"/>
+<text x="197.00" y="1076.29" text-anchor="middle" font-size="8" fill="#374151">801</text>
+</g>
+</svg>

@@ -37,17 +37,24 @@ one optional `backend:data` argument appended at the end:
 `custom_kernel`/`taps`. If both aliases are supplied, baseline precedence is
 preserved: `custom` wins over `custom_kernel`, and `taps` wins over `support`.
 
-`backend` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. `auto` continues
-to select the CPU implementation. A CUDA-enabled build accepts `cuda` on a
-compatible NVIDIA device; an unavailable or uncompiled explicit backend raises
-an error and never silently falls back to CPU. Metal and Vulkan remain stable
-capability stubs.
+`backend` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. A normal build
+uses CPU for `auto`; Metal and Vulkan remain capability stubs. A CUDA-enabled
+build accepts `cuda` on a compatible NVIDIA device. The opt-in Apple ARM64
+Metal build adds explicit fixed-recipe GRAYS and YUV420P8/P10 routes. Its
+automatic route remains limited to measured wide-kernel YUV420 clips with at
+least 256 frames, at least 16 core threads, and a 16-callback admission window
+on a unified-memory Apple M-series device. Short clips, narrow kernels, GRAYS,
+low concurrency, and unsupported geometry remain on CPU under `auto`. An
+unavailable or uncompiled explicit backend raises an error and never silently
+falls back to CPU.
 
 For the CPU backend, `opt=1` selects the scalar path and `opt=2` strictly
-requires AVX2 and FMA. The default selects AVX2/FMA when available. Other
-numeric values retain baseline behavior and select automatic dispatch. The
-Python wrapper accepts either these integers or `Opt.AUTO`, `Opt.NONE`, and
-`Opt.AVX2`.
+requires the architecture's native SIMD path: AVX2/FMA on x86-64 or NEON/FMA
+on AArch64. The default selects native SIMD when available. Other numeric
+values retain baseline behavior and select automatic dispatch. The Python
+wrapper accepts either these integers or `Opt.AUTO`, `Opt.NONE`, `Opt.AVX2`,
+`Opt.NEON`, and `Opt.SIMD`; the last three names all preserve the legacy
+`opt=2` value.
 
 Planning is deferred until the first requested frame. The inverse-only planner
 uses Float64 CSR and banded LDLT construction, then stores immutable Float32
@@ -67,6 +74,30 @@ Requirements:
 - A C++23 compiler
 - VapourSynth API4 headers
 - On Windows, Visual Studio 2022 with the x64 C++ workload
+
+Native Apple ARM64 Release and RelWithDebInfo builds use `-O3 -flto=full`
+without an Apple-model-specific `-mcpu` setting. CMake selects the NEON source
+only for AArch64 and the existing AVX2/FMA source only for x86-64; universal
+macOS builds must be produced as separate architecture builds.
+
+Experimental Metal support is off by default and is available only in a native
+Apple ARM64 build with the Xcode Metal toolchain:
+
+```sh
+cmake -S . -B build-metal -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DDSMVC_VAPOURSYNTH_SDK=/path/to/vapoursynth \
+  -DDSMVC_BUILD_METAL_EXPERIMENTS=ON \
+  -DBUILD_TESTING=ON
+cmake --build build-metal --parallel
+ctest --test-dir build-metal --output-on-failure
+```
+
+Non-Apple and default builds do not compile or link the Metal executor. The
+feature remains experimental: supported formats, geometry, device admission,
+batch sizes, and automatic routing are deliberately not expanded beyond the
+validated cases.
 
 The Release DLL is written to `build/Release/dsmvc.dll`. The build uses the
 static MSVC runtime so that an older runtime DLL bundled with a host cannot
@@ -126,6 +157,13 @@ The reproducible old/new runner and its case definitions are documented in
 and baseline hashes, executes each implementation in separate processes, and
 writes JSON, CSV, Markdown, command lines, images, difference maps, and error
 curves outside the VapourSynth installation.
+
+The API3/API4 CPU regression runner and the opt-in Apple ARM64 Metal validation
+workflow are documented in [benchmarks/README.md](benchmarks/README.md).
+`benchmarks/validate_api4_apple_arm.sh` is the release gate for this migration;
+it records architecture-specific build commands, correctness and identity
+checks, paired CPU/Metal results, system-pressure snapshots, and required CI
+evidence.
 
 For the real-video end-to-end comparison based on the supplied training HTML,
 `test_getfnative*.vpy`, and `test_selectkernel.vpy`, use
