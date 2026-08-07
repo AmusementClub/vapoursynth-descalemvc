@@ -3,6 +3,10 @@
 #include <VapourSynth4.h>
 #include <VSHelper4.h>
 
+#if defined(DSMVC_HAS_CUDA)
+#include "nvtx.hpp"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -13,6 +17,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -614,9 +619,29 @@ const VSFrame *VS_CC filter_get_frame(
     VSFrame *intermediate = nullptr;
     VSFrame *destination = nullptr;
     try {
-        ensure_filter_plans(*data, vsapi);
         const bool uses_cuda =
             data->executor.backend() == BackendKind::cuda;
+#if defined(DSMVC_HAS_CUDA)
+        std::optional<dsmvc::cuda_detail::NvtxRange> frame_trace;
+        if (uses_cuda) {
+            frame_trace.emplace(
+                dsmvc::cuda_detail::NvtxLabel::frame,
+                static_cast<std::uint32_t>(frame_number));
+        }
+#endif
+#if defined(DSMVC_HAS_CUDA)
+        {
+            std::optional<dsmvc::cuda_detail::NvtxRange> plan_trace;
+            if (uses_cuda) {
+                plan_trace.emplace(
+                    dsmvc::cuda_detail::NvtxLabel::filter_plan_preparation,
+                    static_cast<std::uint32_t>(frame_number));
+            }
+            ensure_filter_plans(*data, vsapi);
+        }
+#else
+        ensure_filter_plans(*data, vsapi);
+#endif
         std::shared_ptr<const void> source_lifetime;
         if (data->executor.input_cache_enabled()) {
             const VSFrame *retained = vsapi->addFrameRef(source);
@@ -667,6 +692,16 @@ const VSFrame *VS_CC filter_get_frame(
         }
 
         for (int plane = 0; plane < data->num_planes; ++plane) {
+#if defined(DSMVC_HAS_CUDA)
+            std::optional<dsmvc::cuda_detail::NvtxRange> plane_trace;
+            if (uses_cuda) {
+                plane_trace.emplace(
+                    dsmvc::cuda_detail::NvtxLabel::plane,
+                    dsmvc::cuda_detail::nvtx_frame_plane_payload(
+                        static_cast<std::uint32_t>(frame_number),
+                        static_cast<std::uint32_t>(plane)));
+            }
+#endif
             const int horizontal_index = plane != 0 && data->subsampling_w > 0;
             const int vertical_index = plane != 0 && data->subsampling_h > 0;
             if (data->fused_integer) {

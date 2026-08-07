@@ -54,6 +54,15 @@ if(DSMVC_ENABLE_CUDA)
     endif()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    if(TARGET CUDA::nvtx3)
+        set(_dsmvc_nvtx_target CUDA::nvtx3)
+    else()
+        add_library(dsmvc_nvtx3 INTERFACE)
+        target_include_directories(dsmvc_nvtx3 SYSTEM INTERFACE
+            "${CUDAToolkit_INCLUDE_DIRS}")
+        target_link_libraries(dsmvc_nvtx3 INTERFACE ${CMAKE_DL_LIBS})
+        set(_dsmvc_nvtx_target dsmvc_nvtx3)
+    endif()
     find_program(DSMVC_CUOBJDUMP_EXECUTABLE
         NAMES cuobjdump.exe cuobjdump
         HINTS "${CUDAToolkit_BIN_DIR}")
@@ -95,7 +104,8 @@ if(DSMVC_ENABLE_CUDA)
     target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_CUDA=1)
     target_include_directories(dsmvc_engine PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda")
-    target_link_libraries(dsmvc_engine PRIVATE CUDA::cudart_static)
+    target_link_libraries(dsmvc_engine PRIVATE
+        CUDA::cudart_static ${_dsmvc_nvtx_target})
     set_target_properties(dsmvc_engine PROPERTIES
         CUDA_ARCHITECTURES "${_dsmvc_cuda_architectures}"
         CUDA_RUNTIME_LIBRARY Static
@@ -119,6 +129,12 @@ add_library(dsmvc MODULE src/vs_plugin.cpp)
 target_compile_features(dsmvc PRIVATE cxx_std_23)
 target_include_directories(dsmvc PRIVATE "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}")
 target_link_libraries(dsmvc PRIVATE dsmvc_engine)
+if(DSMVC_ENABLE_CUDA)
+    target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_CUDA=1)
+    target_include_directories(dsmvc PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda")
+    target_link_libraries(dsmvc PRIVATE ${_dsmvc_nvtx_target})
+endif()
 set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
 
 foreach(_target dsmvc_engine dsmvc)

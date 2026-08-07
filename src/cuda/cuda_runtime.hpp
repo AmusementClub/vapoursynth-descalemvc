@@ -40,6 +40,26 @@ struct RuntimeApi {
             destination, source, bytes, cudaMemcpyDeviceToHost, stream);
     }
 
+    [[nodiscard]] cudaError_t memcpy_2d_htod_async(
+        DevicePointer destination, std::size_t destination_pitch,
+        const void *source, std::size_t source_pitch,
+        std::size_t row_bytes, std::size_t rows,
+        cudaStream_t stream) const noexcept {
+        return cudaMemcpy2DAsync(
+            destination, destination_pitch, source, source_pitch,
+            row_bytes, rows, cudaMemcpyHostToDevice, stream);
+    }
+
+    [[nodiscard]] cudaError_t memcpy_2d_dtoh_async(
+        void *destination, std::size_t destination_pitch,
+        DevicePointer source, std::size_t source_pitch,
+        std::size_t row_bytes, std::size_t rows,
+        cudaStream_t stream) const noexcept {
+        return cudaMemcpy2DAsync(
+            destination, destination_pitch, source, source_pitch,
+            row_bytes, rows, cudaMemcpyDeviceToHost, stream);
+    }
+
     [[nodiscard]] cudaError_t mem_host_alloc(
         void **pointer, std::size_t bytes,
         unsigned int flags) const noexcept {
@@ -48,6 +68,17 @@ struct RuntimeApi {
 
     [[nodiscard]] cudaError_t mem_free_host(void *pointer) const noexcept {
         return cudaFreeHost(pointer);
+    }
+
+    [[nodiscard]] cudaError_t mem_host_register(
+        void *pointer, std::size_t bytes,
+        unsigned int flags) const noexcept {
+        return cudaHostRegister(pointer, bytes, flags);
+    }
+
+    [[nodiscard]] cudaError_t mem_host_unregister(
+        void *pointer) const noexcept {
+        return cudaHostUnregister(pointer);
     }
 
     [[nodiscard]] cudaError_t stream_create(

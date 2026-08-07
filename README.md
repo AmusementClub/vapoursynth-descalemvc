@@ -93,10 +93,17 @@ code, streams, and allocations use the device's primary context so they can
 coexist with other CUDA filters in the host process. At runtime,
 `DSMVC_CUDA_STREAMS` may be set to a
 value from 1 through 16. When unset, the runtime uses up to eight concurrent
-slots for 2D plans with half-bandwidth seven or greater, while narrower 2D and
-one-axis work remain limited to four. An explicit value applies uniformly to
-all paths. Each slot owns pinned host staging so its transfers and kernels
-share one stream.
+slots for reused-input 2D plans with half-bandwidth seven or greater, while
+narrower 2D and one-axis work remain limited to four. Float32 2D frames use a
+separate bounded pinned-staging pool: unique inputs admit two GPU executions
+and four host staging phases at once, while input-cache hits can expand to the
+full slot count. This keeps host packing and unpacking outside the lifetime of
+a GPU execution slot. Integer and one-axis paths retain slot-local staging.
+An explicit stream value applies uniformly and disables adaptive slot limits.
+Set `DSMVC_CUDA_HOST_TRANSFER=staging` to restore slot-local Float32 staging
+for comparison. The `pageable` and `registered` values select diagnostic
+direct-copy paths; per-frame driver staging or host registration made both
+slower than pinned staging on the reference system.
 `DSMVC_CUDA_INPUT_CACHE_MB` bounds the shared immutable-input cache and defaults
 to 64 MiB; set it to `0` to disable source upload and first-transpose reuse.
 Keep the cache enabled for repeated-source workloads such as GetNative scans;
@@ -104,10 +111,9 @@ disable it for long unique-frame runs when reuse is not expected.
 `DSMVC_CUDA_PLAN_CACHE_MB` bounds the device-resident packed-plan LRU and
 defaults to 16 MiB. This deliberately small default is appropriate for
 GetNative-style height scans, where most plans are used once; increase it for a
-long-lived workload that repeatedly reuses many distinct plans. Set
-`DSMVC_CUDA_STREAMS=4` when reducing peak device memory is more important than
-the last few percent of mixed-workload throughput; the adaptive default can
-grow from four to eight slots for half-bandwidth-seven work.
+long-lived workload that repeatedly reuses many distinct plans.
+Use an explicit low stream count only when reducing peak device memory is more
+important than adaptive mixed-workload throughput.
 For a GetNative graph containing tens of thousands of candidate frames, also
 set a finite VapourSynth cache before constructing the graph, for example
 `core.max_cache_size = 512`. VapourSynth's default can otherwise retain several
