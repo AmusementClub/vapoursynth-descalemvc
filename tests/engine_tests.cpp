@@ -440,6 +440,14 @@ void test_backend_selection() {
     require(rejected != dsmvc::cuda_available(),
             "CUDA resolution disagrees with runtime availability");
     const auto capabilities = dsmvc::backend_capabilities();
+    const auto metal = std::find_if(
+        capabilities.begin(), capabilities.end(), [](const auto &capability) {
+            return capability.kind == dsmvc::BackendKind::metal;
+        });
+    require(metal != capabilities.end(), "Metal capability is missing");
+    require(metal->compiled == dsmvc::metal_compiled()
+                && metal->device_available == dsmvc::metal_available(),
+            "Metal capability reporting is inconsistent");
     const auto cuda = std::find_if(
         capabilities.begin(), capabilities.end(), [](const auto &capability) {
             return capability.kind == dsmvc::BackendKind::cuda;

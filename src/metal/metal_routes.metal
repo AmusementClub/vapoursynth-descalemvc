@@ -1,3 +1,4 @@
+// Shared production kernels for the plugin and standalone diagnostics.
 #include <metal_stdlib>
 
 using namespace metal;
@@ -19,6 +20,18 @@ struct AxisJob {
     uint input_frame_stride;
     uint output_frame_stride;
     uint reserved_2;
+};
+
+struct AxisBatchJob {
+    AxisJob axis;
+    uint input_offset;
+    uint output_offset;
+    uint transpose_offsets_offset;
+    uint transpose_indices_offset;
+    uint transpose_weights_offset;
+    uint lower_ld_offset;
+    uint upper_l_offset;
+    uint inverse_diagonal_offset;
 };
 
 struct IntegerConversion {
@@ -213,14 +226,18 @@ static inline void inverse_axis_impl(
         const uint end = transpose_offsets[i + 1u];
         for (uint entry = begin; entry < end; ++entry) {
             const uint source_axis = uint(transpose_indices[entry]);
-            sum += transpose_weights[entry]
-                * source[image_index(job.direction, vector, source_axis,
-                                     job.input_stride)];
+            sum = fma(
+                transpose_weights[entry],
+                source[image_index(job.direction, vector, source_axis,
+                                   job.input_stride)],
+                sum);
         }
         const uint available = min(half_bandwidth, i);
         for (uint distance = available; distance >= 1u; --distance) {
-            sum -= lower_ld[(distance - 1u) * job.destination_size + i]
-                * output[output_base + (i - distance) * output_step];
+            sum = fma(
+                -lower_ld[(distance - 1u) * job.destination_size + i],
+                output[output_base + (i - distance) * output_step],
+                sum);
         }
         output[output_base + i * output_step] =
             sum * inverse_diagonal[i];
@@ -228,21 +245,26 @@ static inline void inverse_axis_impl(
 
     if (job.destination_size < 2u) return;
     for (uint i = job.destination_size - 1u; i-- > 0u;) {
-        float sum = 0.0f;
+        const uint output_index = output_base + i * output_step;
+        float value = output[output_index];
         const uint available = min(
             half_bandwidth, job.destination_size - i - 1u);
         if (half_bandwidth == 3u) {
             for (uint distance = 1u; distance <= available; ++distance) {
-                sum += upper_l[(distance - 1u) * job.destination_size + i]
-                    * output[output_base + (i + distance) * output_step];
+                value = fma(
+                    -upper_l[(distance - 1u) * job.destination_size + i],
+                    output[output_base + (i + distance) * output_step],
+                    value);
             }
         } else {
             for (uint distance = available; distance >= 1u; --distance) {
-                sum += upper_l[(distance - 1u) * job.destination_size + i]
-                    * output[output_base + (i + distance) * output_step];
+                value = fma(
+                    -upper_l[(distance - 1u) * job.destination_size + i],
+                    output[output_base + (i + distance) * output_step],
+                    value);
             }
         }
-        output[output_base + i * output_step] -= sum;
+        output[output_index] = value;
     }
 }
 
@@ -286,6 +308,57 @@ DEFINE_INVERSE_AXIS_WIDE(inverse_axis_h5, 5u)
 DEFINE_INVERSE_AXIS_WIDE(inverse_axis_h7, 7u)
 DEFINE_INVERSE_AXIS(inverse_axis_generic, 0u)
 
+#define DEFINE_INVERSE_AXIS_BATCH(NAME, HALF_BANDWIDTH) \
+kernel void NAME( \
+    device const float *source [[buffer(0)]], \
+    constant AxisBatchJob *jobs [[buffer(1)]], \
+    device const uint *transpose_offsets [[buffer(2)]], \
+    device const int *transpose_indices [[buffer(3)]], \
+    device const float *transpose_weights [[buffer(4)]], \
+    device const float *lower_ld [[buffer(5)]], \
+    device const float *upper_l [[buffer(6)]], \
+    device const float *inverse_diagonal [[buffer(7)]], \
+    device float *output [[buffer(8)]], \
+    uint2 position [[thread_position_in_grid]]) { \
+    constant AxisBatchJob &batch = jobs[position.y]; \
+    inverse_axis_impl(source + batch.input_offset, batch.axis, \
+        transpose_offsets + batch.transpose_offsets_offset, \
+        transpose_indices + batch.transpose_indices_offset, \
+        transpose_weights + batch.transpose_weights_offset, \
+        lower_ld + batch.lower_ld_offset, upper_l + batch.upper_l_offset, \
+        inverse_diagonal + batch.inverse_diagonal_offset, \
+        output + batch.output_offset, position.x, HALF_BANDWIDTH); \
+}
+
+#define DEFINE_INVERSE_AXIS_BATCH_WIDE(NAME, HALF_BANDWIDTH) \
+kernel void NAME( \
+    device const float *source [[buffer(0)]], \
+    constant AxisBatchJob *jobs [[buffer(1)]], \
+    device const uint *transpose_offsets [[buffer(2)]], \
+    device const int *transpose_indices [[buffer(3)]], \
+    device const float *transpose_weights [[buffer(4)]], \
+    device const float *lower_ld [[buffer(5)]], \
+    device const float *upper_l [[buffer(6)]], \
+    device const float *inverse_diagonal [[buffer(7)]], \
+    device float *output [[buffer(8)]], \
+    uint2 position [[thread_position_in_grid]]) { \
+    constant AxisBatchJob &batch = jobs[position.y]; \
+    inverse_axis_fixed_wide_impl<HALF_BANDWIDTH>( \
+        source + batch.input_offset, batch.axis, \
+        transpose_offsets + batch.transpose_offsets_offset, \
+        transpose_indices + batch.transpose_indices_offset, \
+        transpose_weights + batch.transpose_weights_offset, \
+        lower_ld + batch.lower_ld_offset, upper_l + batch.upper_l_offset, \
+        inverse_diagonal + batch.inverse_diagonal_offset, \
+        output + batch.output_offset, position.x); \
+}
+
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_h1, 1u)
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_h3, 3u)
+DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_batch_h5, 5u)
+DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_batch_h7, 7u)
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_generic, 0u)
+
 template <typename Sample>
 static inline void inverse_axis_integer_input_impl(
     device const Sample *source,
@@ -326,12 +399,14 @@ static inline void inverse_axis_integer_input_impl(
                             job.input_stride)]);
             const float normalized =
                 (sample - conversion.input_offset) * conversion.input_scale;
-            sum += transpose_weights[entry] * normalized;
+            sum = fma(transpose_weights[entry], normalized, sum);
         }
         const uint available = min(half_bandwidth, i);
         for (uint distance = available; distance >= 1u; --distance) {
-            sum -= lower_ld[(distance - 1u) * job.destination_size + i]
-                * output[output_base + (i - distance) * output_step];
+            sum = fma(
+                -lower_ld[(distance - 1u) * job.destination_size + i],
+                output[output_base + (i - distance) * output_step],
+                sum);
         }
         output[output_base + i * output_step] =
             sum * inverse_diagonal[i];
@@ -339,21 +414,26 @@ static inline void inverse_axis_integer_input_impl(
 
     if (job.destination_size < 2u) return;
     for (uint i = job.destination_size - 1u; i-- > 0u;) {
-        float sum = 0.0f;
+        const uint output_index = output_base + i * output_step;
+        float value = output[output_index];
         const uint available = min(
             half_bandwidth, job.destination_size - i - 1u);
         if (half_bandwidth == 3u) {
             for (uint distance = 1u; distance <= available; ++distance) {
-                sum += upper_l[(distance - 1u) * job.destination_size + i]
-                    * output[output_base + (i + distance) * output_step];
+                value = fma(
+                    -upper_l[(distance - 1u) * job.destination_size + i],
+                    output[output_base + (i + distance) * output_step],
+                    value);
             }
         } else {
             for (uint distance = available; distance >= 1u; --distance) {
-                sum += upper_l[(distance - 1u) * job.destination_size + i]
-                    * output[output_base + (i + distance) * output_step];
+                value = fma(
+                    -upper_l[(distance - 1u) * job.destination_size + i],
+                    output[output_base + (i + distance) * output_step],
+                    value);
             }
         }
-        output[output_base + i * output_step] -= sum;
+        output[output_index] = value;
     }
 }
 

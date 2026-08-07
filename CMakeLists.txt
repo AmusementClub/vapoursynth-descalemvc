@@ -24,8 +24,6 @@ set(DSMVC_CUDA_ARCHITECTURES
 set(DSMVC_CUDA_PTX_ARCHITECTURES "75;121" CACHE STRING
     "Virtual compute targets embedded as CUDA PTX fallbacks")
 option(DSMVC_BUILD_BENCHMARKS "Build the fixed-recipe CPU benchmark" OFF)
-option(DSMVC_BUILD_METAL_EXPERIMENTS
-    "Build the experimental Apple Silicon Metal backend" OFF)
 
 set(DSMVC_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
@@ -37,6 +35,25 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     list(GET CMAKE_OSX_ARCHITECTURES 0 DSMVC_TARGET_PROCESSOR)
 endif()
 string(TOLOWER "${DSMVC_TARGET_PROCESSOR}" DSMVC_TARGET_PROCESSOR)
+
+set(_dsmvc_metal_default OFF)
+if(APPLE AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    set(_dsmvc_metal_default ON)
+endif()
+if(DEFINED CACHE{DSMVC_BUILD_METAL_EXPERIMENTS})
+    set(_dsmvc_legacy_metal_option_defined ON)
+else()
+    set(_dsmvc_legacy_metal_option_defined OFF)
+endif()
+option(DSMVC_ENABLE_METAL
+    "Build the Apple Silicon UMA Metal backend" ${_dsmvc_metal_default})
+option(DSMVC_BUILD_METAL_EXPERIMENTS
+    "Deprecated alias for DSMVC_ENABLE_METAL" ${DSMVC_ENABLE_METAL})
+if(_dsmvc_legacy_metal_option_defined)
+    set(DSMVC_ENABLE_METAL ${DSMVC_BUILD_METAL_EXPERIMENTS})
+else()
+    set(DSMVC_BUILD_METAL_EXPERIMENTS ${DSMVC_ENABLE_METAL})
+endif()
 
 if(APPLE AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
     add_compile_options(
@@ -295,6 +312,24 @@ if(BUILD_TESTING)
         )
         set_tests_properties(dsmvc_vs_integration PROPERTIES TIMEOUT 60)
     endif()
+    if(DSMVC_VS_PYTHON AND NOT DSMVC_ENABLE_METAL)
+        add_test(
+            NAME dsmvc_vs_api4_smoke
+            COMMAND "${DSMVC_VS_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/vs_metal_integration.py"
+                --plugin "$<TARGET_FILE:dsmvc>"
+                --expect-metal disabled)
+        set_tests_properties(dsmvc_vs_api4_smoke PROPERTIES TIMEOUT 60)
+    endif()
+    if(DSMVC_ENABLE_METAL AND DSMVC_VS_PYTHON)
+        add_test(
+            NAME dsmvc_vs_metal_integration
+            COMMAND "${DSMVC_VS_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/vs_metal_integration.py"
+                --plugin "$<TARGET_FILE:dsmvc>"
+                --expect-metal enabled)
+        set_tests_properties(dsmvc_vs_metal_integration PROPERTIES TIMEOUT 300)
+    endif()
 endif()
 
 if(DSMVC_BUILD_BENCHMARKS)
@@ -313,10 +348,10 @@ if(DSMVC_BUILD_BENCHMARKS)
     endif()
 endif()
 
-if(DSMVC_BUILD_METAL_EXPERIMENTS)
+if(DSMVC_ENABLE_METAL)
     if(NOT APPLE OR NOT DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
         message(FATAL_ERROR
-            "DSMVC_BUILD_METAL_EXPERIMENTS requires a native Apple ARM64 build")
+            "DSMVC_ENABLE_METAL requires a native Apple ARM64 build")
     endif()
 
     find_program(DSMVC_XCRUN xcrun REQUIRED)
@@ -331,7 +366,7 @@ if(DSMVC_BUILD_METAL_EXPERIMENTS)
     if(NOT DSMVC_METAL_COMPILER_RESULT EQUAL 0
        OR NOT DSMVC_METALLIB_RESULT EQUAL 0)
         message(FATAL_ERROR
-            "DSMVC_BUILD_METAL_EXPERIMENTS requires the Xcode Metal toolchain")
+            "DSMVC_ENABLE_METAL requires the Xcode Metal toolchain")
     endif()
 
     enable_language(OBJCXX)
@@ -353,9 +388,9 @@ if(DSMVC_BUILD_METAL_EXPERIMENTS)
                 "${DSMVC_METAL_GENERATED_DIR}"
         COMMAND "${DSMVC_XCRUN}" -sdk macosx metal
                 -Werror -fno-fast-math -ffp-contract=off
-                -c "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/metal_routes.metal"
+                -c "${CMAKE_CURRENT_SOURCE_DIR}/src/metal/metal_routes.metal"
                 -o "${DSMVC_METAL_AIR}"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/metal_routes.metal"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/metal/metal_routes.metal"
         VERBATIM)
     add_custom_command(
         OUTPUT "${DSMVC_METALLIB}"
@@ -375,20 +410,49 @@ if(DSMVC_BUILD_METAL_EXPERIMENTS)
         VERBATIM)
 
     target_sources(dsmvc PRIVATE
-        src/hybrid_batch_coordinator.cpp
-        src/metal_float_executor_apple.mm
-        src/metal_yuv_executor_apple.mm
+        src/metal_scheduler_apple.mm
         "${DSMVC_METALLIB_HEADER}")
+    target_sources(dsmvc_engine PRIVATE src/metal_device_apple.mm)
     target_include_directories(dsmvc PRIVATE "${DSMVC_METAL_GENERATED_DIR}")
-    target_compile_definitions(dsmvc PRIVATE
-        DSMVC_HAS_EXPERIMENTAL_METAL=1)
+    target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_METAL=1)
+    target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_METAL=1)
     set_source_files_properties(
-        src/metal_float_executor_apple.mm
-        src/metal_yuv_executor_apple.mm
+        src/metal_scheduler_apple.mm src/metal_device_apple.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(dsmvc_engine PRIVATE
+        "${DSMVC_METAL_FRAMEWORK}"
+        "${DSMVC_FOUNDATION_FRAMEWORK}")
     target_link_libraries(dsmvc PRIVATE
         "${DSMVC_METAL_FRAMEWORK}"
         "${DSMVC_FOUNDATION_FRAMEWORK}")
+
+    if(DSMVC_BUILD_BENCHMARKS)
+        add_executable(dsmvc_metal_route_benchmark
+            benchmarks/metal_route_benchmark.mm
+            "${DSMVC_METALLIB_HEADER}")
+        target_compile_features(dsmvc_metal_route_benchmark PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_metal_route_benchmark PRIVATE
+            "${DSMVC_METAL_GENERATED_DIR}")
+        target_compile_options(dsmvc_metal_route_benchmark PRIVATE
+            -fobjc-arc -Wall -Wextra -Wpedantic -ffp-contract=off)
+        target_link_libraries(dsmvc_metal_route_benchmark PRIVATE
+            dsmvc_engine
+            "${DSMVC_METAL_FRAMEWORK}"
+            "${DSMVC_FOUNDATION_FRAMEWORK}")
+
+        add_executable(dsmvc_metal_yuv_benchmark
+            benchmarks/metal_yuv_benchmark.mm
+            "${DSMVC_METALLIB_HEADER}")
+        target_compile_features(dsmvc_metal_yuv_benchmark PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_metal_yuv_benchmark PRIVATE
+            "${DSMVC_METAL_GENERATED_DIR}")
+        target_compile_options(dsmvc_metal_yuv_benchmark PRIVATE
+            -fobjc-arc -Wall -Wextra -Wpedantic -ffp-contract=off)
+        target_link_libraries(dsmvc_metal_yuv_benchmark PRIVATE
+            dsmvc_engine
+            "${DSMVC_METAL_FRAMEWORK}"
+            "${DSMVC_FOUNDATION_FRAMEWORK}")
+    endif()
 
     if(BUILD_TESTING)
         add_executable(dsmvc_hybrid_batch_coordinator_tests
@@ -411,5 +475,23 @@ if(DSMVC_BUILD_METAL_EXPERIMENTS)
             -Wall -Wextra -Wpedantic -Werror)
         add_test(NAME dsmvc_metal_yuv_staging_tests
             COMMAND dsmvc_metal_yuv_staging_tests)
+
+        add_executable(dsmvc_metal_scheduler_tests
+            tests/metal_scheduler_tests.cpp
+            src/metal_scheduler_apple.mm
+            "${DSMVC_METALLIB_HEADER}")
+        target_compile_features(dsmvc_metal_scheduler_tests PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_metal_scheduler_tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${DSMVC_METAL_GENERATED_DIR}")
+        target_compile_options(dsmvc_metal_scheduler_tests PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -ffp-contract=off)
+        target_link_libraries(dsmvc_metal_scheduler_tests PRIVATE
+            dsmvc_engine
+            "${DSMVC_METAL_FRAMEWORK}"
+            "${DSMVC_FOUNDATION_FRAMEWORK}")
+        add_test(NAME dsmvc_metal_scheduler_tests
+            COMMAND dsmvc_metal_scheduler_tests)
+        set_tests_properties(dsmvc_metal_scheduler_tests PROPERTIES TIMEOUT 60)
     endif()
 endif()

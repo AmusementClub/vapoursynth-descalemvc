@@ -138,6 +138,8 @@ inline void inverse_axis_f32(const AxisPlan &plan,
 [[nodiscard]] bool cpu_avx2_available() noexcept;
 [[nodiscard]] bool cpu_neon_compiled() noexcept;
 [[nodiscard]] bool cpu_neon_available() noexcept;
+[[nodiscard]] bool metal_compiled() noexcept;
+[[nodiscard]] bool metal_available() noexcept;
 [[nodiscard]] bool cuda_compiled() noexcept;
 [[nodiscard]] bool cuda_available() noexcept;
 
