@@ -36,6 +36,9 @@ GETFNATIVE_SCALERS = [
 ]
 GETFNATIVE_V2_SCALERS = GETFNATIVE_SCALERS[:6] + [
     scaler("spline16"), scaler("spline36")]
+STRATIFIED_GETFNATIVE_SCALERS = [
+    GETFNATIVE_SCALERS[index] for index in (0, 2, 7, 10)
+]
 SELECTKERNEL_PARAMETERS = repeated_arange(0, 1, 0.1)[:10]
 SELECTKERNEL_SCALERS = [scaler("bilinear")] + [
     scaler("bicubic", b, c)
@@ -59,14 +62,30 @@ FUNCTIONS = {
 
 def candidates(case, profile):
     if case == "getfnative":
-        heights = (repeated_arange(700.0, 980.0, 0.1)
-                   if profile == "full" else SMOKE_HEIGHTS[case])
-        scalers = GETFNATIVE_SCALERS
+        if profile == "full":
+            heights = repeated_arange(700.0, 980.0, 0.1)
+            scalers = GETFNATIVE_SCALERS
+        elif profile == "stratified256":
+            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            heights = [
+                full_heights[(2 * index + 1) * len(full_heights) // 128]
+                for index in range(64)
+            ]
+            scalers = STRATIFIED_GETFNATIVE_SCALERS
+        else:
+            heights = SMOKE_HEIGHTS[case]
+            scalers = GETFNATIVE_SCALERS
     elif case == "getfnative_v2":
+        if profile == "stratified256":
+            raise ValueError(
+                "the stratified256 profile is defined only for getfnative")
         heights = (repeated_arange(840.0, 880.0, 0.1)
                    if profile == "full" else SMOKE_HEIGHTS[case])
         scalers = GETFNATIVE_V2_SCALERS
     elif case == "selectkernel":
+        if profile == "stratified256":
+            raise ValueError(
+                "the stratified256 profile is defined only for getfnative")
         heights = [719.8]
         scalers = SELECTKERNEL_SCALERS
     else:
@@ -126,6 +145,8 @@ def build_descale(source, scaler_spec, height, vertical_only):
         kwargs["taps"] = scaler_spec["taps"]
     if implementation == "new":
         kwargs["backend"] = backend
+        if opt:
+            kwargs["opt"] = opt
     return getattr(namespace, FUNCTIONS[scaler_spec["kernel"]])(
         source, **kwargs), arguments
 
@@ -187,6 +208,7 @@ def statistics_segment(source, scaler_spec, heights, vertical_only, ex_thr):
 core = vs.core
 core.num_threads = int(threads)
 backend = globals().get("backend", "cpu")
+opt = int(globals().get("opt", "0") or 0)
 cache_mb = int(globals().get("cache_mb", "512") or 512)
 if cache_mb < 16:
     raise ValueError("cache_mb must be at least 16")

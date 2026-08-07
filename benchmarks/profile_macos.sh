@@ -53,8 +53,8 @@ if ! xcrun xctrace list templates | grep -Fxq 'Time Profiler'; then
 fi
 
 vapoursynth_sdk="${DSMVC_VAPOURSYNTH_SDK:-/tmp/dsmvc-vs-r57.LcaRcH/vapoursynth}"
-if [[ ! -f "$vapoursynth_sdk/include/VapourSynth.h" ]]; then
-    printf 'VapourSynth API3 headers not found under %s\n' "$vapoursynth_sdk" >&2
+if [[ ! -f "$vapoursynth_sdk/include/VapourSynth4.h" ]]; then
+    printf 'VapourSynth API4 headers not found under %s\n' "$vapoursynth_sdk" >&2
     exit 2
 fi
 

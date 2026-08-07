@@ -135,6 +135,7 @@ def build_command(options, kernel: str, implementation: str,
         "frames": str(frames),
         "threads": str(threads),
         "backend": options.backend,
+        "opt": str(options.opt),
         "src_height": str(options.src_height),
         "base_height": str(options.base_height),
     }
@@ -177,6 +178,8 @@ def run_sample(options, kernel: str, implementation: str,
         "frames": frames,
         "threads": threads,
         "requests": threads,
+        "backend": options.backend if implementation == "new" else "baseline",
+        "opt": options.opt if implementation == "new" else 0,
         "elapsed_seconds": elapsed_seconds,
         "fps": frames / elapsed_seconds,
         "vspipe_seconds": vspipe_timing["seconds"],
@@ -353,7 +356,10 @@ def main() -> int:
     parser.add_argument("--warmup-frames", type=int, default=256,
                         help="Frames in each warm-up run; 0 disables warm-up.")
     parser.add_argument("--backend",
-                        choices=("auto", "cpu", "cuda"), default="cpu")
+                        choices=("auto", "cpu", "metal", "cuda"),
+                        default="cpu")
+    parser.add_argument("--opt", choices=(0, 1, 2), type=int, default=0,
+                        help="Optional dsmvc CPU path selector; 0 uses default.")
     parser.add_argument("--kernels", nargs="*", choices=tuple(KERNELS),
                         default=list(KERNELS))
     options = parser.parse_args()
@@ -425,6 +431,7 @@ def main() -> int:
         "warmup_runs": options.warmup_runs,
         "warmup_frames": options.warmup_frames,
         "backend": options.backend,
+        "opt": options.opt,
         "kernels": options.kernels,
         "implementations": list(options.implementations),
         "runner_sha256": sha256_file(Path(__file__).resolve()),

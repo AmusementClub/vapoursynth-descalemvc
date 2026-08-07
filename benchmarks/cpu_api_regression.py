@@ -35,6 +35,7 @@ def sample_options(options, variant: str):
         old_plugin=options.api3_plugin,
         vspipe=options.vspipe,
         backend="cpu",
+        opt=0,
         src_height=options.src_height,
         base_height=options.base_height,
     )
@@ -293,7 +294,7 @@ def main() -> int:
         f"{options.output}: {len(regressions)}/{len(summary)} cells "
         "exceeded the regression threshold",
         flush=True)
-    return 0
+    return 1 if regressions else 0
 
 
 if __name__ == "__main__":

@@ -255,8 +255,16 @@ def write_scaling_svg(cases: list[dict], kernels: list[dict],
     width = margin_x * 2 + columns * panel_width
     height = margin_y + rows * panel_height + 28
     threads = sorted({item["threads"] for item in cases})
-    colors = {"old": "#64748b", "new": "#dc2626"}
-    labels = {"old": "old descale", "new": "current dsmvc"}
+    colors = {
+        "old": "#64748b",
+        "new": "#dc2626",
+        "newmetal": "#0f766e",
+    }
+    labels = {
+        "old": "old descale",
+        "new": "new CPU",
+        "newmetal": "new Metal (1692x952)",
+    }
     legend = " / ".join(labels[item] for item in implementations)
     frames = cases[0].get("frames", "") if cases else ""
     frame_label = f"{frames} source frames; " if frames else ""
@@ -269,15 +277,17 @@ def write_scaling_svg(cases: list[dict], kernels: list[dict],
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
         f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" '
         'font-family="sans-serif" font-size="22" font-weight="700" fill="#111827">'
-        'Fixed kernel scaling at 810p</text>',
+        + ('Fixed kernel scaling at 810p</text>'
+           if "newmetal" not in implementations else
+           'Fixed kernel scaling (CPU 810p; Metal 1692x952)</text>'),
         f'<text x="{width / 2:.1f}" y="52" text-anchor="middle" '
         'font-family="sans-serif" font-size="13" fill="#4b5563">'
         f'{frame_label}FPS is external VSPipe wall-clock throughput</text>',
     ]
-    legend_width = 120 * len(implementations)
+    legend_width = 170 * len(implementations)
     legend_start = width / 2 - legend_width / 2
     for index, implementation in enumerate(implementations):
-        center = legend_start + index * 120 + 60
+        center = legend_start + index * 170 + 85
         color = colors[implementation]
         parts.extend([
             f'<line x1="{center - 45:.1f}" y1="72" x2="{center - 15:.1f}" y2="72" stroke="{color}" stroke-width="3"/>',
@@ -297,6 +307,7 @@ def write_scaling_svg(cases: list[dict], kernels: list[dict],
             by_key[(kernel["name"], thread)][implementation]["fps"]["median"]
             for thread in threads
             for implementation in implementations
+            if by_key[(kernel["name"], thread)][implementation]["fps"]["median"] is not None
         ]
         y_max = max(values) * 1.12 if values else 1.0
         if y_max <= 0:
@@ -331,11 +342,14 @@ def write_scaling_svg(cases: list[dict], kernels: list[dict],
             points = []
             for x, thread in zip(x_positions, threads):
                 value = by_key[(kernel["name"], thread)][implementation]["fps"]["median"]
+                if value is None:
+                    continue
                 y = plot_bottom - value / y_max * (plot_bottom - plot_top)
                 points.append((x, y))
-            parts.append(
-                f'<polyline points="{svg_polyline(points)}" fill="none" '
-                f'stroke="{color}" stroke-width="2.5"/>')
+            if len(points) >= 2:
+                parts.append(
+                    f'<polyline points="{svg_polyline(points)}" fill="none" '
+                    f'stroke="{color}" stroke-width="2.5"/>')
             for x, y in points:
                 parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3.2" fill="{color}"/>')
         parts.append('</g>')
@@ -543,7 +557,8 @@ def main() -> int:
     parser.add_argument("--warmup-frames", type=int, default=256,
                         help="Frames in each warm-up run; 0 disables warm-up.")
     parser.add_argument("--backend",
-                        choices=("auto", "cpu", "cuda"), default="cpu")
+                        choices=("auto", "cpu", "metal", "cuda"),
+                        default="cpu")
     parser.add_argument("--implementations", nargs="+", choices=IMPLEMENTATIONS,
                         default=list(IMPLEMENTATIONS))
     parser.add_argument("--kernels", nargs="*",

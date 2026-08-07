@@ -37,6 +37,7 @@ def fixed_geometry(width, height, native_height, base_height):
 core = vs.core
 core.num_threads = int(threads)
 backend = globals().get("backend", "cpu")
+opt = int(globals().get("opt", "0") or 0)
 sample_format_name = globals().get("sample_format", "GRAYS")
 sample_formats = {
     "GRAY8": vs.GRAY8,
@@ -70,5 +71,7 @@ elif kernel.startswith("lanczos"):
     arguments["taps"] = int(kernel.removeprefix("lanczos"))
 if implementation == "new":
     arguments["backend"] = backend
+    if opt:
+        arguments["opt"] = opt
 output = getattr(namespace, FUNCTIONS[kernel])(source, **arguments)
 output.set_output(0)

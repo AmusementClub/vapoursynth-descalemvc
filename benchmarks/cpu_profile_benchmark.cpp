@@ -35,7 +35,7 @@ constexpr double horizontal_active_length = 1691.5555555555557;
 constexpr double horizontal_shift = 0.2222222222221717;
 constexpr double vertical_active_length = 951.5;
 constexpr double vertical_shift = 0.25;
-constexpr double absolute_error_limit = 2.0e-5;
+constexpr double absolute_error_limit = 1.5e-6;
 constexpr double relative_error_limit = 1.0e-3;
 constexpr double relative_mad_limit = 0.10;
 

@@ -27,6 +27,7 @@ from pathlib import Path
 
 
 CASES = ("getfnative", "getfnative_v2", "selectkernel")
+PROFILES = ("smoke", "stratified256", "full")
 IMPLEMENTATIONS = ("old", "new")
 SCRIPT_CASES = {
     "getfnative": "test_getfnative.vpy",
@@ -81,6 +82,9 @@ GETFNATIVE_SCALERS = [
 ]
 GETFNATIVE_V2_SCALERS = GETFNATIVE_SCALERS[:6] + [
     scaler("spline16"), scaler("spline36")]
+STRATIFIED_GETFNATIVE_SCALERS = [
+    GETFNATIVE_SCALERS[index] for index in (0, 2, 7, 10)
+]
 SELECTKERNEL_PARAMETERS = repeated_arange(0, 1, 0.1)[:10]
 SELECTKERNEL_SCALERS = [scaler("bilinear")] + [
     scaler("bicubic", b, c)
@@ -156,14 +160,30 @@ def file_info(path: Path) -> dict:
 def recipe_candidates(case: str, profile: str) -> list[dict]:
     facts = RECIPE_FACTS[case]
     if case == "getfnative":
-        heights = (repeated_arange(700.0, 980.0, 0.1)
-                   if profile == "full" else SMOKE_HEIGHTS[case])
-        scalers = GETFNATIVE_SCALERS
+        if profile == "full":
+            heights = repeated_arange(700.0, 980.0, 0.1)
+            scalers = GETFNATIVE_SCALERS
+        elif profile == "stratified256":
+            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            heights = [
+                full_heights[(2 * index + 1) * len(full_heights) // 128]
+                for index in range(64)
+            ]
+            scalers = STRATIFIED_GETFNATIVE_SCALERS
+        else:
+            heights = SMOKE_HEIGHTS[case]
+            scalers = GETFNATIVE_SCALERS
     elif case == "getfnative_v2":
+        if profile == "stratified256":
+            raise ValueError(
+                "the stratified256 profile is defined only for getfnative")
         heights = (repeated_arange(840.0, 880.0, 0.1)
                    if profile == "full" else SMOKE_HEIGHTS[case])
         scalers = GETFNATIVE_V2_SCALERS
     else:
+        if profile == "stratified256":
+            raise ValueError(
+                "the stratified256 profile is defined only for getfnative")
         heights = [facts["fixed_height"]]
         scalers = SELECTKERNEL_SCALERS
     candidates = []
@@ -386,6 +406,7 @@ def run_vspipe(options, case: str, implementation: str, run: int,
         "frame": str(RECIPE_FACTS[case]["frame"]),
         "threads": str(options.threads),
         "backend": options.backend,
+        "opt": str(options.opt),
         "cache_mb": str(options.performance_cache_mb),
         "candidate_start": str(candidate_start),
         "candidate_end": str(candidate_end),
@@ -423,6 +444,8 @@ def run_vspipe(options, case: str, implementation: str, run: int,
         "warmup": warmup,
         "requests": options.requests,
         "threads": options.threads,
+        "backend": options.backend if implementation == "new" else "baseline",
+        "opt": options.opt if implementation == "new" else 0,
         "elapsed_ns": elapsed_ns,
         "candidates_per_second": candidate_count / (elapsed_ns / 1e9),
         "command": command_text(command),
@@ -1247,7 +1270,7 @@ def parser() -> argparse.ArgumentParser:
         help="VapourSynth Python used by the error worker.")
     result.add_argument("--output", default=str(
         root / "benchmark-results" / "e2e-descale-mkv"))
-    result.add_argument("--profile", choices=("smoke", "full"),
+    result.add_argument("--profile", choices=PROFILES,
                         default="full")
     result.add_argument("--cases", nargs="+", choices=CASES,
                         default=list(CASES))
@@ -1258,8 +1281,11 @@ def parser() -> argparse.ArgumentParser:
                         help="Candidates in each warm-up run; 0 disables warm-up.")
     result.add_argument("--requests", type=int, default=32)
     result.add_argument("--threads", type=int, default=32)
-    result.add_argument("--backend", choices=("auto", "cpu", "cuda"),
-                        default="cpu")
+    result.add_argument(
+        "--backend", choices=("auto", "cpu", "metal", "cuda"),
+        default="cpu")
+    result.add_argument("--opt", choices=(0, 1, 2), type=int, default=0,
+                        help="Optional dsmvc CPU path selector; 0 uses default.")
     result.add_argument("--performance-batch-size", type=int, default=0,
                         help="Maximum candidates per isolated performance VSPipe process; 0 uses one graph.")
     result.add_argument("--performance-cache-mb", type=int, default=int(
@@ -1392,6 +1418,7 @@ def main(options) -> int:
         "requests": options.requests,
         "threads": options.threads,
         "backend": options.backend,
+        "opt": options.opt,
         "implementations": list(options.implementations),
         "error_processes": options.error_processes,
         "error_worker_threads": (
