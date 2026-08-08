@@ -80,24 +80,26 @@ without an Apple-model-specific `-mcpu` setting. CMake selects the NEON source
 only for AArch64 and the existing AVX2/FMA source only for x86-64; universal
 macOS builds must be produced as separate architecture builds.
 
-Experimental Metal support is off by default and is available only in a native
-Apple ARM64 build with the Xcode Metal toolchain:
+The Metal backend is enabled by default only for native Apple ARM64 builds with
+the Xcode Metal toolchain. Release packages set the backend and deployment
+target explicitly; the supported macOS baseline is 13.3:
 
 ```sh
 cmake -S . -B build-metal -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 \
   -DDSMVC_VAPOURSYNTH_SDK=/path/to/vapoursynth \
-  -DDSMVC_BUILD_METAL_EXPERIMENTS=ON \
+  -DDSMVC_ENABLE_METAL=ON \
   -DBUILD_TESTING=ON
 cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
 
-Non-Apple and default builds do not compile or link the Metal executor. The
-feature remains experimental: supported formats, geometry, device admission,
-batch sizes, and automatic routing are deliberately not expanded beyond the
-validated cases.
+Non-Apple builds do not compile or link the Metal executor. Pass
+`-DDSMVC_ENABLE_METAL=OFF` to produce a CPU-only Apple ARM64 build. Supported
+formats, geometry, device admission, batch sizes, and automatic routing remain
+limited to validated cases.
 
 The Release DLL is written to `build/Release/dsmvc.dll`. The build uses the
 static MSVC runtime so that an older runtime DLL bundled with a host cannot

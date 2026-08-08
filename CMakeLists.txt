@@ -244,6 +244,10 @@ target_compile_features(dsmvc PRIVATE cxx_std_23)
 target_include_directories(dsmvc PRIVATE "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}")
 target_link_libraries(dsmvc PRIVATE dsmvc_engine)
 set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
+if(APPLE)
+    target_link_options(dsmvc PRIVATE
+        "LINKER:-exported_symbol,_VapourSynthPluginInit2")
+endif()
 if(DSMVC_ENABLE_CUDA AND WIN32)
     target_sources(dsmvc PRIVATE "${_dsmvc_cuda_resource}")
     add_dependencies(dsmvc dsmvc_cuda_fatbin)
@@ -455,6 +459,15 @@ if(DSMVC_ENABLE_METAL)
     endif()
 
     if(BUILD_TESTING)
+        add_test(NAME dsmvc_metal_artifact_inventory
+            COMMAND "${CMAKE_COMMAND}"
+                "-DMETALLIB=${DSMVC_METALLIB}"
+                "-DEXPECTED_SYMBOLS=${CMAKE_CURRENT_SOURCE_DIR}/cmake/metal_entrypoints.txt"
+                "-DXCRUN=${DSMVC_XCRUN}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_metal_metallib.cmake")
+        set_tests_properties(
+            dsmvc_metal_artifact_inventory PROPERTIES TIMEOUT 30)
+
         add_executable(dsmvc_hybrid_batch_coordinator_tests
             tests/hybrid_batch_coordinator_tests.cpp
             src/hybrid_batch_coordinator.cpp)
