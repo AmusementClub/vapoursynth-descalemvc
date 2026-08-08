@@ -36,12 +36,16 @@ GETFNATIVE_SCALERS = [
 ]
 GETFNATIVE_V2_SCALERS = GETFNATIVE_SCALERS[:6] + [
     scaler("spline16"), scaler("spline36")]
+STRATIFIED_GETFNATIVE_SCALERS = [
+    GETFNATIVE_SCALERS[index] for index in (0, 2, 7, 10)
+]
 SELECTKERNEL_PARAMETERS = repeated_arange(0, 1, 0.1)[:10]
 SELECTKERNEL_SCALERS = [scaler("bilinear")] + [
     scaler("bicubic", b, c)
     for b in SELECTKERNEL_PARAMETERS
     for c in SELECTKERNEL_PARAMETERS
 ]
+MINIMUM_AUTOMATIC_SOURCE_FRAMES = 64
 
 SMOKE_HEIGHTS = {
     "getfnative": [700.0, 719.8, 840.0, 900.0, 951.4, 951.5, 951.6, 979.9],
@@ -58,20 +62,47 @@ FUNCTIONS = {
 
 
 def candidates(case, profile):
+    repetitions = 1
     if case == "getfnative":
-        heights = (repeated_arange(700.0, 980.0, 0.1)
-                   if profile == "full" else SMOKE_HEIGHTS[case])
-        scalers = GETFNATIVE_SCALERS
+        if profile == "full":
+            heights = repeated_arange(700.0, 980.0, 0.1)
+            scalers = GETFNATIVE_SCALERS
+        elif profile == "stratified32x4":
+            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            heights = [
+                full_heights[(2 * index + 1) * len(full_heights) // 16]
+                for index in range(8)
+            ]
+            scalers = STRATIFIED_GETFNATIVE_SCALERS
+            repetitions = 4
+        elif profile == "stratified256":
+            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            heights = [
+                full_heights[(2 * index + 1) * len(full_heights) // 128]
+                for index in range(64)
+            ]
+            scalers = STRATIFIED_GETFNATIVE_SCALERS
+        else:
+            heights = SMOKE_HEIGHTS[case]
+            scalers = GETFNATIVE_SCALERS
     elif case == "getfnative_v2":
+        if profile in ("stratified32x4", "stratified256"):
+            raise ValueError(
+                "stratified profiles are defined only for getfnative")
         heights = (repeated_arange(840.0, 880.0, 0.1)
                    if profile == "full" else SMOKE_HEIGHTS[case])
         scalers = GETFNATIVE_V2_SCALERS
     elif case == "selectkernel":
+        if profile in ("stratified32x4", "stratified256"):
+            raise ValueError(
+                "stratified profiles are defined only for getfnative")
         heights = [719.8]
         scalers = SELECTKERNEL_SCALERS
     else:
         raise ValueError("unknown benchmark case: " + str(case))
-    return [(item, height) for item in scalers for height in heights]
+    return [(item, height)
+            for _ in range(repetitions)
+            for item in scalers for height in heights]
 
 
 def selected_candidates(case, profile, start, end):
@@ -126,6 +157,8 @@ def build_descale(source, scaler_spec, height, vertical_only):
         kwargs["taps"] = scaler_spec["taps"]
     if implementation == "new":
         kwargs["backend"] = backend
+        if opt:
+            kwargs["opt"] = opt
     return getattr(namespace, FUNCTIONS[scaler_spec["kernel"]])(
         source, **kwargs), arguments
 
@@ -173,13 +206,18 @@ def reconstruct(source, scaler_spec, height, vertical_only):
 
 
 def statistics_segment(source, scaler_spec, heights, vertical_only, ex_thr):
-    looped = core.std.Loop(source, times=len(heights))
+    shared_source = core.std.Loop(
+        source, times=max(MINIMUM_AUTOMATIC_SOURCE_FRAMES, len(heights)))
+    if shared_source.num_frames < MINIMUM_AUTOMATIC_SOURCE_FRAMES:
+        raise RuntimeError(
+            "GetFnative dsmvc source is shorter than automatic Metal admission")
+    driver = core.std.Trim(shared_source, 0, len(heights) - 1)
     reconstructed = core.std.FrameEval(
-        looped,
+        driver,
         lambda n: reconstruct(
-            looped, scaler_spec, heights[n], vertical_only))
+            shared_source, scaler_spec, heights[n], vertical_only))
     difference = core.std.Expr(
-        [looped, reconstructed],
+        [reconstructed, driver],
         [f"x y - abs dup {ex_thr:.17g} > swap 0 ?"])
     return core.std.CropRel(difference, 5, 5, 5, 5).std.PlaneStats()
 
@@ -187,6 +225,7 @@ def statistics_segment(source, scaler_spec, heights, vertical_only, ex_thr):
 core = vs.core
 core.num_threads = int(threads)
 backend = globals().get("backend", "cpu")
+opt = int(globals().get("opt", "0") or 0)
 cache_mb = int(globals().get("cache_mb", "512") or 512)
 if cache_mb < 16:
     raise ValueError("cache_mb must be at least 16")
@@ -250,7 +289,7 @@ elif case == "selectkernel":
         lambda n: reconstruct(
             looped, selected_scalers[n], 719.8, False))
     difference = core.std.Expr(
-        [looped, reconstructed], ["x y - abs dup 0.012 > swap 0 ?"])
+        [reconstructed, looped], ["x y - abs dup 0.012 > swap 0 ?"])
     output = core.std.CropRel(difference, 5, 5, 5, 5).std.PlaneStats()
 else:
     raise ValueError("unknown benchmark case: " + str(case))

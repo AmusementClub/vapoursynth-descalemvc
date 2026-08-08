@@ -273,11 +273,12 @@ read a second time by a separate conversion pass.
 
 ### 6.6 Memory-phase concurrency limiter
 
-The plugin uses a shared limiter for the memory-heavy phase. In `auto` mode its
-default limit is half the logical CPU count, clamped to the supported range;
-the limiter is enabled when the core request count exceeds that limit and the
-kernel is a wide adaptive 2D case. `DSMVC_MEMORY_CONCURRENCY` can explicitly
-override the limit for controlled experiments.
+The plugin uses a shared limiter for the memory-heavy phase. Its default limit
+is half the logical CPU count, clamped to the supported range, and applies only
+to fused-integer wide adaptive 2D cases whose core request count exceeds that
+limit. Float32 processing is not constrained by the default limiter. Setting
+`DSMVC_MEMORY_CONCURRENCY` explicitly applies the experimental override to all
+adaptive 2D formats and kernel widths; `0` disables the limiter.
 
 This is a concurrency limit, not CPU affinity or CCD binding. Its purpose is to
 avoid letting too many independent working sets evict one another at R32.

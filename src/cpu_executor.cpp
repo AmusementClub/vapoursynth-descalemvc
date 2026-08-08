@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -24,9 +26,146 @@
 #include <cpuid.h>
 #endif
 
+#if defined(DSMVC_HAS_NEON_OBJECT) && defined(_WIN32) && defined(_M_ARM64)
+#include <windows.h>
+#elif defined(DSMVC_HAS_NEON_OBJECT) && defined(__linux__) && defined(__aarch64__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#elif defined(DSMVC_HAS_NEON_OBJECT) && defined(__APPLE__) && defined(__aarch64__)
+#include <sys/sysctl.h>
+#endif
+
 namespace dsmvc {
 
 namespace {
+
+struct PackingCounters {
+    std::atomic<std::uint64_t> executions{0U};
+    std::atomic<std::uint64_t> waits{0U};
+    std::atomic<std::uint64_t> wait_nanoseconds{0U};
+    std::atomic<std::uint64_t> lazy_requests{0U};
+    std::atomic<std::uint64_t> lazy_hits{0U};
+    std::atomic<std::uint64_t> active{0U};
+    std::atomic<std::uint64_t> maximum_active{0U};
+
+    void begin_pack() noexcept {
+        executions.fetch_add(1U, std::memory_order_relaxed);
+        const auto current = active.fetch_add(1U, std::memory_order_relaxed) + 1U;
+        auto maximum = maximum_active.load(std::memory_order_relaxed);
+        while (maximum < current
+               && !maximum_active.compare_exchange_weak(
+                   maximum, current, std::memory_order_relaxed)) {}
+    }
+
+    void end_pack() noexcept {
+        active.fetch_sub(1U, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] CpuPlanPackingStats snapshot() const noexcept {
+        return {
+            executions.load(std::memory_order_relaxed),
+            waits.load(std::memory_order_relaxed),
+            wait_nanoseconds.load(std::memory_order_relaxed),
+            lazy_requests.load(std::memory_order_relaxed),
+            lazy_hits.load(std::memory_order_relaxed),
+            maximum_active.load(std::memory_order_relaxed),
+        };
+    }
+};
+
+class SharedPackedPlan final {
+public:
+    explicit SharedPackedPlan(std::shared_ptr<const AxisPlan> requested_axis,
+                              const AxisPlan *requested_identity = nullptr)
+        : axis_(std::move(requested_axis)),
+          identity_(requested_identity ? requested_identity : axis_.get()) {}
+
+    [[nodiscard]] const AxisPlan *identity() const noexcept { return identity_; }
+    [[nodiscard]] const std::shared_ptr<const AxisPlan> &axis() const noexcept {
+        return axis_;
+    }
+
+    [[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> get(
+        PackingCounters &counters, bool lazy) {
+        if (lazy) counters.lazy_requests.fetch_add(1U, std::memory_order_relaxed);
+        bool waited = false;
+        for (;;) {
+            std::unique_lock lock(mutex_);
+            if (packed_) {
+                if (lazy) {
+                    counters.lazy_hits.fetch_add(1U, std::memory_order_relaxed);
+                }
+                return packed_;
+            }
+            if (packing_) {
+                if (!waited) {
+                    counters.waits.fetch_add(1U, std::memory_order_relaxed);
+                    waited = true;
+                }
+                const auto started = std::chrono::steady_clock::now();
+                ready_.wait(lock, [&] { return !packing_; });
+                const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started).count();
+                counters.wait_nanoseconds.fetch_add(
+                    static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed, 0)),
+                    std::memory_order_relaxed);
+                continue;
+            }
+            packing_ = true;
+            lock.unlock();
+
+            counters.begin_pack();
+            try {
+                auto packed = std::make_shared<const detail::PackedCpuPlan>(
+                    detail::pack_cpu_plan(axis_, identity_));
+                counters.end_pack();
+                lock.lock();
+                packed_ = std::move(packed);
+                packing_ = false;
+                auto result = packed_;
+                lock.unlock();
+                ready_.notify_all();
+                return result;
+            } catch (...) {
+                counters.end_pack();
+                lock.lock();
+                packing_ = false;
+                lock.unlock();
+                ready_.notify_all();
+                throw;
+            }
+        }
+    }
+
+private:
+    std::shared_ptr<const AxisPlan> axis_;
+    const AxisPlan *identity_ = nullptr;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::shared_ptr<const detail::PackedCpuPlan> packed_;
+    bool packing_ = false;
+};
+
+[[nodiscard]] std::shared_ptr<SharedPackedPlan> shared_packed_plan(
+    const std::shared_ptr<const AxisPlan> &plan) {
+    static std::mutex mutex;
+    static std::unordered_map<const AxisPlan *, std::weak_ptr<SharedPackedPlan>> cache;
+    const std::scoped_lock lock(mutex);
+    if (const auto found = cache.find(plan.get()); found != cache.end()) {
+        if (auto entry = found->second.lock(); entry && entry->axis() == plan) {
+            return entry;
+        }
+        cache.erase(found);
+    }
+    auto entry = std::make_shared<SharedPackedPlan>(plan);
+    cache.emplace(plan.get(), entry);
+    if (cache.size() > 4096U) {
+        std::erase_if(cache, [](const auto &candidate) {
+            return candidate.second.expired();
+        });
+    }
+    return entry;
+}
 
 class WorkerPool {
     struct JobState {
@@ -133,13 +272,21 @@ private:
 };
 
 [[nodiscard]] std::size_t cpu_parallelism(CpuPath path) noexcept {
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    if (path != CpuPath::neon) return 1U;
+#else
     if (path != CpuPath::avx2) return 1U;
+#endif
     const auto hardware = std::max(std::thread::hardware_concurrency(), 1U);
     return std::min<std::size_t>(hardware, 4U);
 }
 
 [[nodiscard]] std::shared_ptr<WorkerPool> shared_worker_pool(CpuPath path) {
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    if (path != CpuPath::neon) return {};
+#else
     if (path != CpuPath::avx2) return {};
+#endif
     static auto pool = std::make_shared<WorkerPool>(cpu_parallelism(path));
     return pool;
 }
@@ -239,39 +386,115 @@ void backward_rhs_to_u16_avx2(
     std::int32_t columns, const IntegerConversion &conversion);
 #endif
 
+#if defined(DSMVC_HAS_NEON_OBJECT)
+void inverse_rows_neon(const AxisPlan &plan,
+                       const detail::PackedCpuPlan &packed,
+                       const float *input, std::ptrdiff_t input_row_stride,
+                       float *output, std::ptrdiff_t output_row_stride,
+                       std::int32_t row_count);
+void inverse_columns_neon(const AxisPlan &plan,
+                          const detail::PackedCpuPlan &packed,
+                          const float *input, std::ptrdiff_t input_row_stride,
+                          float *output, std::ptrdiff_t output_row_stride,
+                          std::int32_t column_count);
+void inverse_2d_u8_neon(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion);
+void inverse_2d_u16_neon(
+    const AxisPlan &horizontal,
+    const detail::PackedCpuPlan &packed_horizontal,
+    const AxisPlan &vertical,
+    const detail::PackedCpuPlan &packed_vertical,
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    const IntegerConversion &conversion);
+void normalize_u8_neon(
+    const std::uint8_t *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion);
+void normalize_u16_neon(
+    const std::uint16_t *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion);
+void convert_to_u8_neon(
+    const float *input, std::ptrdiff_t input_row_stride,
+    std::uint8_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion);
+void convert_to_u16_neon(
+    const float *input, std::ptrdiff_t input_row_stride,
+    std::uint16_t *output, std::ptrdiff_t output_row_stride,
+    std::int32_t rows, std::int32_t columns,
+    const IntegerConversion &conversion);
+#endif
+
 struct CpuExecutor::Impl {
     explicit Impl(CpuPath path)
         : workers(shared_worker_pool(path)) {}
 
     mutable std::mutex mutex;
-    mutable std::vector<std::shared_ptr<const detail::PackedCpuPlan>> plans;
+    struct RegisteredPlan {
+        std::shared_ptr<SharedPackedPlan> shared;
+        bool lazy = false;
+    };
+
+    mutable std::vector<RegisteredPlan> plans;
     mutable std::atomic<bool> sealed{false};
+    mutable PackingCounters packing;
     std::shared_ptr<WorkerPool> workers;
 
     [[nodiscard]] auto find(const AxisPlan &plan) const {
         return std::find_if(
             plans.begin(), plans.end(), [&plan](const auto &candidate) {
-                return candidate->identity == &plan;
+                return candidate.shared->identity() == &plan;
             });
+    }
+
+    [[nodiscard]] RegisteredPlan register_plan(
+        const std::shared_ptr<const AxisPlan> &plan, bool lazy) const {
+        const std::scoped_lock lock(mutex);
+        if (sealed.load(std::memory_order_relaxed)) {
+            throw std::logic_error("cannot add an axis to a sealed CPU plan cache");
+        }
+        const auto found = find(*plan);
+        if (found != plans.end()) {
+            if (!lazy) found->lazy = false;
+            return *found;
+        }
+        RegisteredPlan registered{shared_packed_plan(plan), lazy};
+        plans.push_back(registered);
+        return registered;
     }
 
     [[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> get(
         const AxisPlan &plan) const {
         if (sealed.load(std::memory_order_acquire)) {
             const auto found = find(plan);
-            if (found != plans.end()) return *found;
+            if (found != plans.end()) {
+                return found->shared->get(packing, found->lazy);
+            }
         } else {
             const std::scoped_lock lock(mutex);
             const auto found = find(plan);
-            if (found != plans.end()) return *found;
+            if (found != plans.end()) {
+                const auto registered = *found;
+                return registered.shared->get(packing, registered.lazy);
+            }
         }
 
         // Borrowed plans are intentionally invocation-local. The caller may
         // reassign or destroy one after this call, so its address is not a
         // stable cache key.
         auto owned = std::make_shared<const AxisPlan>(plan);
-        return std::make_shared<const detail::PackedCpuPlan>(
-            detail::pack_cpu_plan(std::move(owned), &plan));
+        auto borrowed = std::make_shared<SharedPackedPlan>(std::move(owned), &plan);
+        return borrowed->get(packing, false);
     }
 };
 
@@ -302,8 +525,13 @@ PackedCpuPlan pack_cpu_plan(
         packed.weights_right[static_cast<std::size_t>(row)] = last;
         packed.weights_columns = std::max(packed.weights_columns, last - first);
     }
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    const auto tail_block = plan.source_size >= 4 && (plan.source_size & 3)
+        ? plan.source_size - 4 : plan.source_size;
+#else
     const auto tail_block = plan.source_size >= 8 && (plan.source_size & 7)
         ? plan.source_size - 8 : plan.source_size;
+#endif
     for (std::int32_t row = 0; row < n; ++row) {
         const auto begin = plan.transpose_offsets[static_cast<std::size_t>(row)];
         const auto end = plan.transpose_offsets[static_cast<std::size_t>(row) + 1U];
@@ -311,8 +539,13 @@ PackedCpuPlan pack_cpu_plan(
         std::int32_t block_count = 0;
         for (auto offset = begin; offset < end; ++offset) {
             const auto source = plan.transpose_indices[offset];
+#if defined(DSMVC_HAS_NEON_OBJECT)
+            const auto block = source >= tail_block
+                ? tail_block : source & ~3;
+#else
             const auto block = source >= tail_block
                 ? tail_block : source & ~7;
+#endif
             if (block != previous_block) {
                 previous_block = block;
                 ++block_count;
@@ -380,31 +613,6 @@ PackedCpuPlan pack_cpu_plan(
 
 } // namespace detail
 
-namespace {
-
-[[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> acquire_packed_plan(
-    const std::shared_ptr<const AxisPlan> &plan) {
-    static std::mutex mutex;
-    static std::unordered_map<const AxisPlan *,
-                              std::weak_ptr<const detail::PackedCpuPlan>> cache;
-    const std::scoped_lock lock(mutex);
-    if (const auto found = cache.find(plan.get()); found != cache.end()) {
-        if (auto packed = found->second.lock(); packed && packed->axis == plan) {
-            return packed;
-        }
-        cache.erase(found);
-    }
-    auto packed = std::make_shared<const detail::PackedCpuPlan>(
-        detail::pack_cpu_plan(plan));
-    cache.emplace(plan.get(), packed);
-    if (cache.size() > 4096U) {
-        std::erase_if(cache, [](const auto &entry) { return entry.second.expired(); });
-    }
-    return packed;
-}
-
-} // namespace
-
 bool cpu_avx2_compiled() noexcept {
 #if defined(DSMVC_HAS_AVX2_OBJECT)
     return true;
@@ -432,13 +640,54 @@ bool cpu_avx2_available() noexcept {
 #endif
 }
 
+bool cpu_neon_compiled() noexcept {
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool cpu_neon_available() noexcept {
+#if defined(DSMVC_HAS_NEON_OBJECT) && defined(_WIN32) && defined(_M_ARM64)
+#if defined(PF_ARM_NEON_INSTRUCTIONS_AVAILABLE)
+    return IsProcessorFeaturePresent(PF_ARM_NEON_INSTRUCTIONS_AVAILABLE) != 0;
+#else
+    return true;
+#endif
+#elif defined(DSMVC_HAS_NEON_OBJECT) && defined(__linux__) && defined(__aarch64__)
+    return (getauxval(AT_HWCAP) & HWCAP_ASIMD) != 0U;
+#elif defined(DSMVC_HAS_NEON_OBJECT) && defined(__APPLE__) && defined(__aarch64__)
+    int available = 0;
+    std::size_t size = sizeof(available);
+    if (sysctlbyname("hw.optional.neon", &available, &size, nullptr, 0) == 0) {
+        return available != 0;
+    }
+    return true;
+#elif defined(DSMVC_HAS_NEON_OBJECT) \
+    && (defined(__aarch64__) || defined(_M_ARM64))
+    return true;
+#else
+    return false;
+#endif
+}
+
 CpuExecutor::CpuExecutor(CpuPath requested) {
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    if (requested == CpuPath::neon && !cpu_neon_available()) {
+        throw std::runtime_error("opt=2 requires an AArch64 NEON capable CPU");
+    }
+    path_ = requested == CpuPath::automatic
+        ? (cpu_neon_available() ? CpuPath::neon : CpuPath::scalar)
+        : requested;
+#else
     if (requested == CpuPath::avx2 && !cpu_avx2_available()) {
         throw std::runtime_error("opt=2 requires an AVX2 and FMA capable CPU");
     }
     path_ = requested == CpuPath::automatic
         ? (cpu_avx2_available() ? CpuPath::avx2 : CpuPath::scalar)
         : requested;
+#endif
     impl_ = std::make_shared<Impl>(path_);
 }
 
@@ -447,21 +696,30 @@ CpuExecutor::~CpuExecutor() = default;
 CpuPath CpuExecutor::path() const noexcept { return path_; }
 
 const char *CpuExecutor::name() const noexcept {
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    return path_ == CpuPath::neon ? "neon-fma" : "scalar";
+#else
     return path_ == CpuPath::avx2 ? "avx2-fma" : "scalar";
+#endif
+}
+
+CpuPlanPackingStats CpuExecutor::packing_stats() const noexcept {
+    return impl_->packing.snapshot();
 }
 
 void CpuExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
     if (!plan || !plan->valid()) {
         throw std::invalid_argument("cannot prepare an invalid CPU axis plan");
     }
-    const std::scoped_lock lock(impl_->mutex);
-    if (impl_->sealed.load(std::memory_order_relaxed)) {
-        throw std::logic_error("cannot add an axis to a sealed CPU plan cache");
+    const auto registered = impl_->register_plan(plan, false);
+    (void)registered.shared->get(impl_->packing, false);
+}
+
+void CpuExecutor::defer(std::shared_ptr<const AxisPlan> plan) const {
+    if (!plan || !plan->valid()) {
+        throw std::invalid_argument("cannot defer an invalid CPU axis plan");
     }
-    const auto found = impl_->find(*plan);
-    if (found == impl_->plans.end()) {
-        impl_->plans.push_back(acquire_packed_plan(plan));
-    }
+    (void)impl_->register_plan(plan, true);
 }
 
 void CpuExecutor::seal() const {
@@ -514,6 +772,43 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
                           output_row_stride, row_count);
         return;
     }
+#elif defined(DSMVC_HAS_NEON_OBJECT)
+    if (path_ == CpuPath::neon) {
+        const auto packed = impl_->get(plan);
+        const auto complete_groups = static_cast<std::size_t>(row_count / 4);
+        const auto task_count = std::min(
+            impl_->workers->parallelism(), complete_groups);
+        const auto enough_work = static_cast<std::size_t>(row_count)
+            * static_cast<std::size_t>(plan.destination_size) >= 262144U;
+        if (enough_work && impl_->workers->try_run(
+                task_count, [&](std::size_t task) {
+                    const auto first_group = complete_groups * task / task_count;
+                    const auto last_group = complete_groups * (task + 1U) / task_count;
+                    const auto first_row = static_cast<std::int32_t>(first_group * 4U);
+                    const auto task_rows = static_cast<std::int32_t>(
+                        (last_group - first_group) * 4U);
+                    inverse_rows_neon(
+                        plan, *packed,
+                        input + static_cast<std::ptrdiff_t>(first_row) * input_row_stride,
+                        input_row_stride,
+                        output + static_cast<std::ptrdiff_t>(first_row) * output_row_stride,
+                        output_row_stride, task_rows);
+                })) {
+            if ((row_count & 3) != 0) {
+                const auto first_row = row_count - 4;
+                inverse_rows_neon(
+                    plan, *packed,
+                    input + static_cast<std::ptrdiff_t>(first_row) * input_row_stride,
+                    input_row_stride,
+                    output + static_cast<std::ptrdiff_t>(first_row) * output_row_stride,
+                    output_row_stride, 4);
+            }
+            return;
+        }
+        inverse_rows_neon(plan, *packed, input, input_row_stride, output,
+                          output_row_stride, row_count);
+        return;
+    }
 #endif
     for (std::int32_t row = 0; row < row_count; ++row) {
         dsmvc::inverse_axis_f32(
@@ -562,6 +857,41 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
             return;
         }
         inverse_columns_avx2(plan, *packed, input, input_row_stride, output,
+                             output_row_stride, column_count);
+        return;
+    }
+#elif defined(DSMVC_HAS_NEON_OBJECT)
+    if (path_ == CpuPath::neon) {
+        const auto packed = impl_->get(plan);
+        const auto padded_columns = (column_count + 3) & ~3;
+        const auto vector_columns = input_row_stride >= padded_columns
+                && output_row_stride >= padded_columns
+            ? padded_columns : (column_count & ~3);
+        const auto column_groups = static_cast<std::size_t>(vector_columns / 4);
+        const auto task_count = std::min(
+            impl_->workers->parallelism(), column_groups);
+        const auto enough_work = static_cast<std::size_t>(column_count)
+            * static_cast<std::size_t>(plan.destination_size) >= 262144U;
+        if (enough_work && impl_->workers->try_run(
+                task_count, [&](std::size_t task) {
+                    const auto first_group = column_groups * task / task_count;
+                    const auto last_group = column_groups * (task + 1U) / task_count;
+                    const auto first_column = static_cast<std::int32_t>(first_group * 4U);
+                    const auto task_columns = static_cast<std::int32_t>(
+                        (last_group - first_group) * 4U);
+                    inverse_columns_neon(
+                        plan, *packed, input + first_column, input_row_stride,
+                        output + first_column, output_row_stride, task_columns);
+                })) {
+            for (std::int32_t column = vector_columns;
+                 column < column_count; ++column) {
+                dsmvc::inverse_axis_f32(
+                    plan, input + column, input_row_stride,
+                    output + column, output_row_stride);
+            }
+            return;
+        }
+        inverse_columns_neon(plan, *packed, input, input_row_stride, output,
                              output_row_stride, column_count);
         return;
     }
@@ -871,6 +1201,24 @@ void CpuExecutor::inverse_2d(
         throw std::invalid_argument("invalid 2D executor arguments");
     }
 
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    if (path_ == CpuPath::neon) {
+        const auto packed_horizontal = impl_->get(horizontal);
+        const auto intermediate_stride =
+            packed_horizontal->padded_destination_size;
+        thread_local std::vector<float> intermediate;
+        intermediate.resize(
+            static_cast<std::size_t>(vertical.source_size)
+            * static_cast<std::size_t>(intermediate_stride));
+        inverse_rows(
+            horizontal, input, input_row_stride,
+            intermediate.data(), intermediate_stride, vertical.source_size);
+        inverse_columns(
+            vertical, intermediate.data(), intermediate_stride,
+            output, output_row_stride, horizontal.destination_size);
+        return;
+    }
+#endif
     const auto packed_vertical = impl_->get(vertical);
 #if defined(DSMVC_HAS_AVX2_OBJECT)
     if (path_ == CpuPath::avx2) {
@@ -921,6 +1269,53 @@ void CpuExecutor::inverse_2d_integer(
         throw std::invalid_argument("invalid integer 2D executor arguments");
     }
 
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    if (path_ == CpuPath::neon) {
+        const auto packed_horizontal = impl_->get(horizontal);
+        const auto normalized_stride = packed_horizontal->padded_source_size;
+        const auto intermediate_stride =
+            packed_horizontal->padded_destination_size;
+        thread_local std::vector<float> normalized;
+        thread_local std::vector<float> intermediate;
+        thread_local std::vector<float> result;
+        normalized.resize(
+            static_cast<std::size_t>(vertical.source_size)
+            * static_cast<std::size_t>(normalized_stride));
+        intermediate.resize(
+            static_cast<std::size_t>(vertical.source_size)
+            * static_cast<std::size_t>(intermediate_stride));
+        result.resize(
+            static_cast<std::size_t>(vertical.destination_size)
+            * static_cast<std::size_t>(intermediate_stride));
+        if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+            normalize_u8_neon(
+                input, input_row_stride, normalized.data(), normalized_stride,
+                vertical.source_size, horizontal.source_size, conversion);
+        } else {
+            normalize_u16_neon(
+                input, input_row_stride, normalized.data(), normalized_stride,
+                vertical.source_size, horizontal.source_size, conversion);
+        }
+        inverse_rows(
+            horizontal, normalized.data(), normalized_stride,
+            intermediate.data(), intermediate_stride, vertical.source_size);
+        inverse_columns(
+            vertical, intermediate.data(), intermediate_stride,
+            result.data(), intermediate_stride, horizontal.destination_size);
+        if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+            convert_to_u8_neon(
+                result.data(), intermediate_stride, output, output_row_stride,
+                vertical.destination_size, horizontal.destination_size,
+                conversion);
+        } else {
+            convert_to_u16_neon(
+                result.data(), intermediate_stride, output, output_row_stride,
+                vertical.destination_size, horizontal.destination_size,
+                conversion);
+        }
+        return;
+    }
+#endif
     const auto packed_vertical = impl_->get(vertical);
     const auto padded_columns = (horizontal.destination_size + 7) & ~7;
     thread_local std::vector<float> rhs;
@@ -1067,6 +1462,24 @@ void CpuExecutor::inverse_2d_integer_streamed(
         throw std::invalid_argument("invalid streamed integer 2D arguments");
     }
 
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    if (path_ == CpuPath::neon && vertical.source_size >= 4) {
+        const auto packed_horizontal = impl_->get(horizontal);
+        const auto packed_vertical = impl_->get(vertical);
+        if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+            inverse_2d_u8_neon(
+                horizontal, *packed_horizontal, vertical, *packed_vertical,
+                input, input_row_stride, output, output_row_stride,
+                conversion);
+        } else {
+            inverse_2d_u16_neon(
+                horizontal, *packed_horizontal, vertical, *packed_vertical,
+                input, input_row_stride, output, output_row_stride,
+                conversion);
+        }
+        return;
+    }
+#endif
     const auto packed_vertical = impl_->get(vertical);
     const auto padded_columns = (horizontal.destination_size + 7) & ~7;
     thread_local std::vector<float> rhs;

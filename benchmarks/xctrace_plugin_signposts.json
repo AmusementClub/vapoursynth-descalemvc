@@ -1,0 +1,14 @@
+{
+  "Points of Interest": {
+    "excludeOSLogs": false
+  },
+  "os_log": {
+    "recordAllProcessesInSingleProcessMode": false
+  },
+  "os_signpost": {
+    "dynamicTracingEnabledSubsystems": [
+      "com.dsmvc.plugin"
+    ],
+    "recordAllProcessesInSingleProcessMode": false
+  }
+}

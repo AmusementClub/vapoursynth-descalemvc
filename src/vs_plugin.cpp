@@ -1,5 +1,10 @@
 #include <dsmvc/engine.hpp>
 
+#if defined(DSMVC_HAS_METAL)
+#include "metal_scheduler_apple.hpp"
+#include <os/signpost.h>
+#endif
+
 #include <VapourSynth4.h>
 #include <VSHelper4.h>
 
@@ -8,9 +13,12 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <charconv>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -23,6 +31,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -37,6 +46,13 @@ using dsmvc::KernelKind;
 using dsmvc::KernelSpec;
 
 constexpr const char *plugin_id = "com.dsmvc.descale";
+
+#if defined(DSMVC_HAS_METAL)
+struct MetalFrameTask {
+    dsmvc::metal::FrameJob job;
+    dsmvc::metal::RunResult result;
+};
+#endif
 
 struct ParsedArguments {
     KernelSpec kernel{};
@@ -90,6 +106,12 @@ struct FilterData {
     CustomKernel custom_callback;
     Executor executor{};
     std::atomic<std::uint32_t> active_2d_frames{0};
+#if defined(DSMVC_HAS_METAL)
+    bool metal_enabled = false;
+    bool metal_automatic = false;
+    bool metal_profile_signposts = false;
+    std::shared_ptr<dsmvc::metal::Client> metal_client;
+#endif
 };
 
 class ActiveFrameGuard {
@@ -141,6 +163,46 @@ const MemoryPhaseConfig &memory_phase_config() noexcept {
     }();
     return config;
 }
+
+#if defined(DSMVC_HAS_METAL)
+bool metal_profile_signposts_enabled() noexcept {
+    static const bool enabled = [] {
+        const char *environment = std::getenv(
+            "DSMVC_METAL_PROFILE_SIGNPOSTS");
+        return environment != nullptr
+            && std::string_view(environment) == "1";
+    }();
+    return enabled;
+}
+
+[[nodiscard]] os_log_t metal_profile_log() noexcept {
+    static os_log_t log = os_log_create(
+        "com.dsmvc.plugin", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+    return log;
+}
+
+template <class Work>
+void run_profiled_cpu_frame(bool enabled, Work &&work) {
+    if (!enabled) {
+        std::forward<Work>(work)();
+        return;
+    }
+
+    const os_log_t log = metal_profile_log();
+    const os_signpost_id_t profile_id = os_signpost_id_generate(log);
+    os_signpost_interval_begin(
+        log, profile_id, "DSMVCPluginCpuFrame");
+    try {
+        std::forward<Work>(work)();
+    } catch (...) {
+        os_signpost_interval_end(
+            log, profile_id, "DSMVCPluginCpuFrame");
+        throw;
+    }
+    os_signpost_interval_end(
+        log, profile_id, "DSMVCPluginCpuFrame");
+}
+#endif
 
 class MemoryPhaseLimiter {
 public:
@@ -288,11 +350,22 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     parsed.force_h = get_int(in, "force_h", parsed.force, vsapi);
     parsed.force_v = get_int(in, "force_v", parsed.force, vsapi);
     parsed.opt = get_int(in, "opt", 0, vsapi);
+#if defined(DSMVC_HAS_NEON_OBJECT)
+    parsed.cpu_path = parsed.opt == 1 ? CpuPath::scalar
+        : parsed.opt == 2 ? CpuPath::neon : CpuPath::automatic;
+#else
     parsed.cpu_path = parsed.opt == 1 ? CpuPath::scalar
         : parsed.opt == 2 ? CpuPath::avx2 : CpuPath::automatic;
+#endif
     parsed.backend_text = get_data(in, "backend", "auto", vsapi);
     parsed.backend = dsmvc::parse_backend(parsed.backend_text);
+#if defined(DSMVC_HAS_METAL)
+    if (parsed.backend != BackendKind::metal) {
+        (void)dsmvc::resolve_backend(parsed.backend);
+    }
+#else
     (void)dsmvc::resolve_backend(parsed.backend);
+#endif
 
     if (fixed_mode != 0) {
         parsed.kernel.kind = static_cast<KernelKind>(fixed_mode - 1);
@@ -357,6 +430,15 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     custom_guard.dismiss();
     return parsed;
 }
+
+#if defined(DSMVC_HAS_METAL)
+void validate_metal_device(const ParsedArguments &parsed) {
+    if (parsed.backend == BackendKind::metal && !dsmvc::metal::available()) {
+        throw std::runtime_error(
+            "backend 'metal' requires an available Apple unified-memory device");
+    }
+}
+#endif
 
 void copy_common_arguments(VSMap *map, const ParsedArguments &parsed,
                            const VSAPI *vsapi) {
@@ -550,13 +632,24 @@ void ensure_filter_plans(FilterData &data, const VSAPI *vsapi) {
                         data.vertical_requests[index], data.custom_callback);
                 }
             }
-            for (const auto &plan : data.horizontal) {
-                if (plan) data.executor.prepare(plan);
-            }
-            for (const auto &plan : data.vertical) {
-                if (plan) data.executor.prepare(plan);
-            }
+            const auto register_plan = [&](const auto &plan) {
+                if (!plan) return;
+#if defined(DSMVC_HAS_METAL)
+                if (data.metal_enabled) {
+                    data.executor.defer(plan);
+                    return;
+                }
+#endif
+                data.executor.prepare(plan);
+            };
+            for (const auto &plan : data.horizontal) register_plan(plan);
+            for (const auto &plan : data.vertical) register_plan(plan);
             data.executor.seal();
+#if defined(DSMVC_HAS_METAL)
+            if (data.metal_enabled) {
+                data.metal_client = dsmvc::metal::make_client();
+            }
+#endif
         } catch (...) {
             data.planning_error = std::current_exception();
         }
@@ -602,6 +695,282 @@ IntegerConversion integer_conversion(const FilterData &data, int plane,
     };
 }
 
+#if defined(DSMVC_HAS_METAL)
+void process_integer_frame(
+    FilterData &data, const VSFrame *source, VSFrame *destination,
+    int range, bool buffered,
+    const std::shared_ptr<const void> &source_lifetime,
+    const VSAPI *vsapi) {
+    for (int plane = 0; plane < data.num_planes; ++plane) {
+        const int horizontal_index = plane != 0 && data.subsampling_w > 0;
+        const int vertical_index = plane != 0 && data.subsampling_h > 0;
+        const auto conversion = integer_conversion(data, plane, range);
+        const auto source_stride = vsapi->getStride(source, plane)
+            / data.bytes_per_sample;
+        const auto destination_stride = vsapi->getStride(destination, plane)
+            / data.bytes_per_sample;
+        if (data.bytes_per_sample == 1) {
+            if (buffered) {
+                data.executor.inverse_2d_u8(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index],
+                    vsapi->getReadPtr(source, plane), source_stride,
+                    vsapi->getWritePtr(destination, plane),
+                    destination_stride, conversion, source_lifetime);
+            } else {
+                data.executor.inverse_2d_u8_streamed(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index],
+                    vsapi->getReadPtr(source, plane), source_stride,
+                    vsapi->getWritePtr(destination, plane),
+                    destination_stride, conversion, source_lifetime);
+            }
+        } else if (buffered) {
+            data.executor.inverse_2d_u16(
+                *data.horizontal[horizontal_index],
+                *data.vertical[vertical_index],
+                reinterpret_cast<const std::uint16_t *>(
+                    vsapi->getReadPtr(source, plane)),
+                source_stride,
+                reinterpret_cast<std::uint16_t *>(
+                    vsapi->getWritePtr(destination, plane)),
+                destination_stride, conversion, source_lifetime);
+        } else {
+            data.executor.inverse_2d_u16_streamed(
+                *data.horizontal[horizontal_index],
+                *data.vertical[vertical_index],
+                reinterpret_cast<const std::uint16_t *>(
+                    vsapi->getReadPtr(source, plane)),
+                source_stride,
+                reinterpret_cast<std::uint16_t *>(
+                    vsapi->getWritePtr(destination, plane)),
+                destination_stride, conversion, source_lifetime);
+        }
+    }
+}
+
+void process_float_frame(
+    FilterData &data, const VSFrame *source, VSFrame *intermediate,
+    VSFrame *destination, bool buffered,
+    const std::shared_ptr<const void> &source_lifetime,
+    const VSAPI *vsapi) {
+    for (int plane = 0; plane < data.num_planes; ++plane) {
+        const int horizontal_index = plane != 0 && data.subsampling_w > 0;
+        const int vertical_index = plane != 0 && data.subsampling_h > 0;
+        const auto source_stride = vsapi->getStride(source, plane)
+            / static_cast<int>(sizeof(float));
+        const auto destination_stride = vsapi->getStride(destination, plane)
+            / static_cast<int>(sizeof(float));
+        const auto *source_ptr = reinterpret_cast<const float *>(
+            vsapi->getReadPtr(source, plane));
+        auto *destination_ptr = reinterpret_cast<float *>(
+            vsapi->getWritePtr(destination, plane));
+        if (data.process_horizontal && data.process_vertical) {
+            if (buffered) {
+                if (!intermediate) {
+                    throw std::logic_error(
+                        "buffered Float32 frame has no scratch frame");
+                }
+                const auto intermediate_stride =
+                    vsapi->getStride(intermediate, plane)
+                    / static_cast<int>(sizeof(float));
+                auto *intermediate_ptr = reinterpret_cast<float *>(
+                    vsapi->getWritePtr(intermediate, plane));
+                const auto row_count = data.source_height
+                    >> (plane != 0 ? data.subsampling_h : 0);
+                data.executor.inverse_rows(
+                    *data.horizontal[horizontal_index],
+                    source_ptr, source_stride,
+                    intermediate_ptr, intermediate_stride, row_count,
+                    source_lifetime);
+                const auto column_count = data.destination_width
+                    >> (plane != 0 ? data.subsampling_w : 0);
+                data.executor.inverse_columns(
+                    *data.vertical[vertical_index],
+                    intermediate_ptr, intermediate_stride,
+                    destination_ptr, destination_stride, column_count);
+            } else {
+                data.executor.inverse_2d(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index],
+                    source_ptr, source_stride,
+                    destination_ptr, destination_stride, source_lifetime);
+            }
+        } else if (data.process_horizontal) {
+            const auto row_count = data.source_height
+                >> (plane != 0 ? data.subsampling_h : 0);
+            data.executor.inverse_rows(
+                *data.horizontal[horizontal_index], source_ptr, source_stride,
+                destination_ptr, destination_stride, row_count,
+                source_lifetime);
+        } else {
+            const auto column_count = data.source_width
+                >> (plane != 0 ? data.subsampling_w : 0);
+            data.executor.inverse_columns(
+                *data.vertical[vertical_index], source_ptr, source_stride,
+                destination_ptr, destination_stride, column_count,
+                source_lifetime);
+        }
+    }
+}
+
+MetalFrameTask make_metal_task(
+    FilterData &data, const VSFrame *source, VSFrame *destination,
+    int range, const std::shared_ptr<const void> &source_lifetime,
+    const VSAPI *vsapi) {
+    MetalFrameTask task;
+    task.job.profile_signposts = data.metal_profile_signposts;
+    task.job.planes.reserve(static_cast<std::size_t>(data.num_planes));
+    for (int plane = 0; plane < data.num_planes; ++plane) {
+        const bool chroma = plane != 0;
+        const int horizontal_index = chroma && data.subsampling_w > 0;
+        const int vertical_index = chroma && data.subsampling_h > 0;
+        dsmvc::metal::PlaneJob plane_job;
+        plane_job.source = vsapi->getReadPtr(source, plane);
+        plane_job.source_stride_bytes = vsapi->getStride(source, plane);
+        plane_job.destination = vsapi->getWritePtr(destination, plane);
+        plane_job.destination_stride_bytes = vsapi->getStride(destination, plane);
+        plane_job.source_width = static_cast<std::uint32_t>(
+            data.source_width >> (chroma ? data.subsampling_w : 0));
+        plane_job.source_height = static_cast<std::uint32_t>(
+            data.source_height >> (chroma ? data.subsampling_h : 0));
+        plane_job.destination_width = static_cast<std::uint32_t>(
+            data.destination_width >> (chroma ? data.subsampling_w : 0));
+        plane_job.destination_height = static_cast<std::uint32_t>(
+            data.destination_height >> (chroma ? data.subsampling_h : 0));
+        plane_job.sample_bytes = static_cast<std::uint32_t>(data.bytes_per_sample);
+        plane_job.integer_samples = data.fused_integer;
+        plane_job.process_horizontal = data.process_horizontal;
+        plane_job.process_vertical = data.process_vertical;
+        plane_job.source_lifetime = source_lifetime;
+        std::uint32_t plane_half_bandwidth = 0U;
+        if (data.process_horizontal) {
+            plane_job.horizontal = data.horizontal[horizontal_index];
+            plane_half_bandwidth = std::max(
+                plane_half_bandwidth,
+                static_cast<std::uint32_t>(plane_job.horizontal->half_bandwidth));
+            task.job.maximum_half_bandwidth = std::max(
+                task.job.maximum_half_bandwidth,
+                plane_half_bandwidth);
+        }
+        if (data.process_vertical) {
+            plane_job.vertical = data.vertical[vertical_index];
+            plane_half_bandwidth = std::max(
+                plane_half_bandwidth,
+                static_cast<std::uint32_t>(plane_job.vertical->half_bandwidth));
+            task.job.maximum_half_bandwidth = std::max(
+                task.job.maximum_half_bandwidth,
+                plane_half_bandwidth);
+        }
+        if (data.fused_integer) {
+            plane_job.conversion = integer_conversion(data, plane, range);
+        }
+        const std::uint64_t pixels =
+            static_cast<std::uint64_t>(plane_job.destination_width)
+            * plane_job.destination_height;
+        const std::uint64_t axis_cost =
+            (data.process_horizontal ? 1U : 0U)
+            + (data.process_vertical ? 1U : 0U)
+            + plane_half_bandwidth;
+        task.job.estimated_work += pixels * axis_cost;
+        task.job.planes.push_back(std::move(plane_job));
+    }
+    return task;
+}
+
+void set_metal_properties(
+    VSFrame *destination, const dsmvc::metal::RunResult &result,
+    const VSAPI *vsapi) {
+    VSMap *properties = vsapi->getFramePropertiesRW(destination);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetal", result.metal_batch_size != 0U, maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalBatch",
+        static_cast<std::int64_t>(result.metal_batch_size), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalStagingCopies",
+        static_cast<std::int64_t>(result.staging_memcpy_calls), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalStagingBytes",
+        static_cast<std::int64_t>(result.staging_copied_bytes), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalUniqueInputs",
+        static_cast<std::int64_t>(result.unique_input_planes), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalHeterogeneousDispatches",
+        static_cast<std::int64_t>(result.heterogeneous_axis_dispatches),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalHeterogeneousDescriptors",
+        static_cast<std::int64_t>(result.heterogeneous_axis_descriptors),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentProducers",
+        static_cast<std::int64_t>(result.resident_producers), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentHits",
+        static_cast<std::int64_t>(result.resident_hits), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentEvictions",
+        static_cast<std::int64_t>(result.resident_evictions), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentBytes",
+        static_cast<std::int64_t>(result.resident_bytes), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalEliminatedStagingBytes",
+        static_cast<std::int64_t>(result.eliminated_staging_bytes), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalGpuIntervalNs",
+        static_cast<std::int64_t>(result.gpu_interval_nanoseconds), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalSubmissionGapNs",
+        static_cast<std::int64_t>(result.submission_gap_nanoseconds),
+        maReplace);
+    const auto diagnostics = dsmvc::metal::diagnostics();
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentPinnedBlocks",
+        static_cast<std::int64_t>(
+            diagnostics.resident_cache_pinned_eviction_blocks),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalErrors",
+        static_cast<std::int64_t>(diagnostics.metal_errors), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalConsecutiveErrors",
+        static_cast<std::int64_t>(diagnostics.consecutive_metal_errors),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalMaxConsecutiveErrors",
+        static_cast<std::int64_t>(diagnostics.maximum_consecutive_metal_errors),
+        maReplace);
+}
+
+void set_cpu_plan_packing_properties(
+    VSFrame *destination, const dsmvc::CpuPlanPackingStats &stats,
+    const VSAPI *vsapi) {
+    VSMap *properties = vsapi->getFramePropertiesRW(destination);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanPackExecutions",
+        static_cast<std::int64_t>(stats.pack_executions), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanPackWaits",
+        static_cast<std::int64_t>(stats.single_flight_waits), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanPackWaitNs",
+        static_cast<std::int64_t>(stats.single_flight_wait_nanoseconds),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanLazyRequests",
+        static_cast<std::int64_t>(stats.lazy_requests), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanLazyHits",
+        static_cast<std::int64_t>(stats.lazy_hits), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanMaxConcurrentPacks",
+        static_cast<std::int64_t>(stats.maximum_concurrent_packs), maReplace);
+}
+#endif
+
 const VSFrame *VS_CC filter_get_frame(
     int frame_number, int activation_reason, void *instance_data, void **,
     VSFrameContext *frame_context, VSCore *core, const VSAPI *vsapi) {
@@ -623,6 +992,11 @@ const VSFrame *VS_CC filter_get_frame(
             data->executor.backend() == BackendKind::cuda;
         const bool uses_gpu = uses_cuda
             || data->executor.backend() == BackendKind::vulkan;
+#if defined(DSMVC_HAS_METAL)
+        const bool use_metal = data->metal_enabled;
+#else
+        constexpr bool use_metal = false;
+#endif
 #if defined(DSMVC_HAS_CUDA)
         std::optional<dsmvc::cuda_detail::NvtxRange> frame_trace;
         if (uses_cuda) {
@@ -645,10 +1019,11 @@ const VSFrame *VS_CC filter_get_frame(
         ensure_filter_plans(*data, vsapi);
 #endif
         std::shared_ptr<const void> source_lifetime;
-        if (data->executor.input_cache_enabled()) {
+        if (data->executor.input_cache_enabled() || use_metal) {
             const VSFrame *retained = vsapi->addFrameRef(source);
             if (!retained) {
-                throw std::runtime_error("failed to retain the GPU source frame");
+                throw std::runtime_error(
+                    "failed to retain the cached-execution source frame");
             }
             const auto free_frame = vsapi->freeFrame;
             source_lifetime = std::shared_ptr<const void>(
@@ -660,7 +1035,8 @@ const VSFrame *VS_CC filter_get_frame(
         const bool wide_kernel = adaptive_2d
             && data->vertical[0]->half_bandwidth >= 5;
         MemoryPhaseGuard memory_phase(
-            !uses_gpu && adaptive_2d && memory_config.limit > 0U
+            !uses_gpu && !use_metal
+            && adaptive_2d && memory_config.limit > 0U
             && static_cast<std::size_t>(data->core_threads) > memory_config.limit
             && (wide_kernel || memory_config.all_kernels));
         const bool allow_streamed_integer = !data->fused_integer
@@ -676,7 +1052,18 @@ const VSFrame *VS_CC filter_get_frame(
             && (!track_overlapping_frames || active_frame.first());
         const bool buffered_float_2d =
             !uses_gpu && !data->fused_integer && first_2d_frame;
-        if (buffered_float_2d) {
+#if defined(DSMVC_HAS_METAL)
+        const auto ensure_intermediate = [&] {
+            if (intermediate) return;
+            intermediate = vsapi->newVideoFrame(
+                &data->vi.format, data->destination_width, data->source_height,
+                nullptr, core);
+            if (!intermediate) {
+                throw std::runtime_error("failed to allocate Float32 scratch frame");
+            }
+        };
+#endif
+        if (buffered_float_2d && !use_metal) {
             intermediate = vsapi->newVideoFrame(
                 &data->vi.format, data->destination_width, data->source_height,
                 nullptr, core);
@@ -693,6 +1080,50 @@ const VSFrame *VS_CC filter_get_frame(
                 range, maReplace);
         }
 
+#if defined(DSMVC_HAS_METAL)
+        if (use_metal) {
+            if (data->fused_integer) {
+                auto metal_task = make_metal_task(
+                    *data, source, destination, range, source_lifetime, vsapi);
+                metal_task.result = dsmvc::metal::run(
+                    data->metal_client, std::move(metal_task.job), [&] {
+                    MemoryPhaseGuard cpu_memory_phase(
+                        adaptive_2d && memory_config.limit > 0U
+                        && static_cast<std::size_t>(data->core_threads)
+                            > memory_config.limit
+                        && (wide_kernel || memory_config.all_kernels));
+                    run_profiled_cpu_frame(
+                        data->metal_profile_signposts, [&] {
+                            process_integer_frame(
+                                *data, source, destination, range,
+                                first_2d_frame, source_lifetime, vsapi);
+                        });
+                    }, data->metal_automatic);
+                set_metal_properties(destination, metal_task.result, vsapi);
+            } else {
+                auto metal_task = make_metal_task(
+                    *data, source, destination, 0, source_lifetime, vsapi);
+                metal_task.result = dsmvc::metal::run(
+                    data->metal_client, std::move(metal_task.job), [&] {
+                    if (buffered_float_2d) ensure_intermediate();
+                    MemoryPhaseGuard cpu_memory_phase(
+                        adaptive_2d && memory_config.limit > 0U
+                        && static_cast<std::size_t>(data->core_threads)
+                            > memory_config.limit
+                        && memory_config.all_kernels);
+                    run_profiled_cpu_frame(
+                        data->metal_profile_signposts, [&] {
+                            process_float_frame(
+                                *data, source, intermediate, destination,
+                                buffered_float_2d, source_lifetime, vsapi);
+                        });
+                    }, data->metal_automatic);
+                set_metal_properties(destination, metal_task.result, vsapi);
+            }
+            set_cpu_plan_packing_properties(
+                destination, data->executor.cpu_plan_packing_stats(), vsapi);
+        } else
+#endif
         for (int plane = 0; plane < data->num_planes; ++plane) {
 #if defined(DSMVC_HAS_CUDA)
             std::optional<dsmvc::cuda_detail::NvtxRange> plane_trace;
@@ -819,6 +1250,9 @@ const VSFrame *VS_CC filter_get_frame(
 
 void VS_CC filter_free(void *instance_data, VSCore *, const VSAPI *vsapi) {
     auto *data = static_cast<FilterData *>(instance_data);
+#if defined(DSMVC_HAS_METAL)
+    if (data->metal_client) data->metal_client->close();
+#endif
     if (data->custom_kernel) vsapi->freeFunction(data->custom_kernel);
     if (data->node) vsapi->freeNode(data->node);
     delete data;
@@ -869,6 +1303,13 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             && (source_info->format.bytesPerSample == 1
                 || source_info->format.bytesPerSample == 2)
             && process_horizontal && process_vertical;
+#if defined(DSMVC_HAS_METAL)
+        validate_metal_device(parsed);
+        const bool metal_automatic =
+            parsed.backend == BackendKind::automatic
+            && dsmvc::metal::available()
+            && source_info->numFrames >= 64;
+#endif
         if (!fused_integer
             && (source_info->format.sampleType != stFloat
                 || source_info->format.bitsPerSample != 32)) {
@@ -878,8 +1319,14 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             return;
         }
 
+#if defined(DSMVC_HAS_METAL)
+        const BackendKind executor_backend = parsed.backend == BackendKind::metal
+            ? BackendKind::cpu : parsed.backend;
+#else
+        const BackendKind executor_backend = parsed.backend;
+#endif
         auto data = std::make_unique<FilterData>(
-            parsed.backend, parsed.cpu_path);
+            executor_backend, parsed.cpu_path);
         data->node = source;
         data->vi = *source_info;
         data->source_width = source_info->width;
@@ -898,6 +1345,14 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         data->process_horizontal = process_horizontal;
         data->process_vertical = process_vertical;
         data->fused_integer = fused_integer;
+#if defined(DSMVC_HAS_METAL)
+        data->metal_automatic = metal_automatic
+            && data->core_threads >= 8;
+        data->metal_enabled = parsed.backend == BackendKind::metal
+            || data->metal_automatic;
+        data->metal_profile_signposts = data->metal_enabled
+            && metal_profile_signposts_enabled();
+#endif
         data->vi.width = parsed.width;
         data->vi.height = parsed.height;
         prepare_filter_requests(*data, parsed);

@@ -6,6 +6,9 @@
 #if defined(DSMVC_HAS_VULKAN)
 #include "vulkan/vulkan_executor.hpp"
 #endif
+#if defined(DSMVC_HAS_METAL)
+#include "metal_device_apple.hpp"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -54,19 +57,40 @@ BackendKind resolve_backend(BackendKind requested) {
             "backend 'cuda' is compiled but no CUDA device is available");
     }
 #endif
+    if (requested == BackendKind::metal && metal_compiled()) {
+        throw std::runtime_error(
+            "backend 'metal' is provided by the VapourSynth heterogeneous scheduler");
+    }
     throw std::runtime_error(std::string{"backend '"} + backend_name(requested)
                              + "' is not compiled in this build");
 }
 
 std::vector<BackendCapability> backend_capabilities() {
+    const bool metal_device = metal_available();
     const bool vulkan_device = vulkan_available();
     const bool cuda_device = cuda_available();
     return {
         {BackendKind::cpu, "cpu", true, true},
-        {BackendKind::metal, "metal", false, false},
+        {BackendKind::metal, "metal", metal_compiled(), metal_device},
         {BackendKind::vulkan, "vulkan", vulkan_compiled(), vulkan_device},
         {BackendKind::cuda, "cuda", cuda_compiled(), cuda_device},
     };
+}
+
+bool metal_compiled() noexcept {
+#if defined(DSMVC_HAS_METAL)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool metal_available() noexcept {
+#if defined(DSMVC_HAS_METAL)
+    return metal_detail::backend_available();
+#else
+    return false;
+#endif
 }
 
 bool vulkan_compiled() noexcept {

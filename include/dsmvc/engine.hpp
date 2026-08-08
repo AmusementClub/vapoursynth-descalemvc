@@ -34,6 +34,7 @@ enum class CpuPath : std::uint8_t {
     automatic,
     scalar,
     avx2,
+    neon,
 };
 
 enum class BorderMode : std::uint8_t {
@@ -92,6 +93,15 @@ struct PlannerCacheStats {
     std::size_t geometry_resident_bytes = 0;
 };
 
+struct CpuPlanPackingStats {
+    std::uint64_t pack_executions = 0;
+    std::uint64_t single_flight_waits = 0;
+    std::uint64_t single_flight_wait_nanoseconds = 0;
+    std::uint64_t lazy_requests = 0;
+    std::uint64_t lazy_hits = 0;
+    std::uint64_t maximum_concurrent_packs = 0;
+};
+
 struct BackendCapability {
     BackendKind kind{};
     const char *name = "";
@@ -135,6 +145,10 @@ inline void inverse_axis_f32(const AxisPlan &plan,
 
 [[nodiscard]] bool cpu_avx2_compiled() noexcept;
 [[nodiscard]] bool cpu_avx2_available() noexcept;
+[[nodiscard]] bool cpu_neon_compiled() noexcept;
+[[nodiscard]] bool cpu_neon_available() noexcept;
+[[nodiscard]] bool metal_compiled() noexcept;
+[[nodiscard]] bool metal_available() noexcept;
 [[nodiscard]] bool vulkan_compiled() noexcept;
 [[nodiscard]] bool vulkan_available() noexcept;
 [[nodiscard]] bool cuda_compiled() noexcept;
@@ -151,8 +165,10 @@ public:
 
     [[nodiscard]] CpuPath path() const noexcept;
     [[nodiscard]] const char *name() const noexcept;
+    [[nodiscard]] CpuPlanPackingStats packing_stats() const noexcept;
 
     void prepare(std::shared_ptr<const AxisPlan> plan) const;
+    void defer(std::shared_ptr<const AxisPlan> plan) const;
     void seal() const;
 
     void inverse_rows(const AxisPlan &plan,
@@ -229,8 +245,10 @@ public:
     [[nodiscard]] BackendKind backend() const noexcept;
     [[nodiscard]] const char *name() const noexcept;
     [[nodiscard]] bool input_cache_enabled() const noexcept;
+    [[nodiscard]] CpuPlanPackingStats cpu_plan_packing_stats() const noexcept;
 
     void prepare(std::shared_ptr<const AxisPlan> plan) const;
+    void defer(std::shared_ptr<const AxisPlan> plan) const;
     void seal() const;
 
     void inverse_rows(const AxisPlan &plan,

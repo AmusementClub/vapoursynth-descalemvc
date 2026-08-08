@@ -120,6 +120,27 @@ def baseline_call(namespace, name: str, source, **overrides):
         format=source.format.id, dither_type="none")
 
 
+def patterned_integer_clip(core, format_id, property_name: str,
+                           range_value: int):
+    blank = core.std.BlankClip(width=96, height=64, format=format_id)
+
+    def fill(n, f):
+        del n
+        output = f.copy()
+        maximum = (1 << output.format.bits_per_sample) - 1
+        for plane_index in range(output.format.num_planes):
+            plane = output[plane_index]
+            for y in range(plane.shape[0]):
+                for x in range(plane.shape[1]):
+                    code = (x * 193 + y * 389 + plane_index * 521
+                            + x * y * 17)
+                    plane[y, x] = code % (maximum + 1)
+        output.props[property_name] = range_value
+        return output
+
+    return core.std.ModifyFrame(blank, blank, fill)
+
+
 def run(options) -> None:
     core = vs.core
     core.num_threads = options.threads
@@ -157,6 +178,22 @@ def run(options) -> None:
         old = baseline_call(core.descale, "Debicubic", source)
         new = direct_call(core.dsmvc, "Debicubic", source, backend="auto")
         compare_clips(old, new, f"format/{source.format.name}")
+
+    for format_id in (vs.GRAY8, vs.GRAY16, vs.RGB24, vs.YUV420P10):
+        for property_name, range_values in (
+                ("_Range", (0, 1)),
+                ("_ColorRange", (0, 1))):
+            for range_value in range_values:
+                source = patterned_integer_clip(
+                    core, format_id, property_name, int(range_value))
+                for name in ("Debilinear", "Delanczos", "Despline64"):
+                    old = direct_call(core.descale, name, source)
+                    new = direct_call(
+                        core.dsmvc, name, source, backend="cpu")
+                    compare_clips(
+                        old, new,
+                        f"range/{source.format.name}/{property_name}/"
+                        f"{range_value}/{name}")
 
     geometry = {
         "src_left": 0.25,
@@ -239,9 +276,9 @@ def run(options) -> None:
 
     scalar = core.dsmvc.Debicubic(
         float_source, width=80, height=48, opt=1, backend="cpu")
-    avx2 = core.dsmvc.Debicubic(
+    simd = core.dsmvc.Debicubic(
         float_source, width=80, height=48, opt=2, backend="cpu")
-    compare_clips(scalar, avx2, "opt/scalar-vs-avx2")
+    compare_clips(scalar, simd, "opt/scalar-vs-simd")
 
     expect_error(
         lambda: core.dsmvc.Debicubic(
@@ -301,6 +338,11 @@ def run(options) -> None:
     old_wrapper = (
         load_module("dsmvc_test_old_wrapper", old_wrapper_path)
         if old_descale is not None and old_wrapper_path.is_file() else None)
+    require(new_wrapper.Opt.SIMD == new_wrapper.Opt.AVX2
+            == new_wrapper.Opt.NEON == 2,
+            "wrapper SIMD option aliases differ")
+    require(new_wrapper.Opt(2).name == "AVX2",
+            "wrapper changed the canonical legacy AVX2 option name")
     rgb = core.std.BlankClip(width=96, height=64, format=vs.RGB24)
     new_rgb = new_wrapper.Debicubic(
         rgb, 80, 48, b=0.0, c=1.0,

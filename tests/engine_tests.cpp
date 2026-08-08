@@ -149,6 +149,15 @@ void require_agreement(const ErrorStats &stats, std::string_view label,
     return dsmvc::build_axis_plan(request);
 }
 
+[[nodiscard]] bool native_simd_available() noexcept {
+    return dsmvc::cpu_avx2_available() || dsmvc::cpu_neon_available();
+}
+
+[[nodiscard]] dsmvc::CpuPath native_simd_path() noexcept {
+    return dsmvc::cpu_avx2_available()
+        ? dsmvc::CpuPath::avx2 : dsmvc::CpuPath::neon;
+}
+
 ErrorStats compare_rows(const dsmvc::CpuExecutor &optimized_executor,
                         const dsmvc::AxisPlan &plan, std::int32_t rows,
                         std::string_view label, bool report = true) {
@@ -306,18 +315,18 @@ template <class Sample>
 void compare_integer_2d(
     dsmvc::CpuPath path, dsmvc::KernelKind kind,
     const dsmvc::IntegerConversion &conversion,
-    std::string_view label) {
+    std::string_view label, std::int32_t source_height = 73,
+    std::int32_t destination_height = 51) {
     constexpr std::int32_t source_width = 97;
     constexpr std::int32_t destination_width = 67;
-    constexpr std::int32_t source_height = 73;
-    constexpr std::int32_t destination_height = 51;
     constexpr std::int32_t input_stride = 104;
     constexpr std::int32_t float_output_stride = 72;
     constexpr std::int32_t integer_output_stride = 73;
     auto horizontal = std::make_shared<const dsmvc::AxisPlan>(make_plan(
         kind, source_width, destination_width, 66.75, 0.125));
     auto vertical = std::make_shared<const dsmvc::AxisPlan>(make_plan(
-        kind, source_height, destination_height, 50.5, 0.25));
+        kind, source_height, destination_height,
+        static_cast<double>(destination_height) - 0.5, 0.25));
 
     std::vector<Sample> integer_input(
         static_cast<std::size_t>(source_height)
@@ -432,6 +441,14 @@ void test_backend_selection() {
     require(rejected != dsmvc::cuda_available(),
             "CUDA resolution disagrees with runtime availability");
     const auto capabilities = dsmvc::backend_capabilities();
+    const auto metal = std::find_if(
+        capabilities.begin(), capabilities.end(), [](const auto &capability) {
+            return capability.kind == dsmvc::BackendKind::metal;
+        });
+    require(metal != capabilities.end(), "Metal capability is missing");
+    require(metal->compiled == dsmvc::metal_compiled()
+                && metal->device_available == dsmvc::metal_available(),
+            "Metal capability reporting is inconsistent");
     const auto cuda = std::find_if(
         capabilities.begin(), capabilities.end(), [](const auto &capability) {
             return capability.kind == dsmvc::BackendKind::cuda;
@@ -879,6 +896,30 @@ void test_accelerator_executor_agreement(
     }
 }
 
+void test_cpu_path_selection() {
+    require(!dsmvc::cpu_avx2_available() || dsmvc::cpu_avx2_compiled(),
+            "available AVX2 path was not compiled");
+    require(!dsmvc::cpu_neon_available() || dsmvc::cpu_neon_compiled(),
+            "available NEON path was not compiled");
+
+    const dsmvc::CpuExecutor automatic(dsmvc::CpuPath::automatic);
+    if (native_simd_available()) {
+        const auto expected = native_simd_path();
+        require(automatic.path() == expected,
+                "automatic dispatch did not select native SIMD");
+        const dsmvc::CpuExecutor explicit_native(expected);
+        require(explicit_native.path() == expected,
+                "explicit native SIMD dispatch selected the wrong path");
+        require(std::string_view(explicit_native.name())
+                    == (expected == dsmvc::CpuPath::avx2
+                            ? "avx2-fma" : "neon-fma"),
+                "native SIMD executor reported the wrong name");
+    } else {
+        require(automatic.path() == dsmvc::CpuPath::scalar,
+                "automatic dispatch did not fall back to scalar");
+    }
+}
+
 void test_identity_bilinear() {
     dsmvc::AxisRequest request;
     request.source_size = 32;
@@ -1077,6 +1118,18 @@ void test_b5_b7_executor_agreement() {
                      "Spline64 b7 horizontal rows=" + std::to_string(rows));
     }
 
+    if (dsmvc::cpu_neon_available()) {
+        const dsmvc::CpuExecutor neon(dsmvc::CpuPath::neon);
+        for (const auto rows : {4, 5}) {
+            compare_rows(
+                neon, *horizontal_b5, rows,
+                "NEON Lanczos3 b5 horizontal rows=" + std::to_string(rows));
+            compare_rows(
+                neon, *horizontal_b7, rows,
+                "NEON Spline64 b7 horizontal rows=" + std::to_string(rows));
+        }
+    }
+
     constexpr std::int32_t stride = 1696;
     compare_columns(
         optimized, *vertical_b5, 1692, stride,
@@ -1114,6 +1167,22 @@ void test_b5_b7_executor_agreement() {
     }
 }
 
+void test_b3_neon_row_pair_agreement() {
+    if (!dsmvc::cpu_neon_available()) return;
+
+    const auto horizontal_b3 = make_plan(
+        dsmvc::KernelKind::bicubic, 1920, 1692,
+        1691.5555555555557, 0.2222222222221717);
+    require(horizontal_b3.half_bandwidth == 3,
+            "Bicubic did not produce half-bandwidth 3");
+    const dsmvc::CpuExecutor neon(dsmvc::CpuPath::neon);
+    for (const auto rows : {8, 9, 12, 13, 16, 17}) {
+        compare_rows(
+            neon, horizontal_b3, rows,
+            "NEON Bicubic b3 paired rows=" + std::to_string(rows));
+    }
+}
+
 void test_streamed_2d_executor_agreement() {
     const struct {
         dsmvc::KernelKind kind;
@@ -1144,6 +1213,11 @@ void test_streamed_2d_executor_agreement() {
             dsmvc::CpuPath::avx2, dsmvc::KernelKind::spline64,
             800, 640, 600, 480, true,
             "streamed 2D b7 parallel destination bands");
+    } else if (dsmvc::cpu_neon_available()) {
+        (void)compare_2d(
+            dsmvc::CpuPath::neon, dsmvc::KernelKind::spline64,
+            800, 640, 600, 480, true,
+            "NEON streamed 2D b7 parallel destination bands");
     }
 }
 
@@ -1177,10 +1251,22 @@ void test_integer_2d_executor_agreement() {
     compare_integer_2d<std::uint8_t>(
         dsmvc::CpuPath::scalar, dsmvc::KernelKind::lanczos,
         limited_luma_u8, "integer u8 scalar b5");
+    if (dsmvc::cpu_neon_available()) {
+        compare_integer_2d<std::uint8_t>(
+            dsmvc::CpuPath::neon, dsmvc::KernelKind::bicubic,
+            limited_luma_u8, "NEON integer u8 buffered and streamed b3");
+        compare_integer_2d<std::uint16_t>(
+            dsmvc::CpuPath::neon, dsmvc::KernelKind::spline64,
+            full_luma_u16, "NEON integer u16 buffered and streamed b7");
+        compare_integer_2d<std::uint8_t>(
+            dsmvc::CpuPath::neon, dsmvc::KernelKind::bilinear,
+            limited_luma_u8, "NEON integer streamed short-source fallback",
+            3, 2);
+    }
 }
 
 void test_executor_plan_ownership() {
-    if (!dsmvc::cpu_avx2_available()) return;
+    if (!native_simd_available()) return;
 
     const auto b7_value = make_plan(
         dsmvc::KernelKind::spline64, 96, 64, 63.75, 0.125);
@@ -1189,7 +1275,7 @@ void test_executor_plan_ownership() {
     require(b7_value.half_bandwidth == 7 && b5_value.half_bandwidth == 5,
             "ownership fixtures have unexpected bandwidths");
 
-    dsmvc::CpuExecutor borrowed(dsmvc::CpuPath::avx2);
+    dsmvc::CpuExecutor borrowed(native_simd_path());
     auto reassigned = b7_value;
     (void)compare_rows(borrowed, reassigned, 8,
                        "borrowed plan before reassignment");
@@ -1209,7 +1295,7 @@ void test_executor_plan_ownership() {
 
     std::weak_ptr<const dsmvc::AxisPlan> weak;
     {
-        dsmvc::CpuExecutor prepared(dsmvc::CpuPath::avx2);
+        dsmvc::CpuExecutor prepared(native_simd_path());
         auto owned = std::make_shared<const dsmvc::AxisPlan>(b7_value);
         weak = owned;
         prepared.prepare(owned);
@@ -1235,9 +1321,9 @@ void test_executor_plan_ownership() {
 }
 
 void test_concurrent_prepare_and_seal() {
-    if (!dsmvc::cpu_avx2_available()) return;
+    if (!native_simd_available()) return;
 
-    dsmvc::CpuExecutor executor(dsmvc::CpuPath::avx2);
+    dsmvc::CpuExecutor executor(native_simd_path());
     std::vector<std::shared_ptr<const dsmvc::AxisPlan>> plans;
     for (std::uint32_t index = 0; index < 12U; ++index) {
         plans.push_back(std::make_shared<const dsmvc::AxisPlan>(make_plan(
@@ -1287,6 +1373,59 @@ void test_concurrent_prepare_and_seal() {
                        "sealed lookup after concurrent preparation");
 }
 
+void test_lazy_plan_single_flight() {
+    if (!native_simd_available()) return;
+
+    auto plan = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        dsmvc::KernelKind::spline64, 2048, 1536, 1535.75, 0.125));
+    dsmvc::CpuExecutor executor(native_simd_path());
+    executor.defer(plan);
+    executor.seal();
+    auto stats = executor.packing_stats();
+    require(stats.pack_executions == 0U && stats.lazy_requests == 0U,
+            "deferred CPU plan was packed before first CPU selection");
+
+    constexpr std::size_t callers = 8U;
+    constexpr std::int32_t rows = 8;
+    std::vector<float> input(
+        static_cast<std::size_t>(plan->source_size) * rows);
+    fill_deterministic(input.data(), input.size(), 0x51f17eU);
+    std::vector<std::vector<float>> outputs(
+        callers, std::vector<float>(
+            static_cast<std::size_t>(plan->destination_size) * rows));
+    std::barrier start(static_cast<std::ptrdiff_t>(callers));
+    std::vector<std::exception_ptr> errors(callers);
+    std::vector<JoiningThread> threads;
+    threads.reserve(callers);
+    for (std::size_t index = 0; index < callers; ++index) {
+        threads.emplace_back([&, index] {
+            try {
+                start.arrive_and_wait();
+                executor.inverse_rows(
+                    *plan, input.data(), plan->source_size,
+                    outputs[index].data(), plan->destination_size, rows);
+            } catch (...) {
+                errors[index] = std::current_exception();
+            }
+        });
+    }
+    threads.clear();
+    for (const auto &error : errors) {
+        if (error) std::rethrow_exception(error);
+    }
+    for (std::size_t index = 1; index < outputs.size(); ++index) {
+        require(outputs[index] == outputs.front(),
+                "single-flight CPU plan produced inconsistent output");
+    }
+    stats = executor.packing_stats();
+    require(stats.pack_executions == 1U,
+            "same deferred CPU plan was packed more than once");
+    require(stats.lazy_requests == callers && stats.lazy_hits == callers - 1U,
+            "lazy CPU plan hit accounting is inconsistent");
+    require(stats.maximum_concurrent_packs == 1U,
+            "same-plan single-flight allowed concurrent packing");
+}
+
 } // namespace
 
 int main() {
@@ -1296,16 +1435,19 @@ int main() {
             dsmvc::BackendKind::cuda, dsmvc::cuda_available(), "CUDA");
         test_accelerator_executor_agreement(
             dsmvc::BackendKind::vulkan, dsmvc::vulkan_available(), "Vulkan");
+        test_cpu_path_selection();
         test_identity_bilinear();
         test_custom_plan();
         test_inverse_only_cache();
         test_large_support_compatibility();
         test_axis_plan_validation();
+        test_b3_neon_row_pair_agreement();
         test_b5_b7_executor_agreement();
         test_streamed_2d_executor_agreement();
         test_integer_2d_executor_agreement();
         test_executor_plan_ownership();
         test_concurrent_prepare_and_seal();
+        test_lazy_plan_single_flight();
         std::cout << "dsmvc engine tests passed\n";
         return 0;
     } catch (const std::exception &error) {

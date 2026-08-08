@@ -13,6 +13,8 @@ class Opt(IntEnum):
     AUTO = 0
     NONE = 1
     AVX2 = 2
+    SIMD = 2
+    NEON = 2
 
 
 def _plugin_args(opt, backend):
