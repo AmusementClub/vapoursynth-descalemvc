@@ -496,6 +496,8 @@ if(DSMVC_ENABLE_METAL)
             src/metal_scheduler_apple.mm
             "${DSMVC_METALLIB_HEADER}")
         target_compile_features(dsmvc_metal_scheduler_tests PRIVATE cxx_std_23)
+        target_compile_definitions(dsmvc_metal_scheduler_tests PRIVATE
+            DSMVC_METAL_SCHEDULER_TESTING=1)
         target_include_directories(dsmvc_metal_scheduler_tests PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${DSMVC_METAL_GENERATED_DIR}")

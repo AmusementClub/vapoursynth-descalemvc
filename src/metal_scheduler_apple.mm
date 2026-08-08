@@ -65,12 +65,25 @@ constexpr std::size_t maximum_recent_inputs = 64U;
 constexpr std::size_t maximum_recent_clients = 16U;
 constexpr std::uint64_t automatic_work_floor = 1920ULL * 1080ULL * 6ULL;
 constexpr std::uint64_t shared_input_work_floor = 1920ULL * 1080ULL * 2ULL;
-constexpr auto batch_timeout = std::chrono::microseconds{500};
+constexpr auto default_batch_timeout = std::chrono::microseconds{500};
 constexpr auto recent_input_window = std::chrono::milliseconds{50};
 constexpr std::size_t resident_alignment = 256U;
 constexpr std::size_t resident_tile = 16U;
 
 std::atomic<bool> fail_next_resident_producer{false};
+#if defined(DSMVC_METAL_SCHEDULER_TESTING)
+std::atomic<std::uint64_t> test_batch_timeout_microseconds{
+    static_cast<std::uint64_t>(default_batch_timeout.count())};
+#endif
+
+[[nodiscard]] auto batch_timeout() noexcept {
+#if defined(DSMVC_METAL_SCHEDULER_TESTING)
+    return std::chrono::microseconds{
+        test_batch_timeout_microseconds.load(std::memory_order_relaxed)};
+#else
+    return default_batch_timeout;
+#endif
+}
 
 [[nodiscard]] std::uint64_t next_client_identity() noexcept {
     static std::atomic<std::uint64_t> sequence{1U};
@@ -2295,7 +2308,7 @@ public:
                 fallback_to_cpu = true;
             } else {
                 if (queue->requests.empty()) {
-                    queue->deadline = Clock::now() + batch_timeout;
+                    queue->deadline = Clock::now() + batch_timeout();
                 }
                 queue->requests.push_back(request);
                 ++queued_jobs_;
@@ -2498,7 +2511,7 @@ private:
         }
         queue.deadline = queue.requests.empty()
             ? std::nullopt
-            : std::optional<Clock::time_point>{now + batch_timeout};
+            : std::optional<Clock::time_point>{now + batch_timeout()};
         for (const auto &request : batch) {
             const std::scoped_lock lock(request->mutex);
             request->state = Request::State::submitted;
@@ -2661,6 +2674,16 @@ SchedulerDiagnostics diagnostics() noexcept {
 void fail_next_resident_producer_for_testing() noexcept {
     fail_next_resident_producer.store(true, std::memory_order_relaxed);
 }
+
+#if defined(DSMVC_METAL_SCHEDULER_TESTING)
+void set_batch_timeout_for_testing(std::uint64_t microseconds) noexcept {
+    const std::uint64_t timeout = microseconds == 0U
+        ? static_cast<std::uint64_t>(default_batch_timeout.count())
+        : microseconds;
+    test_batch_timeout_microseconds.store(
+        timeout, std::memory_order_relaxed);
+}
+#endif
 
 RunResult run(
     const std::shared_ptr<Client> &client, FrameJob job,

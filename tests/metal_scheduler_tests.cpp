@@ -188,6 +188,29 @@ void solve_two_axis(
     return outcomes;
 }
 
+class RelaxedBatchTimeout final {
+public:
+    RelaxedBatchTimeout() {
+        dsmvc::metal::set_batch_timeout_for_testing(20'000U);
+    }
+    ~RelaxedBatchTimeout() {
+        dsmvc::metal::set_batch_timeout_for_testing(0U);
+    }
+
+    RelaxedBatchTimeout(const RelaxedBatchTimeout &) = delete;
+    RelaxedBatchTimeout &operator=(const RelaxedBatchTimeout &) = delete;
+};
+
+[[nodiscard]] std::vector<Outcome> run_full_batch_wave(
+    const std::vector<std::shared_ptr<Client>> &clients,
+    std::vector<FrameJob> jobs,
+    std::vector<std::function<void()>> cpu_work, bool automatic = false) {
+    // Exact batch-shape assertions must not depend on hosted-runner core count.
+    const RelaxedBatchTimeout timeout;
+    return run_wave(
+        clients, std::move(jobs), std::move(cpu_work), automatic);
+}
+
 constexpr std::uint64_t getfnative_spline36_work = 1280ULL * 720ULL * 7ULL;
 
 void test_shared_input_automatic_admission(
@@ -243,7 +266,7 @@ void test_shared_input_automatic_admission(
 
     std::vector<std::shared_ptr<Client>> batch_clients(
         clients.begin() + static_cast<std::ptrdiff_t>(seed_count), clients.end());
-    const auto outcomes = run_wave(
+    const auto outcomes = run_full_batch_wave(
         batch_clients, std::move(jobs), std::move(cpu_work), true);
     std::size_t metal_requests = 0U;
     for (std::size_t index = 0; index < batch_count; ++index) {
@@ -482,7 +505,7 @@ void test_resident_float_reuse_and_lifetime_identity(
             jobs.push_back(std::move(job));
             cpu_work.emplace_back([&, index] { outputs[index] = expected; });
         }
-        auto outcomes = run_wave(
+        auto outcomes = run_full_batch_wave(
             clients, std::move(jobs), std::move(cpu_work), true);
         for (std::size_t index = 0; index < count; ++index) {
             require(!outcomes[index].error
@@ -589,7 +612,7 @@ void test_resident_ready_singleton_after_recent_input_expiry(
         jobs.push_back(std::move(job));
         cpu_work.emplace_back([&, index] { outputs[index] = expected; });
     }
-    const auto producer_wave = run_wave(
+    const auto producer_wave = run_full_batch_wave(
         clients, std::move(jobs), std::move(cpu_work), true);
     for (std::size_t index = 0; index < count; ++index) {
         require(!producer_wave[index].error
@@ -670,7 +693,8 @@ void test_resident_producer_failure_recovery(
             jobs.push_back(std::move(job));
             cpu_work.emplace_back([&, index] { outputs[index] = expected; });
         }
-        return run_wave(clients, std::move(jobs), std::move(cpu_work), true);
+        return run_full_batch_wave(
+            clients, std::move(jobs), std::move(cpu_work), true);
     };
 
     const auto before = dsmvc::metal::diagnostics();
@@ -787,7 +811,7 @@ void test_resident_integer_conversion_keys(
             outputs[index] = expected[conversion_index];
         });
     }
-    const auto outcomes = run_wave(
+    const auto outcomes = run_full_batch_wave(
         clients, std::move(jobs), std::move(cpu_work), true);
     for (std::size_t index = 0; index < count; ++index) {
         require(!outcomes[index].error
@@ -941,7 +965,8 @@ void test_shared_source_and_recovery(
         solve_rows(*plan, source, expected[index], height);
     }
 
-    const auto outcomes = run_wave(clients, std::move(jobs), std::move(cpu_work));
+    const auto outcomes = run_full_batch_wave(
+        clients, std::move(jobs), std::move(cpu_work));
     for (std::size_t index = 0; index < count; ++index) {
         require(!outcomes[index].error, "valid Metal batch reported an error");
         require(outcomes[index].result.metal_batch_size == count,
@@ -1046,7 +1071,8 @@ void test_interleaved_plan_offsets(
         solve_rows(*plans[index], source, expected[index], height);
     }
 
-    const auto outcomes = run_wave(clients, std::move(jobs), std::move(cpu_work));
+    const auto outcomes = run_full_batch_wave(
+        clients, std::move(jobs), std::move(cpu_work));
     for (std::size_t index = 0; index < count; ++index) {
         require(!outcomes[index].error,
                 "interleaved plan/input offsets rejected a valid submission");
@@ -1099,7 +1125,7 @@ void test_heterogeneous_plan_geometry(
     }
 
     std::vector<std::shared_ptr<Client>> clients(count, client);
-    const auto outcomes = run_wave(
+    const auto outcomes = run_full_batch_wave(
         clients, std::move(jobs), std::move(cpu_work));
     for (std::size_t index = 0; index < count; ++index) {
         require(!outcomes[index].error,
@@ -1171,7 +1197,7 @@ void test_heterogeneous_two_axis_geometry(
     }
 
     std::vector<std::shared_ptr<Client>> clients(count, client);
-    const auto outcomes = run_wave(
+    const auto outcomes = run_full_batch_wave(
         clients, std::move(jobs), std::move(cpu_work));
     for (std::size_t index = 0; index < count; ++index) {
         require(!outcomes[index].error,
@@ -1217,7 +1243,8 @@ void test_error_propagation(
         jobs.push_back(std::move(job));
         cpu_work.emplace_back([] {});
     }
-    const auto outcomes = run_wave(clients, std::move(jobs), std::move(cpu_work));
+    const auto outcomes = run_full_batch_wave(
+        clients, std::move(jobs), std::move(cpu_work));
     const auto failures = std::count_if(
         outcomes.begin(), outcomes.end(), [](const Outcome &outcome) {
             return outcome.error != nullptr;

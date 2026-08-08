@@ -97,6 +97,9 @@ private:
 [[nodiscard]] std::shared_ptr<Client> make_client();
 [[nodiscard]] SchedulerDiagnostics diagnostics() noexcept;
 void fail_next_resident_producer_for_testing() noexcept;
+#if defined(DSMVC_METAL_SCHEDULER_TESTING)
+void set_batch_timeout_for_testing(std::uint64_t microseconds) noexcept;
+#endif
 
 RunResult run(
     const std::shared_ptr<Client> &client, FrameJob job,
