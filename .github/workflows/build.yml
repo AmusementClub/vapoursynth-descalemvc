@@ -25,19 +25,36 @@ jobs:
             cmake-architecture: -A x64
             enable-cuda: true
             enable-vulkan: true
-            cuda-subpackages: '["nvcc", "nvvm", "cuobjdump", "cudart", "crt"]'
+            package: true
+            cuda-subpackages: '["nvcc", "nvvm", "cuobjdump", "cudart", "crt", "nvtx", "visual_studio_integration"]'
           - os: macos-15
             artifact: dsmvc-macos-arm64
             cmake-architecture: -DCMAKE_OSX_ARCHITECTURES=arm64
             enable-cuda: false
             enable-vulkan: false
+            package: true
             cuda-subpackages: '[]'
           - os: ubuntu-24.04
             artifact: dsmvc-linux-x64
             cmake-architecture: ""
             enable-cuda: true
             enable-vulkan: true
-            cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt"]'
+            package: true
+            cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt", "nvtx"]'
+          - os: windows-2022
+            artifact: vulkan-windows-x64
+            cmake-architecture: -A x64
+            enable-cuda: false
+            enable-vulkan: true
+            package: false
+            cuda-subpackages: '[]'
+          - os: ubuntu-24.04
+            artifact: vulkan-linux-x64
+            cmake-architecture: ""
+            enable-cuda: false
+            enable-vulkan: true
+            package: false
+            cuda-subpackages: '[]'
 
     steps:
       - name: Check out dsmvc
@@ -69,7 +86,9 @@ jobs:
         with:
           vulkan_version: 1.4.313.0
           install_runtime: true
+          install_lavapipe: true
           cache: true
+          stripdown: true
           github_token: ${{ github.token }}
 
       - name: Add Windows Vulkan runtime to PATH
@@ -77,11 +96,11 @@ jobs:
         shell: bash
         run: echo "${VULKAN_SDK}/runtime/x64" >> "$GITHUB_PATH"
 
-      - name: Install Linux Vulkan software driver
+      - name: Install Linux Vulkan validation layers
         if: runner.os == 'Linux' && matrix.enable-vulkan
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers
+          sudo apt-get install -y vulkan-validationlayers
 
       - name: Verify Vulkan build tools
         if: matrix.enable-vulkan
@@ -89,6 +108,7 @@ jobs:
         run: |
           command -v glslc
           command -v spirv-val
+          command -v vulkaninfo
 
       - name: Configure
         shell: bash
@@ -104,28 +124,35 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Test
-        if: runner.os != 'Linux'
+      - name: Test without Vulkan
+        if: ${{ !matrix.enable-vulkan }}
         run: ctest --test-dir build --build-config Release --output-on-failure
 
-      - name: Test with Vulkan validation and Lavapipe
-        if: runner.os == 'Linux'
+      - name: Test with Vulkan validation and software driver
+        if: matrix.enable-vulkan
+        shell: bash
         env:
           DSMVC_VULKAN_VALIDATION: 1
         run: |
-          VK_ICD_FILENAMES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
-          export VK_ICD_FILENAMES
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
+            test -n "$VK_DRIVER_FILES"
+            export VK_DRIVER_FILES
+          fi
+          vulkaninfo --summary
           ctest --test-dir build --build-config Release --output-on-failure
 
       - name: Stage plugin package
+        if: matrix.package
         run: cmake --install build --config Release --prefix package
 
       - name: Verify embedded Vulkan package
-        if: matrix.enable-vulkan
+        if: matrix.package && matrix.enable-vulkan
         shell: bash
         run: test -z "$(find package -type f -name '*.spv' -print -quit)"
 
       - name: Upload plugin package
+        if: matrix.package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
