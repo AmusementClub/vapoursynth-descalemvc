@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import blank_fixed_kernel_benchmark as blank
+from paired_benchmark_support import ResourceMonitor, ResourcePressureError
 
 
 VARIANTS = ("api3", "api4")
@@ -198,6 +199,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--regression-threshold", type=float, default=0.03,
         help="Fractional median throughput drop that flags a regression.")
+    result.add_argument("--minimum-free-percent", type=int, default=10)
     return result
 
 
@@ -221,27 +223,42 @@ def main() -> int:
     options.output.mkdir(parents=True, exist_ok=True)
     samples = []
     warmups = []
+    monitor = ResourceMonitor(options.minimum_free_percent)
     cell_index = 0
-    for threads in options.threads:
-        for kernel in options.kernels:
-            for run in range(1, options.runs + 1):
-                order = VARIANTS if (cell_index + run) % 2 else VARIANTS[::-1]
-                for variant in order:
-                    if options.warmup_frames:
-                        warmup = run_sample(
+    try:
+        for threads in options.threads:
+            for kernel in options.kernels:
+                for run in range(1, options.runs + 1):
+                    order = VARIANTS if (cell_index + run) % 2 \
+                        else VARIANTS[::-1]
+                    for variant in order:
+                        label = f"{kernel}/{variant}/T{threads}/run{run}"
+                        if options.warmup_frames:
+                            before = monitor.capture(label + "/warmup-before")
+                            warmup = run_sample(
+                                options, kernel, variant, threads, run,
+                                options.warmup_frames, warmup=True)
+                            warmup["system_before"] = before
+                            warmup["system_after"] = monitor.capture(
+                                label + "/warmup-after")
+                            warmups.append(warmup)
+                        before = monitor.capture(label + "/before")
+                        sample = run_sample(
                             options, kernel, variant, threads, run,
-                            options.warmup_frames, warmup=True)
-                        warmups.append(warmup)
-                    sample = run_sample(
-                        options, kernel, variant, threads, run,
-                        options.frames, warmup=False)
-                    samples.append(sample)
-                    print(
-                        f"{kernel} {variant} R{threads}T{threads} run {run}: "
-                        f"{sample['vspipe_fps']:.2f} VSPipe fps, "
-                        f"{sample['fps']:.2f} wall fps",
-                        flush=True)
-            cell_index += 1
+                            options.frames, warmup=False)
+                        sample["system_before"] = before
+                        sample["system_after"] = monitor.capture(
+                            label + "/after")
+                        samples.append(sample)
+                        print(
+                            f"{kernel} {variant} R{threads}T{threads} run {run}: "
+                            f"{sample['vspipe_fps']:.2f} VSPipe fps, "
+                            f"{sample['fps']:.2f} wall fps",
+                            flush=True)
+                cell_index += 1
+    except ResourcePressureError as error:
+        print(f"RESOURCE_STOP: {error}", flush=True)
+        return 125
 
     summary = summarize(samples, options.regression_threshold)
     environment = {
@@ -265,6 +282,7 @@ def main() -> int:
         "src_height": options.src_height,
         "base_height": options.base_height,
         "regression_threshold_percent": options.regression_threshold * 100.0,
+        "minimum_free_percent": options.minimum_free_percent,
         "relevant_environment": {
             name: os.environ.get(name)
             for name in ("DSMVC_MEMORY_CONCURRENCY", "OMP_NUM_THREADS")

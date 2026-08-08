@@ -27,7 +27,7 @@ from pathlib import Path
 
 
 CASES = ("getfnative", "getfnative_v2", "selectkernel")
-PROFILES = ("smoke", "stratified256", "full")
+PROFILES = ("smoke", "stratified32x4", "stratified256", "full")
 IMPLEMENTATIONS = ("old", "new")
 SCRIPT_CASES = {
     "getfnative": "test_getfnative.vpy",
@@ -159,10 +159,19 @@ def file_info(path: Path) -> dict:
 
 def recipe_candidates(case: str, profile: str) -> list[dict]:
     facts = RECIPE_FACTS[case]
+    repetitions = 1
     if case == "getfnative":
         if profile == "full":
             heights = repeated_arange(700.0, 980.0, 0.1)
             scalers = GETFNATIVE_SCALERS
+        elif profile == "stratified32x4":
+            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            heights = [
+                full_heights[(2 * index + 1) * len(full_heights) // 16]
+                for index in range(8)
+            ]
+            scalers = STRATIFIED_GETFNATIVE_SCALERS
+            repetitions = 4
         elif profile == "stratified256":
             full_heights = [value / 10.0 for value in range(7000, 9800)]
             heights = [
@@ -174,27 +183,29 @@ def recipe_candidates(case: str, profile: str) -> list[dict]:
             heights = SMOKE_HEIGHTS[case]
             scalers = GETFNATIVE_SCALERS
     elif case == "getfnative_v2":
-        if profile == "stratified256":
+        if profile in ("stratified32x4", "stratified256"):
             raise ValueError(
-                "the stratified256 profile is defined only for getfnative")
+                "stratified profiles are defined only for getfnative")
         heights = (repeated_arange(840.0, 880.0, 0.1)
                    if profile == "full" else SMOKE_HEIGHTS[case])
         scalers = GETFNATIVE_V2_SCALERS
     else:
-        if profile == "stratified256":
+        if profile in ("stratified32x4", "stratified256"):
             raise ValueError(
-                "the stratified256 profile is defined only for getfnative")
+                "stratified profiles are defined only for getfnative")
         heights = [facts["fixed_height"]]
         scalers = SELECTKERNEL_SCALERS
     candidates = []
-    for scaler_spec in scalers:
-        for height in heights:
-            candidates.append({
-                "index": len(candidates),
-                "id": f"{scaler_spec['name']}@{height:.1f}",
-                "scaler": scaler_spec,
-                "height": height,
-            })
+    for repetition in range(repetitions):
+        for scaler_spec in scalers:
+            for height in heights:
+                candidates.append({
+                    "index": len(candidates),
+                    "id": f"{scaler_spec['name']}@{height:.1f}",
+                    "repetition": repetition,
+                    "scaler": scaler_spec,
+                    "height": height,
+                })
     return candidates
 
 
