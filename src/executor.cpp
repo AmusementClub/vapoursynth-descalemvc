@@ -55,9 +55,23 @@ bool Executor::input_cache_enabled() const noexcept {
 #endif
 }
 
+CpuPlanPackingStats Executor::cpu_plan_packing_stats() const noexcept {
+    return impl_->cpu ? impl_->cpu->packing_stats() : CpuPlanPackingStats{};
+}
+
 void Executor::prepare(std::shared_ptr<const AxisPlan> plan) const {
     if (impl_->cpu) {
         impl_->cpu->prepare(std::move(plan));
+        return;
+    }
+#if defined(DSMVC_HAS_CUDA)
+    impl_->cuda->prepare(std::move(plan));
+#endif
+}
+
+void Executor::defer(std::shared_ptr<const AxisPlan> plan) const {
+    if (impl_->cpu) {
+        impl_->cpu->defer(std::move(plan));
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
@@ -80,7 +94,7 @@ void Executor::inverse_rows(
     const float *input, std::ptrdiff_t input_row_stride,
     float *output, std::ptrdiff_t output_row_stride,
     std::int32_t row_count,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_rows(
             plan, input, input_row_stride, output, output_row_stride, row_count);
@@ -98,7 +112,7 @@ void Executor::inverse_columns(
     const float *input, std::ptrdiff_t input_row_stride,
     float *output, std::ptrdiff_t output_row_stride,
     std::int32_t column_count,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_columns(
             plan, input, input_row_stride, output, output_row_stride,
@@ -116,7 +130,7 @@ void Executor::inverse_2d(
     const AxisPlan &horizontal, const AxisPlan &vertical,
     const float *input, std::ptrdiff_t input_row_stride,
     float *output, std::ptrdiff_t output_row_stride,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_2d(
             horizontal, vertical, input, input_row_stride,
@@ -135,7 +149,7 @@ void Executor::inverse_2d_u8(
     const std::uint8_t *input, std::ptrdiff_t input_row_stride,
     std::uint8_t *output, std::ptrdiff_t output_row_stride,
     const IntegerConversion &conversion,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_2d_u8(
             horizontal, vertical, input, input_row_stride,
@@ -154,7 +168,7 @@ void Executor::inverse_2d_u16(
     const std::uint16_t *input, std::ptrdiff_t input_row_stride,
     std::uint16_t *output, std::ptrdiff_t output_row_stride,
     const IntegerConversion &conversion,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_2d_u16(
             horizontal, vertical, input, input_row_stride,
@@ -173,7 +187,7 @@ void Executor::inverse_2d_u8_streamed(
     const std::uint8_t *input, std::ptrdiff_t input_row_stride,
     std::uint8_t *output, std::ptrdiff_t output_row_stride,
     const IntegerConversion &conversion,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_2d_u8_streamed(
             horizontal, vertical, input, input_row_stride,
@@ -192,7 +206,7 @@ void Executor::inverse_2d_u16_streamed(
     const std::uint16_t *input, std::ptrdiff_t input_row_stride,
     std::uint16_t *output, std::ptrdiff_t output_row_stride,
     const IntegerConversion &conversion,
-    std::shared_ptr<const void> input_lifetime) const {
+    [[maybe_unused]] std::shared_ptr<const void> input_lifetime) const {
     if (impl_->cpu) {
         impl_->cpu->inverse_2d_u16_streamed(
             horizontal, vertical, input, input_row_stride,

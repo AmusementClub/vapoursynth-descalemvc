@@ -629,12 +629,18 @@ void ensure_filter_plans(FilterData &data, const VSAPI *vsapi) {
                         data.vertical_requests[index], data.custom_callback);
                 }
             }
-            for (const auto &plan : data.horizontal) {
-                if (plan) data.executor.prepare(plan);
-            }
-            for (const auto &plan : data.vertical) {
-                if (plan) data.executor.prepare(plan);
-            }
+            const auto register_plan = [&](const auto &plan) {
+                if (!plan) return;
+#if defined(DSMVC_HAS_METAL)
+                if (data.metal_enabled) {
+                    data.executor.defer(plan);
+                    return;
+                }
+#endif
+                data.executor.prepare(plan);
+            };
+            for (const auto &plan : data.horizontal) register_plan(plan);
+            for (const auto &plan : data.vertical) register_plan(plan);
             data.executor.seal();
 #if defined(DSMVC_HAS_METAL)
             if (data.metal_enabled) {
@@ -807,7 +813,8 @@ void process_float_frame(
 #if defined(DSMVC_HAS_METAL)
 MetalFrameTask make_metal_task(
     FilterData &data, const VSFrame *source, VSFrame *destination,
-    int range, const VSAPI *vsapi) {
+    int range, const std::shared_ptr<const void> &source_lifetime,
+    const VSAPI *vsapi) {
     MetalFrameTask task;
     task.job.profile_signposts = data.metal_profile_signposts;
     task.job.planes.reserve(static_cast<std::size_t>(data.num_planes));
@@ -832,6 +839,7 @@ MetalFrameTask make_metal_task(
         plane_job.integer_samples = data.fused_integer;
         plane_job.process_horizontal = data.process_horizontal;
         plane_job.process_vertical = data.process_vertical;
+        plane_job.source_lifetime = source_lifetime;
         std::uint32_t plane_half_bandwidth = 0U;
         if (data.process_horizontal) {
             plane_job.horizontal = data.horizontal[horizontal_index];
@@ -893,8 +901,72 @@ void set_metal_properties(
         properties, "_DSMVCMetalHeterogeneousDescriptors",
         static_cast<std::int64_t>(result.heterogeneous_axis_descriptors),
         maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentProducers",
+        static_cast<std::int64_t>(result.resident_producers), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentHits",
+        static_cast<std::int64_t>(result.resident_hits), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentEvictions",
+        static_cast<std::int64_t>(result.resident_evictions), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentBytes",
+        static_cast<std::int64_t>(result.resident_bytes), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalEliminatedStagingBytes",
+        static_cast<std::int64_t>(result.eliminated_staging_bytes), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalGpuIntervalNs",
+        static_cast<std::int64_t>(result.gpu_interval_nanoseconds), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalSubmissionGapNs",
+        static_cast<std::int64_t>(result.submission_gap_nanoseconds),
+        maReplace);
+    const auto diagnostics = dsmvc::metal::diagnostics();
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalResidentPinnedBlocks",
+        static_cast<std::int64_t>(
+            diagnostics.resident_cache_pinned_eviction_blocks),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalErrors",
+        static_cast<std::int64_t>(diagnostics.metal_errors), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalConsecutiveErrors",
+        static_cast<std::int64_t>(diagnostics.consecutive_metal_errors),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCMetalMaxConsecutiveErrors",
+        static_cast<std::int64_t>(diagnostics.maximum_consecutive_metal_errors),
+        maReplace);
 }
 #endif
+
+void set_cpu_plan_packing_properties(
+    VSFrame *destination, const dsmvc::CpuPlanPackingStats &stats,
+    const VSAPI *vsapi) {
+    VSMap *properties = vsapi->getFramePropertiesRW(destination);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanPackExecutions",
+        static_cast<std::int64_t>(stats.pack_executions), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanPackWaits",
+        static_cast<std::int64_t>(stats.single_flight_waits), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanPackWaitNs",
+        static_cast<std::int64_t>(stats.single_flight_wait_nanoseconds),
+        maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanLazyRequests",
+        static_cast<std::int64_t>(stats.lazy_requests), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanLazyHits",
+        static_cast<std::int64_t>(stats.lazy_hits), maReplace);
+    vsapi->mapSetInt(
+        properties, "_DSMVCCpuPlanMaxConcurrentPacks",
+        static_cast<std::int64_t>(stats.maximum_concurrent_packs), maReplace);
+}
 
 const VSFrame *VS_CC filter_get_frame(
     int frame_number, int activation_reason, void *instance_data, void **,
@@ -916,11 +988,17 @@ const VSFrame *VS_CC filter_get_frame(
         ensure_filter_plans(*data, vsapi);
         const bool uses_cuda =
             data->executor.backend() == BackendKind::cuda;
+#if defined(DSMVC_HAS_METAL)
+        const bool use_metal = data->metal_enabled;
+#else
+        constexpr bool use_metal = false;
+#endif
         std::shared_ptr<const void> source_lifetime;
-        if (data->executor.input_cache_enabled()) {
+        if (data->executor.input_cache_enabled() || use_metal) {
             const VSFrame *retained = vsapi->addFrameRef(source);
             if (!retained) {
-                throw std::runtime_error("failed to retain the CUDA source frame");
+                throw std::runtime_error(
+                    "failed to retain the cached-execution source frame");
             }
             const auto free_frame = vsapi->freeFrame;
             source_lifetime = std::shared_ptr<const void>(
@@ -931,11 +1009,6 @@ const VSFrame *VS_CC filter_get_frame(
         const auto &memory_config = memory_phase_config();
         const bool wide_kernel = adaptive_2d
             && data->vertical[0]->half_bandwidth >= 5;
-#if defined(DSMVC_HAS_METAL)
-        const bool use_metal = data->metal_enabled;
-#else
-        constexpr bool use_metal = false;
-#endif
         MemoryPhaseGuard memory_phase(
             !uses_cuda && !use_metal
             && adaptive_2d && memory_config.limit > 0U
@@ -981,7 +1054,7 @@ const VSFrame *VS_CC filter_get_frame(
 #if defined(DSMVC_HAS_METAL)
             if (use_metal) {
                 auto metal_task = make_metal_task(
-                    *data, source, destination, range, vsapi);
+                    *data, source, destination, range, source_lifetime, vsapi);
                 metal_task.result = dsmvc::metal::run(
                     data->metal_client, std::move(metal_task.job), [&] {
                     MemoryPhaseGuard cpu_memory_phase(
@@ -1009,7 +1082,7 @@ const VSFrame *VS_CC filter_get_frame(
 #if defined(DSMVC_HAS_METAL)
             if (use_metal) {
                 auto metal_task = make_metal_task(
-                    *data, source, destination, 0, vsapi);
+                    *data, source, destination, 0, source_lifetime, vsapi);
                 metal_task.result = dsmvc::metal::run(
                     data->metal_client, std::move(metal_task.job), [&] {
                     if (buffered_float_2d) ensure_intermediate();
@@ -1035,6 +1108,8 @@ const VSFrame *VS_CC filter_get_frame(
                     buffered_float_2d, source_lifetime, vsapi);
             }
         }
+        set_cpu_plan_packing_properties(
+            destination, data->executor.cpu_plan_packing_stats(), vsapi);
         if (intermediate) vsapi->freeFrame(intermediate);
         vsapi->freeFrame(source);
         return destination;

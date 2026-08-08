@@ -145,16 +145,61 @@ def metal_assignments(frames: list[vs.VideoFrame], expected_batch: int,
             frame.props.get("_DSMVCMetalStagingBytes", -1))
         unique_inputs = int(
             frame.props.get("_DSMVCMetalUniqueInputs", -1))
+        resident_producers = int(
+            frame.props.get("_DSMVCMetalResidentProducers", -1))
+        resident_hits = int(frame.props.get("_DSMVCMetalResidentHits", -1))
+        resident_evictions = int(
+            frame.props.get("_DSMVCMetalResidentEvictions", -1))
+        resident_bytes = int(
+            frame.props.get("_DSMVCMetalResidentBytes", -1))
+        eliminated_staging_bytes = int(
+            frame.props.get("_DSMVCMetalEliminatedStagingBytes", -1))
+        gpu_interval_ns = int(
+            frame.props.get("_DSMVCMetalGpuIntervalNs", -1))
+        submission_gap_ns = int(
+            frame.props.get("_DSMVCMetalSubmissionGapNs", -1))
+        packing_metrics = [
+            int(frame.props.get(name, -1))
+            for name in (
+                "_DSMVCCpuPlanPackExecutions",
+                "_DSMVCCpuPlanPackWaits",
+                "_DSMVCCpuPlanPackWaitNs",
+                "_DSMVCCpuPlanLazyRequests",
+                "_DSMVCCpuPlanLazyHits",
+                "_DSMVCCpuPlanMaxConcurrentPacks",
+            )
+        ]
         require(marker == (1 if batch else 0),
                 f"{label}: diagnostic properties disagree")
+        require(all(metric >= 0 for metric in packing_metrics),
+                f"{label}: CPU plan packing metrics are missing")
         if batch:
-            require(2 <= batch <= expected_batch,
-                    f"{label}: Metal batch {batch}, expected 2..{expected_batch}")
+            minimum_batch = 1 if resident_hits > 0 else 2
+            require(minimum_batch <= batch <= expected_batch,
+                    f"{label}: Metal batch {batch}, expected "
+                    f"{minimum_batch}..{expected_batch}")
             output_planes = copies_per_frame // 2
             require(1 <= unique_inputs <= expected_batch * output_planes,
                     f"{label}: invalid unique input count {unique_inputs}")
-            require(staging_copies == unique_inputs + batch * output_planes,
-                    f"{label}: staging used {staging_copies} memcpy calls")
+            require(resident_producers >= 0 and resident_hits >= 0
+                    and resident_evictions >= 0 and resident_bytes >= 0
+                    and eliminated_staging_bytes >= 0
+                    and gpu_interval_ns >= 0 and submission_gap_ns >= 0,
+                    f"{label}: resident diagnostics are missing")
+            if resident_producers or resident_hits:
+                require(batch * output_planes <= staging_copies
+                        <= unique_inputs + batch * output_planes,
+                        f"{label}: resident staging used "
+                        f"{staging_copies} memcpy calls")
+                require(resident_bytes > 0,
+                        f"{label}: resident cache byte count is missing")
+                if resident_hits:
+                    require(eliminated_staging_bytes > 0,
+                            f"{label}: resident hits eliminated no traffic")
+            else:
+                require(staging_copies
+                        == unique_inputs + batch * output_planes,
+                        f"{label}: staging used {staging_copies} memcpy calls")
             require(staging_bytes > 0,
                     f"{label}: staging byte count is missing")
             assigned.append(frame)
@@ -162,7 +207,10 @@ def metal_assignments(frames: list[vs.VideoFrame], expected_batch: int,
                 ranges.add(int(frame.props["_Range"]))
         else:
             require(staging_copies == 0 and staging_bytes == 0
-                    and unique_inputs == 0,
+                    and unique_inputs == 0 and resident_producers == 0
+                    and resident_hits == 0 and resident_evictions == 0
+                    and resident_bytes == 0 and eliminated_staging_bytes == 0
+                    and gpu_interval_ns == 0 and submission_gap_ns == 0,
                     f"{label}: CPU frame reports Metal staging work")
     return len(assigned), ranges
 

@@ -24,6 +24,7 @@ struct PlaneJob {
     bool process_horizontal = false;
     bool process_vertical = false;
     IntegerConversion conversion{};
+    std::shared_ptr<const void> source_lifetime;
     std::shared_ptr<const AxisPlan> horizontal;
     std::shared_ptr<const AxisPlan> vertical;
 };
@@ -44,6 +45,13 @@ struct RunResult {
     std::size_t conversion_dispatches = 0;
     std::size_t heterogeneous_axis_dispatches = 0;
     std::size_t heterogeneous_axis_descriptors = 0;
+    std::size_t resident_producers = 0;
+    std::size_t resident_hits = 0;
+    std::size_t resident_evictions = 0;
+    std::size_t resident_bytes = 0;
+    std::size_t eliminated_staging_bytes = 0;
+    std::uint64_t gpu_interval_nanoseconds = 0;
+    std::uint64_t submission_gap_nanoseconds = 0;
 };
 
 struct SchedulerDiagnostics {
@@ -54,6 +62,16 @@ struct SchedulerDiagnostics {
     std::size_t plan_cache_entries = 0;
     std::size_t plan_cache_bytes = 0;
     std::size_t plan_cache_evictions = 0;
+    std::size_t resident_cache_entries = 0;
+    std::size_t resident_cache_bytes = 0;
+    std::size_t resident_cache_capacity = 0;
+    std::size_t resident_cache_evictions = 0;
+    std::size_t resident_cache_pinned_eviction_blocks = 0;
+    std::size_t resident_cache_producers = 0;
+    std::size_t resident_cache_hits = 0;
+    std::size_t metal_errors = 0;
+    std::size_t consecutive_metal_errors = 0;
+    std::size_t maximum_consecutive_metal_errors = 0;
 };
 
 class Client final {
@@ -78,6 +96,7 @@ private:
 [[nodiscard]] bool available() noexcept;
 [[nodiscard]] std::shared_ptr<Client> make_client();
 [[nodiscard]] SchedulerDiagnostics diagnostics() noexcept;
+void fail_next_resident_producer_for_testing() noexcept;
 
 RunResult run(
     const std::shared_ptr<Client> &client, FrameJob job,

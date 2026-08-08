@@ -1301,6 +1301,59 @@ void test_concurrent_prepare_and_seal() {
                        "sealed lookup after concurrent preparation");
 }
 
+void test_lazy_plan_single_flight() {
+    if (!native_simd_available()) return;
+
+    auto plan = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        dsmvc::KernelKind::spline64, 2048, 1536, 1535.75, 0.125));
+    dsmvc::CpuExecutor executor(native_simd_path());
+    executor.defer(plan);
+    executor.seal();
+    auto stats = executor.packing_stats();
+    require(stats.pack_executions == 0U && stats.lazy_requests == 0U,
+            "deferred CPU plan was packed before first CPU selection");
+
+    constexpr std::size_t callers = 8U;
+    constexpr std::int32_t rows = 8;
+    std::vector<float> input(
+        static_cast<std::size_t>(plan->source_size) * rows);
+    fill_deterministic(input.data(), input.size(), 0x51f17eU);
+    std::vector<std::vector<float>> outputs(
+        callers, std::vector<float>(
+            static_cast<std::size_t>(plan->destination_size) * rows));
+    std::barrier start(static_cast<std::ptrdiff_t>(callers));
+    std::vector<std::exception_ptr> errors(callers);
+    std::vector<JoiningThread> threads;
+    threads.reserve(callers);
+    for (std::size_t index = 0; index < callers; ++index) {
+        threads.emplace_back([&, index] {
+            try {
+                start.arrive_and_wait();
+                executor.inverse_rows(
+                    *plan, input.data(), plan->source_size,
+                    outputs[index].data(), plan->destination_size, rows);
+            } catch (...) {
+                errors[index] = std::current_exception();
+            }
+        });
+    }
+    threads.clear();
+    for (const auto &error : errors) {
+        if (error) std::rethrow_exception(error);
+    }
+    for (std::size_t index = 1; index < outputs.size(); ++index) {
+        require(outputs[index] == outputs.front(),
+                "single-flight CPU plan produced inconsistent output");
+    }
+    stats = executor.packing_stats();
+    require(stats.pack_executions == 1U,
+            "same deferred CPU plan was packed more than once");
+    require(stats.lazy_requests == callers && stats.lazy_hits == callers - 1U,
+            "lazy CPU plan hit accounting is inconsistent");
+    require(stats.maximum_concurrent_packs == 1U,
+            "same-plan single-flight allowed concurrent packing");
+}
+
 } // namespace
 
 int main() {
@@ -1319,6 +1372,7 @@ int main() {
         test_integer_2d_executor_agreement();
         test_executor_plan_ownership();
         test_concurrent_prepare_and_seal();
+        test_lazy_plan_single_flight();
         std::cout << "dsmvc engine tests passed\n";
         return 0;
     } catch (const std::exception &error) {

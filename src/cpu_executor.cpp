@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -36,6 +38,134 @@
 namespace dsmvc {
 
 namespace {
+
+struct PackingCounters {
+    std::atomic<std::uint64_t> executions{0U};
+    std::atomic<std::uint64_t> waits{0U};
+    std::atomic<std::uint64_t> wait_nanoseconds{0U};
+    std::atomic<std::uint64_t> lazy_requests{0U};
+    std::atomic<std::uint64_t> lazy_hits{0U};
+    std::atomic<std::uint64_t> active{0U};
+    std::atomic<std::uint64_t> maximum_active{0U};
+
+    void begin_pack() noexcept {
+        executions.fetch_add(1U, std::memory_order_relaxed);
+        const auto current = active.fetch_add(1U, std::memory_order_relaxed) + 1U;
+        auto maximum = maximum_active.load(std::memory_order_relaxed);
+        while (maximum < current
+               && !maximum_active.compare_exchange_weak(
+                   maximum, current, std::memory_order_relaxed)) {}
+    }
+
+    void end_pack() noexcept {
+        active.fetch_sub(1U, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] CpuPlanPackingStats snapshot() const noexcept {
+        return {
+            executions.load(std::memory_order_relaxed),
+            waits.load(std::memory_order_relaxed),
+            wait_nanoseconds.load(std::memory_order_relaxed),
+            lazy_requests.load(std::memory_order_relaxed),
+            lazy_hits.load(std::memory_order_relaxed),
+            maximum_active.load(std::memory_order_relaxed),
+        };
+    }
+};
+
+class SharedPackedPlan final {
+public:
+    explicit SharedPackedPlan(std::shared_ptr<const AxisPlan> requested_axis,
+                              const AxisPlan *requested_identity = nullptr)
+        : axis_(std::move(requested_axis)),
+          identity_(requested_identity ? requested_identity : axis_.get()) {}
+
+    [[nodiscard]] const AxisPlan *identity() const noexcept { return identity_; }
+    [[nodiscard]] const std::shared_ptr<const AxisPlan> &axis() const noexcept {
+        return axis_;
+    }
+
+    [[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> get(
+        PackingCounters &counters, bool lazy) {
+        if (lazy) counters.lazy_requests.fetch_add(1U, std::memory_order_relaxed);
+        bool waited = false;
+        for (;;) {
+            std::unique_lock lock(mutex_);
+            if (packed_) {
+                if (lazy) {
+                    counters.lazy_hits.fetch_add(1U, std::memory_order_relaxed);
+                }
+                return packed_;
+            }
+            if (packing_) {
+                if (!waited) {
+                    counters.waits.fetch_add(1U, std::memory_order_relaxed);
+                    waited = true;
+                }
+                const auto started = std::chrono::steady_clock::now();
+                ready_.wait(lock, [&] { return !packing_; });
+                const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started).count();
+                counters.wait_nanoseconds.fetch_add(
+                    static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed, 0)),
+                    std::memory_order_relaxed);
+                continue;
+            }
+            packing_ = true;
+            lock.unlock();
+
+            counters.begin_pack();
+            try {
+                auto packed = std::make_shared<const detail::PackedCpuPlan>(
+                    detail::pack_cpu_plan(axis_, identity_));
+                counters.end_pack();
+                lock.lock();
+                packed_ = std::move(packed);
+                packing_ = false;
+                auto result = packed_;
+                lock.unlock();
+                ready_.notify_all();
+                return result;
+            } catch (...) {
+                counters.end_pack();
+                lock.lock();
+                packing_ = false;
+                lock.unlock();
+                ready_.notify_all();
+                throw;
+            }
+        }
+    }
+
+private:
+    std::shared_ptr<const AxisPlan> axis_;
+    const AxisPlan *identity_ = nullptr;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::shared_ptr<const detail::PackedCpuPlan> packed_;
+    bool packing_ = false;
+};
+
+[[nodiscard]] std::shared_ptr<SharedPackedPlan> shared_packed_plan(
+    const std::shared_ptr<const AxisPlan> &plan) {
+    static std::mutex mutex;
+    static std::unordered_map<const AxisPlan *, std::weak_ptr<SharedPackedPlan>> cache;
+    const std::scoped_lock lock(mutex);
+    if (const auto found = cache.find(plan.get()); found != cache.end()) {
+        if (auto entry = found->second.lock(); entry && entry->axis() == plan) {
+            return entry;
+        }
+        cache.erase(found);
+    }
+    auto entry = std::make_shared<SharedPackedPlan>(plan);
+    cache.emplace(plan.get(), entry);
+    if (cache.size() > 4096U) {
+        std::erase_if(cache, [](const auto &candidate) {
+            return candidate.second.expired();
+        });
+    }
+    return entry;
+}
 
 class WorkerPool {
     struct JobState {
@@ -310,34 +440,61 @@ struct CpuExecutor::Impl {
         : workers(shared_worker_pool(path)) {}
 
     mutable std::mutex mutex;
-    mutable std::vector<std::shared_ptr<const detail::PackedCpuPlan>> plans;
+    struct RegisteredPlan {
+        std::shared_ptr<SharedPackedPlan> shared;
+        bool lazy = false;
+    };
+
+    mutable std::vector<RegisteredPlan> plans;
     mutable std::atomic<bool> sealed{false};
+    mutable PackingCounters packing;
     std::shared_ptr<WorkerPool> workers;
 
     [[nodiscard]] auto find(const AxisPlan &plan) const {
         return std::find_if(
             plans.begin(), plans.end(), [&plan](const auto &candidate) {
-                return candidate->identity == &plan;
+                return candidate.shared->identity() == &plan;
             });
+    }
+
+    [[nodiscard]] RegisteredPlan register_plan(
+        const std::shared_ptr<const AxisPlan> &plan, bool lazy) const {
+        const std::scoped_lock lock(mutex);
+        if (sealed.load(std::memory_order_relaxed)) {
+            throw std::logic_error("cannot add an axis to a sealed CPU plan cache");
+        }
+        const auto found = find(*plan);
+        if (found != plans.end()) {
+            if (!lazy) found->lazy = false;
+            return *found;
+        }
+        RegisteredPlan registered{shared_packed_plan(plan), lazy};
+        plans.push_back(registered);
+        return registered;
     }
 
     [[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> get(
         const AxisPlan &plan) const {
         if (sealed.load(std::memory_order_acquire)) {
             const auto found = find(plan);
-            if (found != plans.end()) return *found;
+            if (found != plans.end()) {
+                return found->shared->get(packing, found->lazy);
+            }
         } else {
             const std::scoped_lock lock(mutex);
             const auto found = find(plan);
-            if (found != plans.end()) return *found;
+            if (found != plans.end()) {
+                const auto registered = *found;
+                return registered.shared->get(packing, registered.lazy);
+            }
         }
 
         // Borrowed plans are intentionally invocation-local. The caller may
         // reassign or destroy one after this call, so its address is not a
         // stable cache key.
         auto owned = std::make_shared<const AxisPlan>(plan);
-        return std::make_shared<const detail::PackedCpuPlan>(
-            detail::pack_cpu_plan(std::move(owned), &plan));
+        auto borrowed = std::make_shared<SharedPackedPlan>(std::move(owned), &plan);
+        return borrowed->get(packing, false);
     }
 };
 
@@ -456,31 +613,6 @@ PackedCpuPlan pack_cpu_plan(
 
 } // namespace detail
 
-namespace {
-
-[[nodiscard]] std::shared_ptr<const detail::PackedCpuPlan> acquire_packed_plan(
-    const std::shared_ptr<const AxisPlan> &plan) {
-    static std::mutex mutex;
-    static std::unordered_map<const AxisPlan *,
-                              std::weak_ptr<const detail::PackedCpuPlan>> cache;
-    const std::scoped_lock lock(mutex);
-    if (const auto found = cache.find(plan.get()); found != cache.end()) {
-        if (auto packed = found->second.lock(); packed && packed->axis == plan) {
-            return packed;
-        }
-        cache.erase(found);
-    }
-    auto packed = std::make_shared<const detail::PackedCpuPlan>(
-        detail::pack_cpu_plan(plan));
-    cache.emplace(plan.get(), packed);
-    if (cache.size() > 4096U) {
-        std::erase_if(cache, [](const auto &entry) { return entry.second.expired(); });
-    }
-    return packed;
-}
-
-} // namespace
-
 bool cpu_avx2_compiled() noexcept {
 #if defined(DSMVC_HAS_AVX2_OBJECT)
     return true;
@@ -571,18 +703,23 @@ const char *CpuExecutor::name() const noexcept {
 #endif
 }
 
+CpuPlanPackingStats CpuExecutor::packing_stats() const noexcept {
+    return impl_->packing.snapshot();
+}
+
 void CpuExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
     if (!plan || !plan->valid()) {
         throw std::invalid_argument("cannot prepare an invalid CPU axis plan");
     }
-    const std::scoped_lock lock(impl_->mutex);
-    if (impl_->sealed.load(std::memory_order_relaxed)) {
-        throw std::logic_error("cannot add an axis to a sealed CPU plan cache");
+    const auto registered = impl_->register_plan(plan, false);
+    (void)registered.shared->get(impl_->packing, false);
+}
+
+void CpuExecutor::defer(std::shared_ptr<const AxisPlan> plan) const {
+    if (!plan || !plan->valid()) {
+        throw std::invalid_argument("cannot defer an invalid CPU axis plan");
     }
-    const auto found = impl_->find(*plan);
-    if (found == impl_->plans.end()) {
-        impl_->plans.push_back(acquire_packed_plan(plan));
-    }
+    (void)impl_->register_plan(plan, true);
 }
 
 void CpuExecutor::seal() const {

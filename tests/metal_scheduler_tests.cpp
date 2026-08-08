@@ -1,18 +1,22 @@
 #include "metal_scheduler_apple.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -48,7 +52,8 @@ void require(bool condition, const std::string &message) {
 
 [[nodiscard]] FrameJob horizontal_job(
     const std::shared_ptr<const AxisPlan> &plan,
-    const float *source, float *destination, std::uint32_t height) {
+    const float *source, float *destination, std::uint32_t height,
+    std::shared_ptr<const void> source_lifetime = {}) {
     PlaneJob plane;
     plane.source = source;
     plane.source_stride_bytes =
@@ -62,6 +67,7 @@ void require(bool condition, const std::string &message) {
     plane.destination_height = height;
     plane.sample_bytes = sizeof(float);
     plane.process_horizontal = true;
+    plane.source_lifetime = std::move(source_lifetime);
     plane.horizontal = plan;
 
     FrameJob job;
@@ -74,7 +80,8 @@ void require(bool condition, const std::string &message) {
 [[nodiscard]] FrameJob two_axis_job(
     const std::shared_ptr<const AxisPlan> &horizontal,
     const std::shared_ptr<const AxisPlan> &vertical,
-    const float *source, const std::vector<float *> &destinations) {
+    const float *source, const std::vector<float *> &destinations,
+    std::shared_ptr<const void> source_lifetime = {}) {
     FrameJob job;
     for (float *destination : destinations) {
         PlaneJob plane;
@@ -94,12 +101,50 @@ void require(bool condition, const std::string &message) {
         plane.sample_bytes = sizeof(float);
         plane.process_horizontal = true;
         plane.process_vertical = true;
+        plane.source_lifetime = source_lifetime;
         plane.horizontal = horizontal;
         plane.vertical = vertical;
         job.planes.push_back(std::move(plane));
     }
     job.maximum_half_bandwidth = static_cast<std::uint32_t>(std::max(
         horizontal->half_bandwidth, vertical->half_bandwidth));
+    return job;
+}
+
+template <class Sample>
+[[nodiscard]] FrameJob integer_two_axis_job(
+    const std::shared_ptr<const AxisPlan> &horizontal,
+    const std::shared_ptr<const AxisPlan> &vertical,
+    const Sample *source, Sample *destination,
+    const dsmvc::IntegerConversion &conversion,
+    std::shared_ptr<const void> source_lifetime) {
+    PlaneJob plane;
+    plane.source = source;
+    plane.source_stride_bytes = static_cast<std::ptrdiff_t>(
+        horizontal->source_size * sizeof(Sample));
+    plane.destination = destination;
+    plane.destination_stride_bytes = static_cast<std::ptrdiff_t>(
+        horizontal->destination_size * sizeof(Sample));
+    plane.source_width = static_cast<std::uint32_t>(horizontal->source_size);
+    plane.source_height = static_cast<std::uint32_t>(vertical->source_size);
+    plane.destination_width = static_cast<std::uint32_t>(
+        horizontal->destination_size);
+    plane.destination_height = static_cast<std::uint32_t>(
+        vertical->destination_size);
+    plane.sample_bytes = sizeof(Sample);
+    plane.integer_samples = true;
+    plane.process_horizontal = true;
+    plane.process_vertical = true;
+    plane.conversion = conversion;
+    plane.source_lifetime = std::move(source_lifetime);
+    plane.horizontal = horizontal;
+    plane.vertical = vertical;
+
+    FrameJob job;
+    job.planes.push_back(std::move(plane));
+    job.maximum_half_bandwidth = static_cast<std::uint32_t>(std::max(
+        horizontal->half_bandwidth, vertical->half_bandwidth));
+    job.estimated_work = 1920ULL * 1080ULL * 2ULL;
     return job;
 }
 
@@ -365,18 +410,507 @@ void solve_two_axis(
     }
 }
 
-void warm_cpu_share(
+void require_float_output(
+    const std::vector<float> &actual, const std::vector<float> &expected,
+    const std::string &label) {
+    require(actual.size() == expected.size(), label + ": output size differs");
+    float maximum = 0.0F;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        maximum = std::max(maximum, std::abs(actual[index] - expected[index]));
+    }
+    require(maximum <= 3.0e-6F, label + ": output differs from CPU");
+}
+
+void seed_shared_float_input(
+    const std::vector<std::shared_ptr<Client>> &clients,
+    const std::shared_ptr<const AxisPlan> &plan,
+    const std::vector<float> &source, std::uint32_t height,
+    const std::shared_ptr<const void> &source_lifetime) {
+    require(clients.size() >= 4U, "resident seed requires four clients");
+    std::vector<float> output(
+        static_cast<std::size_t>(plan->destination_size) * height);
+    for (std::size_t index = 0; index < 4U; ++index) {
+        FrameJob job = horizontal_job(
+            plan, source.data(), output.data(), height, source_lifetime);
+        job.estimated_work = 1920ULL * 1080ULL * 2ULL;
+        bool used_cpu = false;
+        const RunResult result = dsmvc::metal::run(
+            clients[index], std::move(job), [&] {
+                used_cpu = true;
+                solve_rows(*plan, source, output, height);
+            }, true);
+        require(used_cpu && result.metal_batch_size == 0U,
+                "resident admission seed did not fall back to CPU");
+    }
+}
+
+void test_resident_float_reuse_and_lifetime_identity(
+    const std::shared_ptr<const AxisPlan> &plan, std::uint32_t height) {
+    constexpr std::size_t count = 7U;
+    auto source_owner = std::make_shared<std::vector<float>>(
+        static_cast<std::size_t>(plan->source_size) * height);
+    for (std::size_t index = 0; index < source_owner->size(); ++index) {
+        (*source_owner)[index] = static_cast<float>((index * 29U + 3U) & 2047U)
+            / 2047.0F;
+    }
+    std::weak_ptr<std::vector<float>> retained_source = source_owner;
+    auto token_a = std::make_shared<
+        std::shared_ptr<std::vector<float>>>(source_owner);
+    std::shared_ptr<const void> lifetime_a = token_a;
+
+    std::vector<std::shared_ptr<Client>> clients;
+    clients.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        clients.push_back(dsmvc::metal::make_client());
+    }
+    seed_shared_float_input(clients, plan, *source_owner, height, lifetime_a);
+
+    const std::size_t output_size =
+        static_cast<std::size_t>(plan->destination_size) * height;
+    std::vector<float> expected(output_size);
+    solve_rows(*plan, *source_owner, expected, height);
+    auto run_cached_wave = [&](const std::shared_ptr<const void> &lifetime) {
+        std::vector<std::vector<float>> outputs(
+            count, std::vector<float>(output_size));
+        std::vector<FrameJob> jobs;
+        std::vector<std::function<void()>> cpu_work;
+        for (std::size_t index = 0; index < count; ++index) {
+            FrameJob job = horizontal_job(
+                plan, source_owner->data(), outputs[index].data(), height,
+                lifetime);
+            job.estimated_work = 1920ULL * 1080ULL * 2ULL;
+            jobs.push_back(std::move(job));
+            cpu_work.emplace_back([&, index] { outputs[index] = expected; });
+        }
+        auto outcomes = run_wave(
+            clients, std::move(jobs), std::move(cpu_work), true);
+        for (std::size_t index = 0; index < count; ++index) {
+            require(!outcomes[index].error
+                        && outcomes[index].result.metal_batch_size == count,
+                    "resident Float32 wave did not enter Metal");
+            require_float_output(
+                outputs[index], expected, "resident Float32");
+        }
+        return outcomes;
+    };
+
+    const auto first = run_cached_wave(lifetime_a);
+    const std::size_t source_bytes = source_owner->size() * sizeof(float);
+    require(first.front().result.resident_producers == 1U
+                && first.front().result.resident_hits == count - 1U,
+            "first resident wave producer/hit accounting is incorrect");
+    require(first.front().result.eliminated_staging_bytes
+                == (count - 1U) * source_bytes,
+            "first resident wave eliminated-byte accounting is incorrect");
+
+    const auto second = run_cached_wave(lifetime_a);
+    require(second.front().result.resident_producers == 0U
+                && second.front().result.resident_hits == count,
+            "cross-submission resident reuse did not hit every consumer");
+    require(second.front().result.eliminated_staging_bytes
+                == count * source_bytes,
+            "cross-submission eliminated-byte accounting is incorrect");
+
+    for (float &sample : *source_owner) sample = 1.0F - sample;
+    solve_rows(*plan, *source_owner, expected, height);
+    auto token_b = std::make_shared<
+        std::shared_ptr<std::vector<float>>>(source_owner);
+    std::shared_ptr<const void> lifetime_b = token_b;
+    seed_shared_float_input(clients, plan, *source_owner, height, lifetime_b);
+    const auto reused_address = run_cached_wave(lifetime_b);
+    require(reused_address.front().result.resident_producers == 1U,
+            "same source address with a new lifetime reused stale resident data");
+
+    source_owner.reset();
+    token_a.reset();
+    token_b.reset();
+    lifetime_a.reset();
+    lifetime_b.reset();
+    require(!retained_source.expired(),
+            "resident cache did not retain its source lifetime");
+
+    const auto before_close = dsmvc::metal::diagnostics();
+    for (std::size_t index = 0; index + 1U < clients.size(); ++index) {
+        clients[index]->close();
+    }
+    const auto after_partial_close = dsmvc::metal::diagnostics();
+    require(!retained_source.expired(),
+            "closing one of multiple resident owners released the source");
+    require(after_partial_close.resident_cache_entries
+                    == before_close.resident_cache_entries
+                && after_partial_close.resident_cache_bytes
+                    == before_close.resident_cache_bytes,
+            "partial resident-owner close evicted a shared entry");
+
+    clients.back()->close();
+    const auto after_final_close = dsmvc::metal::diagnostics();
+    require(retained_source.expired(),
+            "closing the final resident owner retained the source");
+    require(after_final_close.resident_cache_entries + 2U
+                    == before_close.resident_cache_entries
+                && after_final_close.resident_cache_bytes
+                    < before_close.resident_cache_bytes,
+            "final resident-owner close did not purge both lifetime keys");
+
+    // Close is part of the host filter destructor path and must be repeatable.
+    clients.back()->close();
+}
+
+void test_resident_ready_singleton_after_recent_input_expiry(
+    const std::shared_ptr<const AxisPlan> &plan, std::uint32_t height) {
+    constexpr std::size_t count = 7U;
+    auto source = std::make_shared<std::vector<float>>(
+        static_cast<std::size_t>(plan->source_size) * height);
+    for (std::size_t index = 0; index < source->size(); ++index) {
+        (*source)[index] = static_cast<float>((index * 43U + 17U) & 2047U)
+            / 2047.0F;
+    }
+    auto token = std::make_shared<std::shared_ptr<std::vector<float>>>(source);
+    std::shared_ptr<const void> lifetime = token;
+    std::vector<std::shared_ptr<Client>> clients;
+    clients.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        clients.push_back(dsmvc::metal::make_client());
+    }
+    seed_shared_float_input(clients, plan, *source, height, lifetime);
+
+    const std::size_t output_size =
+        static_cast<std::size_t>(plan->destination_size) * height;
+    std::vector<float> expected(output_size);
+    solve_rows(*plan, *source, expected, height);
+    std::vector<std::vector<float>> outputs(
+        count, std::vector<float>(output_size));
+    std::vector<FrameJob> jobs;
+    std::vector<std::function<void()>> cpu_work;
+    for (std::size_t index = 0; index < count; ++index) {
+        FrameJob job = horizontal_job(
+            plan, source->data(), outputs[index].data(), height, lifetime);
+        job.estimated_work = getfnative_spline36_work;
+        jobs.push_back(std::move(job));
+        cpu_work.emplace_back([&, index] { outputs[index] = expected; });
+    }
+    const auto producer_wave = run_wave(
+        clients, std::move(jobs), std::move(cpu_work), true);
+    for (std::size_t index = 0; index < count; ++index) {
+        require(!producer_wave[index].error
+                    && producer_wave[index].result.metal_batch_size == count,
+                "resident singleton seed wave did not enter Metal");
+        require_float_output(
+            outputs[index], expected, "resident singleton seed wave");
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{75});
+    std::vector<float> singleton_output(output_size);
+    bool singleton_used_cpu = false;
+    FrameJob singleton = horizontal_job(
+        plan, source->data(), singleton_output.data(), height, lifetime);
+    singleton.estimated_work = getfnative_spline36_work;
+    const RunResult singleton_result = dsmvc::metal::run(
+        clients.front(), std::move(singleton), [&] {
+            singleton_used_cpu = true;
+            singleton_output = expected;
+        }, true);
+    require(!singleton_used_cpu && singleton_result.metal_batch_size == 1U,
+            "ready resident singleton did not use available Metal capacity");
+    require(singleton_result.resident_producers == 0U
+                && singleton_result.resident_hits == 1U,
+            "ready resident singleton did not reuse its cached input");
+    require_float_output(singleton_output, expected, "resident singleton");
+
+    auto alternate = std::make_shared<std::vector<float>>(*source);
+    alternate->front() += 0.25F;
+    auto alternate_token = std::make_shared<
+        std::shared_ptr<std::vector<float>>>(alternate);
+    std::shared_ptr<const void> alternate_lifetime = alternate_token;
+    std::vector<float> alternate_expected(output_size);
+    solve_rows(*plan, *alternate, alternate_expected, height);
+    std::vector<float> alternate_output(output_size);
+    bool alternate_used_cpu = false;
+    FrameJob nonresident = horizontal_job(
+        plan, alternate->data(), alternate_output.data(), height,
+        alternate_lifetime);
+    nonresident.estimated_work = getfnative_spline36_work;
+    const RunResult nonresident_result = dsmvc::metal::run(
+        clients.front(), std::move(nonresident), [&] {
+            alternate_used_cpu = true;
+            alternate_output = alternate_expected;
+        }, true);
+    require(alternate_used_cpu && nonresident_result.metal_batch_size == 0U,
+            "nonresident automatic singleton bypassed the CPU fallback");
+    require_float_output(
+        alternate_output, alternate_expected, "nonresident singleton");
+
+    for (const auto &client : clients) client->close();
+}
+
+void test_resident_producer_failure_recovery(
+    const std::shared_ptr<const AxisPlan> &plan, std::uint32_t height) {
+    constexpr std::size_t count = 7U;
+    auto source = std::make_shared<std::vector<float>>(
+        static_cast<std::size_t>(plan->source_size) * height, 0.375F);
+    auto token = std::make_shared<std::shared_ptr<std::vector<float>>>(source);
+    std::shared_ptr<const void> lifetime = token;
+    std::vector<std::shared_ptr<Client>> clients;
+    for (std::size_t index = 0; index < count; ++index) {
+        clients.push_back(dsmvc::metal::make_client());
+    }
+    seed_shared_float_input(clients, plan, *source, height, lifetime);
+
+    const std::size_t output_size =
+        static_cast<std::size_t>(plan->destination_size) * height;
+    std::vector<float> expected(output_size);
+    solve_rows(*plan, *source, expected, height);
+    auto make_wave = [&](std::vector<std::vector<float>> &outputs) {
+        std::vector<FrameJob> jobs;
+        std::vector<std::function<void()>> cpu_work;
+        for (std::size_t index = 0; index < count; ++index) {
+            FrameJob job = horizontal_job(
+                plan, source->data(), outputs[index].data(), height, lifetime);
+            job.estimated_work = 1920ULL * 1080ULL * 2ULL;
+            jobs.push_back(std::move(job));
+            cpu_work.emplace_back([&, index] { outputs[index] = expected; });
+        }
+        return run_wave(clients, std::move(jobs), std::move(cpu_work), true);
+    };
+
+    const auto before = dsmvc::metal::diagnostics();
+    dsmvc::metal::fail_next_resident_producer_for_testing();
+    std::vector<std::vector<float>> failed_outputs(
+        count, std::vector<float>(output_size));
+    const auto failed = make_wave(failed_outputs);
+    for (std::size_t index = 0; index < count; ++index) {
+        require(!failed[index].error
+                    && failed[index].result.metal_batch_size == 0U,
+                "automatic resident producer failure did not fall back to CPU");
+        require_float_output(
+            failed_outputs[index], expected, "resident producer fallback");
+    }
+    const auto after_failure = dsmvc::metal::diagnostics();
+    require(after_failure.metal_errors >= before.metal_errors + 1U
+                && after_failure.consecutive_metal_errors >= 1U,
+            "resident producer failure was not observable");
+
+    std::vector<std::vector<float>> retry_outputs(
+        count, std::vector<float>(output_size));
+    const auto retry = make_wave(retry_outputs);
+    for (std::size_t index = 0; index < count; ++index) {
+        require(!retry[index].error
+                    && retry[index].result.resident_producers == 1U,
+                "resident producer retry did not rebuild the cache entry");
+        require_float_output(
+            retry_outputs[index], expected, "resident producer retry");
+    }
+    const auto after_retry = dsmvc::metal::diagnostics();
+    require(after_retry.consecutive_metal_errors == 0U
+                && after_retry.maximum_consecutive_metal_errors >= 1U,
+            "successful resident retry did not clear the error streak");
+}
+
+template <class Sample>
+void test_resident_integer_conversion_keys(
+    const std::shared_ptr<const AxisPlan> &horizontal,
+    const std::shared_ptr<const AxisPlan> &vertical,
+    const dsmvc::IntegerConversion &first_conversion,
+    const dsmvc::IntegerConversion &second_conversion) {
+    constexpr std::size_t count = 7U;
+    const std::size_t source_size = static_cast<std::size_t>(
+        horizontal->source_size) * vertical->source_size;
+    auto source = std::make_shared<std::vector<Sample>>(source_size);
+    const std::uint32_t modulus = std::max(
+        first_conversion.output_maximum,
+        second_conversion.output_maximum) + 1U;
+    for (std::size_t index = 0; index < source->size(); ++index) {
+        (*source)[index] = static_cast<Sample>((index * 41U + 13U) % modulus);
+    }
+    auto token = std::make_shared<std::shared_ptr<std::vector<Sample>>>(source);
+    std::shared_ptr<const void> lifetime = token;
+
+    const std::size_t output_size = static_cast<std::size_t>(
+        horizontal->destination_size) * vertical->destination_size;
+    std::array<std::vector<Sample>, 2> expected{
+        std::vector<Sample>(output_size), std::vector<Sample>(output_size)};
+    dsmvc::CpuExecutor reference(dsmvc::CpuPath::scalar);
+    reference.prepare(horizontal);
+    reference.prepare(vertical);
+    reference.seal();
+    if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+        reference.inverse_2d_u8(
+            *horizontal, *vertical, source->data(), horizontal->source_size,
+            expected[0].data(), horizontal->destination_size, first_conversion);
+        reference.inverse_2d_u8(
+            *horizontal, *vertical, source->data(), horizontal->source_size,
+            expected[1].data(), horizontal->destination_size, second_conversion);
+    } else {
+        reference.inverse_2d_u16(
+            *horizontal, *vertical, source->data(), horizontal->source_size,
+            expected[0].data(), horizontal->destination_size, first_conversion);
+        reference.inverse_2d_u16(
+            *horizontal, *vertical, source->data(), horizontal->source_size,
+            expected[1].data(), horizontal->destination_size, second_conversion);
+    }
+
+    std::vector<std::shared_ptr<Client>> clients;
+    for (std::size_t index = 0; index < count; ++index) {
+        clients.push_back(dsmvc::metal::make_client());
+    }
+    for (std::size_t client_index = 0; client_index < 4U; ++client_index) {
+        for (std::size_t conversion_index = 0; conversion_index < 2U;
+             ++conversion_index) {
+            std::vector<Sample> seed_output(output_size);
+            const auto &conversion = conversion_index == 0U
+                ? first_conversion : second_conversion;
+            bool used_cpu = false;
+            const RunResult result = dsmvc::metal::run(
+                clients[client_index], integer_two_axis_job(
+                    horizontal, vertical, source->data(), seed_output.data(),
+                    conversion, lifetime), [&] {
+                    used_cpu = true;
+                    seed_output = expected[conversion_index];
+                }, true);
+            require(used_cpu && result.metal_batch_size == 0U,
+                    "integer resident admission seed did not use CPU");
+        }
+    }
+
+    std::vector<std::vector<Sample>> outputs(
+        count, std::vector<Sample>(output_size));
+    std::vector<FrameJob> jobs;
+    std::vector<std::function<void()>> cpu_work;
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::size_t conversion_index = index % 2U;
+        const auto &conversion = conversion_index == 0U
+            ? first_conversion : second_conversion;
+        jobs.push_back(integer_two_axis_job(
+            horizontal, vertical, source->data(), outputs[index].data(),
+            conversion, lifetime));
+        cpu_work.emplace_back([&, index, conversion_index] {
+            outputs[index] = expected[conversion_index];
+        });
+    }
+    const auto outcomes = run_wave(
+        clients, std::move(jobs), std::move(cpu_work), true);
+    for (std::size_t index = 0; index < count; ++index) {
+        require(!outcomes[index].error
+                    && outcomes[index].result.metal_batch_size == count,
+                "integer resident conversion wave did not enter Metal");
+        require(outcomes[index].result.resident_producers == 2U
+                    && outcomes[index].result.resident_hits == count - 2U,
+                "integer conversion keys aliased resident cache entries");
+        const auto &wanted = expected[index % 2U];
+        for (std::size_t sample = 0; sample < output_size; ++sample) {
+            const std::uint32_t actual_value = outputs[index][sample];
+            const std::uint32_t wanted_value = wanted[sample];
+            const std::uint32_t difference = actual_value > wanted_value
+                ? actual_value - wanted_value : wanted_value - actual_value;
+            require(difference <= 1U,
+                    "integer resident output differs by more than one LSB");
+        }
+    }
+}
+
+void test_resident_in_flight_eviction_safety() {
+    constexpr std::size_t count = 16U;
+    constexpr std::size_t wave_size = count / 2U;
+    constexpr std::uint32_t height = 1024U;
+    const auto plan = make_plan(1024, 960);
+    const std::size_t source_size =
+        static_cast<std::size_t>(plan->source_size) * height;
+    const std::size_t output_size =
+        static_cast<std::size_t>(plan->destination_size) * height;
+    std::vector<std::shared_ptr<std::vector<float>>> sources;
+    std::vector<std::shared_ptr<const void>> lifetimes;
+    std::vector<std::vector<float>> outputs(
+        count, std::vector<float>(output_size));
+    std::vector<std::shared_ptr<Client>> clients;
+    for (std::size_t index = 0; index < 7U; ++index) {
+        clients.push_back(dsmvc::metal::make_client());
+    }
+    for (std::size_t request = 0; request < count; ++request) {
+        auto source = std::make_shared<std::vector<float>>(source_size);
+        for (std::size_t index = 0; index < source_size; ++index) {
+            (*source)[index] = static_cast<float>(
+                (index * 17U + request * 31U + 5U) & 4095U) / 4095.0F;
+        }
+        auto token = std::make_shared<
+            std::shared_ptr<std::vector<float>>>(source);
+        std::shared_ptr<const void> lifetime = token;
+        sources.push_back(source);
+        lifetimes.push_back(lifetime);
+    }
+
+    const auto before = dsmvc::metal::diagnostics();
+    std::vector<Outcome> outcomes;
+    outcomes.reserve(count);
+    for (std::size_t wave = 0; wave < count; wave += wave_size) {
+        std::vector<std::shared_ptr<Client>> wave_clients;
+        std::vector<FrameJob> jobs;
+        std::vector<std::function<void()>> cpu_work;
+        for (std::size_t request = wave; request < wave + wave_size; ++request) {
+            std::vector<float> seed_output(output_size);
+            for (std::size_t client_index = 0; client_index < 4U; ++client_index) {
+                FrameJob seed = horizontal_job(
+                    plan, sources[request]->data(), seed_output.data(), height,
+                    lifetimes[request]);
+                seed.estimated_work = 1920ULL * 1080ULL * 2ULL;
+                const RunResult result = dsmvc::metal::run(
+                    clients[client_index], std::move(seed), [] {}, true);
+                require(result.metal_batch_size == 0U,
+                        "resident pressure admission seed entered Metal");
+            }
+            wave_clients.push_back(clients[(request - wave) % clients.size()]);
+            FrameJob job = horizontal_job(
+                plan, sources[request]->data(), outputs[request].data(), height,
+                lifetimes[request]);
+            job.estimated_work = 1920ULL * 1080ULL * 2ULL;
+            jobs.push_back(std::move(job));
+            cpu_work.emplace_back([&, request] {
+                solve_rows(*plan, *sources[request], outputs[request], height);
+            });
+        }
+        auto wave_outcomes = run_wave(
+            wave_clients, std::move(jobs), std::move(cpu_work), true);
+        outcomes.insert(
+            outcomes.end(),
+            std::make_move_iterator(wave_outcomes.begin()),
+            std::make_move_iterator(wave_outcomes.end()));
+    }
+    std::size_t metal_requests = 0U;
+    for (std::size_t request = 0; request < count; ++request) {
+        require(!outcomes[request].error,
+                "resident pressure request reported an error");
+        metal_requests += outcomes[request].result.metal_batch_size != 0U;
+        std::vector<float> expected(output_size);
+        solve_rows(*plan, *sources[request], expected, height);
+        require_float_output(
+            outputs[request], expected, "resident pressure output");
+    }
+    const auto after = dsmvc::metal::diagnostics();
+    require(metal_requests >= 7U,
+            "resident pressure did not produce a complete Metal batch");
+    require(after.resident_cache_capacity == 16U * 1024U * 1024U
+                && after.resident_cache_bytes <= after.resident_cache_capacity,
+            "resident cache exceeded its configured bounded capacity");
+    require(after.resident_cache_pinned_eviction_blocks
+                > before.resident_cache_pinned_eviction_blocks,
+            "resident pressure did not protect submission-pinned entries");
+    require(after.resident_cache_evictions > before.resident_cache_evictions,
+            "resident pressure did not exercise LRU eviction");
+}
+
+void align_wide_gpu_batch_window(
     const std::shared_ptr<Client> &client,
     const std::shared_ptr<const AxisPlan> &plan,
     const std::vector<float> &source, std::uint32_t height) {
+    // Drain the 9-decision GPU window so the next 7 calls form one full batch.
+    constexpr std::size_t decisions_before_full_batch = 9U;
     std::vector<float> destination(
         static_cast<std::size_t>(plan->destination_size) * height);
-    for (std::size_t index = 0; index < 7U; ++index) {
+    for (std::size_t index = 0; index < decisions_before_full_batch; ++index) {
         const RunResult result = dsmvc::metal::run(
             client, horizontal_job(plan, source.data(), destination.data(), height),
             [&] { solve_rows(*plan, source, destination, height); }, false);
         require(result.metal_batch_size == 0U,
-                "wide scheduler CPU share changed before the GPU window");
+                "wide scheduler singleton unexpectedly entered Metal");
     }
 }
 
@@ -385,7 +919,7 @@ void test_shared_source_and_recovery(
     const std::shared_ptr<Client> &second,
     const std::shared_ptr<const AxisPlan> &plan,
     const std::vector<float> &source, std::uint32_t height) {
-    warm_cpu_share(first, plan, source, height);
+    align_wide_gpu_batch_window(first, plan, source, height);
 
     constexpr std::size_t count = 7U;
     const std::size_t output_size =
@@ -482,7 +1016,7 @@ void test_interleaved_plan_offsets(
     const std::shared_ptr<const AxisPlan> &primary,
     const std::vector<float> &first_source,
     const std::vector<float> &second_source, std::uint32_t height) {
-    warm_cpu_share(client, primary, first_source, height);
+    align_wide_gpu_batch_window(client, primary, first_source, height);
 
     constexpr std::size_t count = 7U;
     std::vector<std::shared_ptr<const AxisPlan>> plans;
@@ -537,7 +1071,7 @@ void test_heterogeneous_plan_geometry(
     const std::shared_ptr<Client> &client,
     const std::shared_ptr<const AxisPlan> &primary,
     const std::vector<float> &source, std::uint32_t height) {
-    warm_cpu_share(client, primary, source, height);
+    align_wide_gpu_batch_window(client, primary, source, height);
 
     constexpr std::size_t count = 7U;
     std::vector<std::shared_ptr<const AxisPlan>> plans;
@@ -594,7 +1128,8 @@ void test_heterogeneous_two_axis_geometry(
     const std::shared_ptr<Client> &client,
     const std::shared_ptr<const AxisPlan> &primary_horizontal,
     const std::vector<float> &source, std::uint32_t source_height) {
-    warm_cpu_share(client, primary_horizontal, source, source_height);
+    align_wide_gpu_batch_window(
+        client, primary_horizontal, source, source_height);
 
     constexpr std::size_t count = 7U;
     const auto primary_vertical = make_plan(
@@ -663,8 +1198,11 @@ void test_heterogeneous_two_axis_geometry(
 
 void test_error_propagation(
     const std::shared_ptr<Client> &client,
-    const std::shared_ptr<const AxisPlan> &plan, std::uint32_t height) {
-    constexpr std::size_t count = 16U;
+    const std::shared_ptr<const AxisPlan> &plan,
+    const std::vector<float> &source, std::uint32_t height) {
+    align_wide_gpu_batch_window(client, plan, source, height);
+
+    constexpr std::size_t count = 7U;
     std::vector<std::shared_ptr<Client>> clients(count, client);
     std::vector<FrameJob> jobs;
     std::vector<std::function<void()>> cpu_work;
@@ -692,6 +1230,8 @@ void test_error_propagation(
 
 int main() {
     try {
+        require(::setenv("DSMVC_METAL_RESIDENT_MB", "16", 1) == 0,
+                "failed to configure the bounded resident-cache test budget");
         require(dsmvc::metal::available(),
                 "direct Metal scheduler test requires unified memory");
         auto first = dsmvc::metal::make_client();
@@ -733,11 +1273,34 @@ int main() {
                 / 1023.0F;
         }
         test_ring_backpressure(first, horizontal, vertical, stress_source);
-        test_error_propagation(first, small_plan, small_height);
+        test_error_propagation(
+            first, small_plan, small_source, small_height);
 
         // The failed submission must not poison subsequent command buffers.
         test_shared_source_and_recovery(
             first, second, small_plan, small_source, small_height);
+
+        test_resident_float_reuse_and_lifetime_identity(
+            small_plan, small_height);
+        test_resident_ready_singleton_after_recent_input_expiry(
+            small_plan, small_height);
+        test_resident_producer_failure_recovery(
+            small_plan, small_height);
+        const auto integer_vertical = make_plan(
+            static_cast<std::int32_t>(small_height), 20);
+        test_resident_integer_conversion_keys<std::uint8_t>(
+            small_plan, integer_vertical,
+            dsmvc::IntegerConversion{16.0F, 1.0F / 219.0F,
+                                     219.0F, 16.0F, 255U},
+            dsmvc::IntegerConversion{0.0F, 1.0F / 255.0F,
+                                     255.0F, 0.0F, 255U});
+        test_resident_integer_conversion_keys<std::uint16_t>(
+            small_plan, integer_vertical,
+            dsmvc::IntegerConversion{64.0F, 1.0F / 876.0F,
+                                     876.0F, 64.0F, 1023U},
+            dsmvc::IntegerConversion{0.0F, 1.0F / 1023.0F,
+                                     1023.0F, 0.0F, 1023U});
+        test_resident_in_flight_eviction_safety();
 
         first->close();
         std::vector<float> closed_output(
@@ -762,6 +1325,10 @@ int main() {
                   << " max_in_flight=" << diagnostics.maximum_in_flight
                   << " plan_entries=" << diagnostics.plan_cache_entries
                   << " plan_evictions=" << diagnostics.plan_cache_evictions
+                  << " resident_entries="
+                  << diagnostics.resident_cache_entries
+                  << " resident_evictions="
+                  << diagnostics.resident_cache_evictions
                   << '\n';
         return 0;
     } catch (const std::exception &error) {

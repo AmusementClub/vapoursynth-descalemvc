@@ -54,7 +54,8 @@ struct ConvertJob {
 };
 
 static inline uint image_index(uint direction, uint vector, uint axis_index,
-                               uint stride) {
+                               uint stride, uint flags) {
+    if ((flags & 1u) != 0u) return axis_index * stride + vector;
     return direction == horizontal_axis ? vector * stride + axis_index
                                         : axis_index * stride + vector;
 }
@@ -166,7 +167,7 @@ static inline void inverse_axis_fixed_wide_impl(
             const uint source_axis = uint(transpose_indices[entry]);
             sum += transpose_weights[entry]
                 * source[image_index(job.direction, vector, source_axis,
-                                     job.input_stride)];
+                                     job.input_stride, job.reserved)];
         }
         sum = apply_lower_window<HalfBandwidth>(
             sum, lower_ld, job.destination_size, i,
@@ -229,7 +230,7 @@ static inline void inverse_axis_impl(
             sum = fma(
                 transpose_weights[entry],
                 source[image_index(job.direction, vector, source_axis,
-                                   job.input_stride)],
+                                   job.input_stride, job.reserved)],
                 sum);
         }
         const uint available = min(half_bandwidth, i);
@@ -308,6 +309,12 @@ DEFINE_INVERSE_AXIS_WIDE(inverse_axis_h5, 5u)
 DEFINE_INVERSE_AXIS_WIDE(inverse_axis_h7, 7u)
 DEFINE_INVERSE_AXIS(inverse_axis_generic, 0u)
 
+DEFINE_INVERSE_AXIS(inverse_axis_transposed_h1, 1u)
+DEFINE_INVERSE_AXIS(inverse_axis_transposed_h3, 3u)
+DEFINE_INVERSE_AXIS_WIDE(inverse_axis_transposed_h5, 5u)
+DEFINE_INVERSE_AXIS_WIDE(inverse_axis_transposed_h7, 7u)
+DEFINE_INVERSE_AXIS(inverse_axis_transposed_generic, 0u)
+
 #define DEFINE_INVERSE_AXIS_BATCH(NAME, HALF_BANDWIDTH) \
 kernel void NAME( \
     device const float *source [[buffer(0)]], \
@@ -359,6 +366,12 @@ DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_batch_h5, 5u)
 DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_batch_h7, 7u)
 DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_generic, 0u)
 
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_h1, 1u)
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_h3, 3u)
+DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_transposed_batch_h5, 5u)
+DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_transposed_batch_h7, 7u)
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_generic, 0u)
+
 template <typename Sample>
 static inline void inverse_axis_integer_input_impl(
     device const Sample *source,
@@ -396,7 +409,7 @@ static inline void inverse_axis_integer_input_impl(
             const uint source_axis = uint(transpose_indices[entry]);
             const float sample = float(source[
                 image_index(job.direction, vector, source_axis,
-                            job.input_stride)]);
+                            job.input_stride, job.reserved)]);
             const float normalized =
                 (sample - conversion.input_offset) * conversion.input_scale;
             sum = fma(transpose_weights[entry], normalized, sum);
@@ -478,7 +491,7 @@ static inline void inverse_axis_integer_input_fixed_wide_impl(
             const uint source_axis = uint(transpose_indices[entry]);
             const float sample = float(source[
                 image_index(job.direction, vector, source_axis,
-                            job.input_stride)]);
+                            job.input_stride, job.reserved)]);
             const float normalized =
                 (sample - conversion.input_offset) * conversion.input_scale;
             sum += transpose_weights[entry] * normalized;
