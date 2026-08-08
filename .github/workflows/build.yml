@@ -25,36 +25,19 @@ jobs:
             cmake-architecture: -A x64
             enable-cuda: true
             enable-vulkan: true
-            package: true
             cuda-subpackages: '["nvcc", "nvvm", "cuobjdump", "cudart", "crt", "nvtx", "visual_studio_integration"]'
           - os: macos-15
             artifact: dsmvc-macos-arm64
             cmake-architecture: -DCMAKE_OSX_ARCHITECTURES=arm64
             enable-cuda: false
             enable-vulkan: false
-            package: true
             cuda-subpackages: '[]'
           - os: ubuntu-24.04
             artifact: dsmvc-linux-x64
             cmake-architecture: ""
             enable-cuda: true
             enable-vulkan: true
-            package: true
             cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt", "nvtx"]'
-          - os: windows-2022
-            artifact: vulkan-windows-x64
-            cmake-architecture: -A x64
-            enable-cuda: false
-            enable-vulkan: true
-            package: false
-            cuda-subpackages: '[]'
-          - os: ubuntu-24.04
-            artifact: vulkan-linux-x64
-            cmake-architecture: ""
-            enable-cuda: false
-            enable-vulkan: true
-            package: false
-            cuda-subpackages: '[]'
 
     steps:
       - name: Check out dsmvc
@@ -134,7 +117,12 @@ jobs:
         env:
           DSMVC_VULKAN_VALIDATION: 1
         run: |
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            layer_dir="$(cygpath -u "$VULKAN_SDK")/Bin"
+            test -d "$layer_dir"
+            VK_LAYER_PATH="$(cygpath -w "$layer_dir")"
+            export VK_LAYER_PATH
+          else
             VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
             test -n "$VK_DRIVER_FILES"
             export VK_DRIVER_FILES
@@ -143,16 +131,14 @@ jobs:
           ctest --test-dir build --build-config Release --output-on-failure
 
       - name: Stage plugin package
-        if: matrix.package
         run: cmake --install build --config Release --prefix package
 
       - name: Verify embedded Vulkan package
-        if: matrix.package && matrix.enable-vulkan
+        if: matrix.enable-vulkan
         shell: bash
         run: test -z "$(find package -type f -name '*.spv' -print -quit)"
 
       - name: Upload plugin package
-        if: matrix.package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
