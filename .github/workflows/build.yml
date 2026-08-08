@@ -70,7 +70,7 @@ jobs:
           vulkan_version: 1.4.313.0
           install_runtime: true
           install_lavapipe: true
-          cache: true
+          cache: ${{ runner.os != 'Windows' }}
           stripdown: false
           github_token: ${{ github.token }}
 
@@ -119,9 +119,10 @@ jobs:
           DSMVC_VULKAN_VALIDATION: 1
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            layer_dir="$(cygpath -u "$VULKAN_SDK")/Bin"
-            test -d "$layer_dir"
-            VK_LAYER_PATH="$(cygpath -w "$layer_dir")"
+            sdk_root="$(cygpath -u "$VULKAN_SDK")"
+            layer_manifest="$(find "$sdk_root" -iname 'VkLayer_khronos_validation.json' -print -quit)"
+            test -n "$layer_manifest"
+            VK_LAYER_PATH="$(cygpath -w "$(dirname "$layer_manifest")")"
             export VK_LAYER_PATH
           else
             VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
