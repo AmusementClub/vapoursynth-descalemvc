@@ -332,7 +332,9 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/vs_metal_integration.py"
                 --plugin "$<TARGET_FILE:dsmvc>"
                 --expect-metal enabled)
-        set_tests_properties(dsmvc_vs_metal_integration PROPERTIES TIMEOUT 300)
+        set_tests_properties(dsmvc_vs_metal_integration PROPERTIES
+            TIMEOUT 300
+            RESOURCE_LOCK dsmvc_metal_device)
     endif()
 endif()
 
@@ -505,6 +507,8 @@ if(DSMVC_ENABLE_METAL)
             "${DSMVC_FOUNDATION_FRAMEWORK}")
         add_test(NAME dsmvc_metal_scheduler_tests
             COMMAND dsmvc_metal_scheduler_tests)
-        set_tests_properties(dsmvc_metal_scheduler_tests PROPERTIES TIMEOUT 60)
+        set_tests_properties(dsmvc_metal_scheduler_tests PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK dsmvc_metal_device)
     endif()
 endif()
