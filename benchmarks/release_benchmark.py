@@ -17,6 +17,7 @@ import fixed_kernel_benchmark as fixed_report
 
 
 THREADS = (1, 8, 16, 32)
+METAL_REQUESTS = (THREADS[-1],)
 CASES = ("getfnative", "getfnative_v2", "selectkernel")
 IMPLEMENTATIONS = ("old", "new")
 KERNELS = (
@@ -51,6 +52,22 @@ CASE_REPORTS = (
         "benchmark": "frame 1111; bilinear + 10x10 Bicubic b/c grid = 101 candidates",
     },
 )
+
+METAL_FORMAT_LABELS = {
+    "grays": "GRAYS Float32",
+    "p8": "YUV420P8",
+    "p10": "YUV420P10",
+}
+
+METAL_IMPLEMENTATIONS = ("cpu", "metal")
+METAL_IMPLEMENTATION_LABELS = {
+    "cpu": "CPU",
+    "metal": "explicit Metal",
+}
+METAL_IMPLEMENTATION_COLORS = {
+    "cpu": "#2563eb",
+    "metal": "#dc2626",
+}
 
 
 def redact_plugin_hashes(value, plugin_context: bool = False):
@@ -168,6 +185,7 @@ def e2e_args(options, output: Path, threads: int,
         "--runs", "1",
         "--requests", str(threads),
         "--threads", str(threads),
+        "--backend", "cpu",
         "--output", str(output),
     ]
     if options.source_plugin:
@@ -178,6 +196,8 @@ def e2e_args(options, output: Path, threads: int,
         command.extend(["--html", str(path)])
     for case, path in options.scripts.items():
         command.extend(["--script", f"{case}={path}"])
+    if options.html or options.scripts:
+        command.append("--strict-provenance")
     if skip_errors:
         command.append("--skip-errors")
     return command
@@ -379,9 +399,205 @@ def consolidated_algorithm_minima(error_result: dict) -> list[dict]:
     return result
 
 
+def metal_comparison_table(result: dict) -> dict[tuple[str, str, int], dict]:
+    return {
+        (item["format"], item["kernel"], item["requests"]): item
+        for item in result.get("comparisons", [])
+    }
+
+
+def metal_kernels_for(result: dict, format_name: str) -> list[str]:
+    """Return only kernels actually measured for a Metal format."""
+    by_format = result.get("environment", {}).get("kernels_by_format")
+    if by_format is not None:
+        return list(by_format.get(format_name, []))
+    return list(result.get("environment", {}).get("kernels", []))
+
+
+def write_metal_scaling_svg(result: dict, path: Path) -> None:
+    """Render explicit CPU/Metal cells as per-kernel panels."""
+    environment = result["environment"]
+    requests = list(environment["requests"])
+    comparisons = metal_comparison_table(result)
+    cases = []
+    for format_name in environment["formats"]:
+        for kernel in metal_kernels_for(result, format_name):
+            values = []
+            for request in requests:
+                item = comparisons[(format_name, kernel, request)]
+                values.append({
+                    "cpu": item["cpu_fps"],
+                    "metal": item["candidate_fps"],
+                })
+            cases.append({
+                "label": f"{METAL_FORMAT_LABELS[format_name]} / {kernel}",
+                "values": values,
+            })
+
+    columns = 4
+    panel_width = 300
+    panel_height = 235
+    margin_x = 24
+    margin_y = 94
+    rows = (len(cases) + columns - 1) // columns
+    width = margin_x * 2 + columns * panel_width
+    height = margin_y + rows * panel_height + 28
+    request_summary = ("full-resource configuration"
+                       if len(requests) == 1 else "all measured request counts")
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+        f'height="{height}" viewBox="0 0 {width} {height}" role="img" '
+        'aria-labelledby="title desc">',
+        '<title id="title">Explicit Metal throughput</title>',
+        '<desc id="desc">CPU and explicit Metal wall-clock FPS across every measured format and kernel.</desc>',
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" '
+        'font-family="sans-serif" font-size="23" font-weight="700" fill="#111827">'
+        'Explicit Metal throughput</text>',
+        f'<text x="{width / 2:.1f}" y="53" text-anchor="middle" '
+        'font-family="sans-serif" font-size="13" fill="#475569">'
+        f'{environment["frames"]:,} frames per cell; {request_summary}; higher FPS is better</text>',
+    ]
+    legend_width = 150 * len(METAL_IMPLEMENTATIONS)
+    legend_start = width / 2 - legend_width / 2
+    for index, implementation in enumerate(METAL_IMPLEMENTATIONS):
+        center = legend_start + index * 150 + 75
+        color = METAL_IMPLEMENTATION_COLORS[implementation]
+        label = METAL_IMPLEMENTATION_LABELS[implementation]
+        parts.extend([
+            f'<line x1="{center - 54:.1f}" y1="75" '
+            f'x2="{center - 24:.1f}" y2="75" stroke="{color}" stroke-width="3"/>',
+            f'<circle cx="{center - 39:.1f}" cy="75" r="4" fill="{color}"/>',
+            f'<text x="{center - 13:.1f}" y="80" font-family="sans-serif" '
+            f'font-size="13" fill="#374151">{html.escape(label)}</text>',
+        ])
+
+    for index, case in enumerate(cases):
+        column = index % columns
+        row = index // columns
+        panel_x = margin_x + column * panel_width
+        panel_y = margin_y + row * panel_height
+        plot_left = panel_x + 43
+        plot_right = panel_x + panel_width - 17
+        plot_top = panel_y + 30
+        plot_bottom = panel_y + 182
+        values = [
+            value[implementation]
+            for value in case["values"]
+            for implementation in METAL_IMPLEMENTATIONS
+        ]
+        y_max = max(values) * 1.12 if values else 1.0
+        if y_max <= 0:
+            y_max = 1.0
+        parts.extend([
+            '<g font-family="sans-serif">',
+            f'<rect x="{panel_x}" y="{panel_y}" width="{panel_width - 10}" '
+            f'height="212" fill="#f8fafc" stroke="#cbd5e1"/>',
+            f'<text x="{panel_x + (panel_width - 10) / 2:.1f}" '
+            f'y="{panel_y + 20}" text-anchor="middle" font-size="13" '
+            f'font-weight="700" fill="#111827">{html.escape(case["label"])}</text>',
+            f'<line x1="{plot_left}" y1="{plot_top}" x2="{plot_left}" '
+            f'y2="{plot_bottom}" stroke="#334155"/>',
+            f'<line x1="{plot_left}" y1="{plot_bottom}" x2="{plot_right}" '
+            f'y2="{plot_bottom}" stroke="#334155"/>',
+        ])
+        for tick in (0.0, y_max / 2, y_max):
+            y = plot_bottom - tick / y_max * (plot_bottom - plot_top)
+            parts.extend([
+                f'<line x1="{plot_left}" y1="{y:.2f}" x2="{plot_right}" '
+                f'y2="{y:.2f}" stroke="#e2e8f0"/>',
+                f'<text x="{plot_left - 6}" y="{y + 4:.2f}" '
+                f'text-anchor="end" font-size="9" fill="#475569">{tick:.0f}</text>',
+            ])
+        x_positions = []
+        for request_index, request in enumerate(requests):
+            if len(requests) == 1:
+                x = (plot_left + plot_right) / 2
+            else:
+                x = plot_left + request_index * (plot_right - plot_left) / (len(requests) - 1)
+            x_positions.append(x)
+            label = ("full resources" if len(requests) == 1
+                     else f"R{request}")
+            parts.append(
+                f'<text x="{x:.2f}" y="{plot_bottom + 16}" text-anchor="middle" '
+                f'font-size="9" fill="#475569">{label}</text>')
+        if len(requests) == 1:
+            center = x_positions[0]
+            bar_width = 15
+            gap = 5
+            for implementation_index, implementation in enumerate(
+                    METAL_IMPLEMENTATIONS):
+                color = METAL_IMPLEMENTATION_COLORS[implementation]
+                value = case["values"][0][implementation]
+                y = plot_bottom - value / y_max * (plot_bottom - plot_top)
+                x = center + (implementation_index - 0.5) * (bar_width + gap)
+                parts.extend([
+                    f'<rect x="{x - bar_width / 2:.2f}" y="{y:.2f}" '
+                    f'width="{bar_width}" height="{plot_bottom - y:.2f}" '
+                    f'fill="{color}"/>',
+                    f'<text x="{x:.2f}" y="{max(plot_top + 11, y - 4):.2f}" '
+                    'text-anchor="middle" font-size="8" fill="#374151">'
+                    f'{value:.0f}</text>',
+                ])
+        else:
+            for implementation in METAL_IMPLEMENTATIONS:
+                color = METAL_IMPLEMENTATION_COLORS[implementation]
+                points = []
+                for x, value in zip(x_positions, case["values"]):
+                    y = plot_bottom - value[implementation] / y_max * (plot_bottom - plot_top)
+                    points.append((x, y))
+                parts.append(
+                    f'<polyline points="{svg_polyline(points)}" fill="none" '
+                    f'stroke="{color}" stroke-width="2.5"/>')
+                for x, y in points:
+                    parts.append(
+                        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3.2" fill="{color}"/>')
+        parts.append('</g>')
+    parts.append('</svg>')
+    path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+
+
+def build_description(metal_enabled: bool) -> tuple[str, list[str]]:
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        summary = (
+            "The current plugin was built for Apple arm64 with the isolated "
+            "NEON/FMA executor and generic `-O3 -flto=full` Release flags."
+        )
+        details = [
+            "- Build: native Apple `arm64` Release; NEON/FMA is isolated to "
+            "`cpu_executor_neon.cpp`",
+            "- Optimization: generic `-O3 -flto=full`; no model-specific "
+            "`-mcpu`, PGO, or fast-math flags",
+            "- Link: Full LTO with the API4-only "
+            "`VapourSynthPluginInit2` export",
+        ]
+        if metal_enabled:
+            summary += (
+                " The opt-in build also contains the experimental Metal "
+                "backend measured below."
+            )
+            details.append(
+                "- Metal: experimental Apple arm64 opt-in build; CPU-only "
+                "builds do not contain the backend")
+        return summary, details
+    return (
+        "The current plugin was built with generic x86-64 Release code and "
+        "an AVX2/FMA-only executor TU.",
+        [
+            "- Build: `Release`, CMake platform defaults, with AVX2/FMA "
+            "isolated to `cpu_executor_avx2.cpp` when the target is x86_64",
+            "- Link: version-script export of `VapourSynthPluginInit2`, "
+            "RELRO, NOW, and pthread",
+            "- No LTO, PGO, native CPU tuning, or fast-math flags",
+        ],
+    )
+
+
 def merge_report(options, output: Path, perf_results: dict[int, dict],
                  error_result: dict, fixed_result: dict,
-                 blank_result: dict) -> None:
+                 blank_result: dict, metal_explicit: dict | None,
+                 metal_api_ab: list[dict] | None = None) -> None:
+    metal_api_ab = metal_api_ab or []
     e2e_rows = e2e_summary(perf_results)
     fixed_values = fixed_table(fixed_result)
     blank_values = blank_table(blank_result)
@@ -397,6 +613,11 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
     write_e2e_scaling(e2e_rows, output / "e2e-scaling.svg")
     write_blank_scaling(
         blank_result, output / "blank-fixed-kernel-scaling.svg")
+    metal_enabled = metal_explicit is not None
+    if metal_enabled:
+        write_metal_scaling_svg(
+            metal_explicit, output / "metal-scaling.svg")
+    build_summary, build_details = build_description(metal_enabled)
     merged = {
         "schema_version": 1,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -425,11 +646,26 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "e2e_error_algorithm_minima": algorithm_minima,
         "fixed_kernel": redact_plugin_hashes(fixed_result),
         "blank_clip": redact_plugin_hashes(blank_result),
+        "metal": {
+            "experimental": True,
+            "explicit_cpu_comparison": redact_plugin_hashes(metal_explicit),
+            "api3_api4_comparison": [
+                redact_plugin_hashes(item) for item in metal_api_ab
+            ],
+        } if metal_enabled else None,
         "artifacts": {
             "e2e_scaling": "e2e-scaling.svg",
             "fixed_scaling": "../fixed-kernel-digimon-810p-release/scaling.svg",
             "blank_scaling": "blank-fixed-kernel-scaling.svg",
             "blank_clip_report": "../blank-fixed-kernel-digimon-810p-release-20260805/benchmark.json",
+            "metal_explicit": (
+                "../metal-plugin-explicit/benchmark.json"
+                if metal_enabled else None),
+            "metal_scaling": "metal-scaling.svg" if metal_enabled else None,
+            "metal_api_ab": [
+                "../metal-api3-api4-p8-bicubic/benchmark.json",
+                "../metal-api3-api4-p10-spline64/benchmark.json",
+            ] if metal_api_ab else [],
         },
     }
     (output / "release-benchmark.json").write_text(
@@ -442,7 +678,7 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "## Executive Summary",
         "",
         "This package compares the current Release build against the original descale plugin on the same Digimon source, VapourSynth runtime, decoder, geometry, and thread configurations.",
-        "All performance and error results below were freshly measured. The current plugin was built with generic x86-64 Release code and an AVX2/FMA-only executor TU.",
+        f"All performance and error results below were freshly measured. {build_summary}",
         "",
         "| Workload | Result |",
         "|---|---:|",
@@ -450,6 +686,7 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         f"| Fixed kernel coverage | {len(fixed_result['cases'])} algorithm/thread/implementation cases, {fixed_result['environment']['frames']:,} frames each |",
         f"| BlankClip kernel coverage | {len(blank_result['cases'])} implementation/thread/kernel cases, {blank_result['environment']['frames']:,} frames each |",
         f"| Error coverage | {sum(item['candidate_count'] for item in error_result['errors']['summaries']):,} candidates across three recipes |",
+        *([f"| Metal coverage | {len(metal_explicit['comparisons'])} explicit CPU/Metal cells |"] if metal_enabled else []),
         "",
         f"At R1T1, the current Release is substantially faster on the complete candidate scans: `getfnative` {r1['getfnative']['old']['candidates_per_second']['median']:.3f} -> {r1['getfnative']['new']['candidates_per_second']['median']:.3f} candidates/s ({r1['getfnative']['new_speedup']:.2f}x), `getfnative_v2` {r1['getfnative_v2']['new_speedup']:.2f}x, and `selectkernel` {r1['selectkernel']['new_speedup']:.2f}x.",
         f"At R32T32, the gains narrow to {r32['getfnative_v2']['new_speedup']:.2f}x-{r32['getfnative']['new_speedup']:.2f}x because the workload reaches this machine's shared memory data-movement ceiling. The fixed-kernel R8-R32 results show the same convergence: available memory stays high, so the bottleneck is local memory bandwidth and/or cache/DRAM access and queueing latency rather than capacity.",
@@ -493,9 +730,7 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "",
         f"- Source SHA-256: `{fixed_result['environment']['source']['sha256']}`",
         f"- Source filter: `{options.source_filter}`",
-        "- Build: `Release`, CMake platform defaults, with AVX2/FMA isolated to `cpu_executor_avx2.cpp` when the target is x86_64",
-        "- Link: version-script export of `VapourSynthPluginInit2`, RELRO, NOW, and pthread",
-        "- No LTO, PGO, native CPU tuning, or fast-math flags",
+        *build_details,
         "",
         "## E2E Thread Scaling",
         "",
@@ -571,6 +806,43 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
             new = values["new"]
             cells.append(f"{old:.3f} -> {new:.3f} ({new / old:.2f}x)")
         lines.append(f"| `{label}` | " + " | ".join(cells) + " |")
+    if metal_enabled:
+        explicit_values = metal_comparison_table(metal_explicit)
+        metal_requests = metal_explicit["environment"]["requests"]
+        metal_header = (
+            f"Full resources (R{metal_requests[0]}T{metal_requests[0]})"
+            if len(metal_requests) == 1
+            else "R1 | R8 | R16 | R32")
+        lines.extend([
+            "",
+            "## Metal Throughput",
+            "",
+            "Metal is an Apple arm64 opt-in backend. Each cell compares a separate CPU process with a separate explicit Metal process on the same fixed graph; only explicit CPU/Metal measurements are included here.",
+            "",
+            f"Each cell uses {metal_explicit['environment']['frames']:,} frames, {metal_explicit['environment']['samples']} measured pairs, and {metal_explicit['environment']['warmups']} warmup pair.",
+            "",
+            "[Open the explicit CPU/Metal scaling chart](metal-scaling.svg)",
+            "",
+            f"| Format / kernel | {metal_header} |",
+            ("|---|---:|" if len(metal_requests) == 1
+             else "|---|---:|---:|---:|---:|"),
+        ])
+        for format_name in metal_explicit["environment"]["formats"]:
+            for kernel in metal_kernels_for(metal_explicit, format_name):
+                cells = []
+                for requests in metal_explicit["environment"]["requests"]:
+                    item = explicit_values[(format_name, kernel, requests)]
+                    cells.append(
+                        f"{item['cpu_fps']:.3f} -> "
+                        f"{item['candidate_fps']:.3f} "
+                        f"({item['speedup']:.3f}x)")
+                lines.append(
+                    f"| `{METAL_FORMAT_LABELS[format_name]} / {kernel}` | "
+                    + " | ".join(cells) + " |")
+        lines.extend([
+            "",
+            "Correctness, limited/full range propagation, 1-LSB integer tolerance, narrow/wide batches, cancellation reuse, illegal-route rejection, and Metal-off loading are enforced separately by the API4 evaluator. Metal callbacks complete before returning their frame; output `n` still depends only on input `n`.",
+        ])
     lines.extend([
         "",
         "## BlankClip Throughput",
@@ -598,15 +870,10 @@ def merge_report(options, output: Path, perf_results: dict[int, dict],
         "",
         "The full fixed-kernel table shows where the current executor wins or loses by algorithm and thread count. The error table shows whether those throughput differences change candidate selection or reconstructed output. Together they are the release-facing performance and compatibility record.",
         "",
-        "## Raw Artifacts",
+        "## Retained Artifacts",
         "",
-        "- [Merged machine-readable result](release-benchmark.json)",
-        "- E2E per-thread reports: `../e2e-digimon-release-r{1,8,16,32}t{1,8,16,32}/benchmark.json`",
-        "- [Full error report](../e2e-digimon-release-errors-r32t32/benchmark.json)",
-        "- [Full fixed-kernel report](../fixed-kernel-digimon-810p-release/benchmark.json)",
-        "- [Fixed-kernel CSV](../fixed-kernel-digimon-810p-release/benchmark.csv)",
-        "- [BlankClip fixed-kernel report](../blank-fixed-kernel-digimon-810p-release-20260805/benchmark.json)",
-        "- [BlankClip CSV](../blank-fixed-kernel-digimon-810p-release-20260805/benchmark.csv)",
+        "This release snapshot retains the benchmark report and SVG charts only. Per-cell JSON and CSV files, error shards, command logs, and generated subreports are intentionally omitted from Git.",
+        "",
         "",
     ])
     (output / "release-benchmark.md").write_text("\n".join(lines),
@@ -639,6 +906,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--html", action="append", type=Path, default=[])
     parser.add_argument("--script", action="append", default=[],
                         metavar="CASE=PATH")
+    parser.add_argument("--metal-plugin", type=Path,
+                        help=("Metal-enabled API4 plugin for the full "
+                              "CPU/Metal matrix."))
+    parser.add_argument("--metal-api3-plugin", type=Path,
+                        help=("Preserved API3 Metal control for directed "
+                              "migration A/B."))
+    parser.add_argument("--metal-frames", type=int, default=512)
+    parser.add_argument("--metal-samples", type=int, default=5)
     parser.add_argument("--skip-run", action="store_true",
                         help="Only consolidate already completed reports")
     return parser.parse_args()
@@ -660,7 +935,16 @@ def main() -> int:
         "fixed_kernel_benchmark.py").resolve()
     options.blank_runner = Path(__file__).with_name(
         "blank_fixed_kernel_benchmark.py").resolve()
+    options.metal_runner = Path(__file__).with_name(
+        "metal_plugin_benchmark.py").resolve()
+    options.metal_ab_runner = Path(__file__).with_name(
+        "metal_plugin_ab_benchmark.py").resolve()
     options.html = [item.expanduser().resolve() for item in options.html]
+    if options.metal_plugin:
+        options.metal_plugin = options.metal_plugin.expanduser().resolve()
+    if options.metal_api3_plugin:
+        options.metal_api3_plugin = (
+            options.metal_api3_plugin.expanduser().resolve())
     options.scripts = {}
     for raw in options.script:
         case, value = raw.split("=", 1)
@@ -671,6 +955,13 @@ def main() -> int:
             raise FileNotFoundError(required)
     if options.source_plugin and not options.source_plugin.is_file():
         raise FileNotFoundError(options.source_plugin)
+    for plugin in (options.metal_plugin, options.metal_api3_plugin):
+        if plugin and not plugin.is_file():
+            raise FileNotFoundError(plugin)
+    if options.metal_api3_plugin and not options.metal_plugin:
+        raise ValueError("--metal-api3-plugin requires --metal-plugin")
+    if options.metal_frames < 1 or options.metal_samples < 1:
+        raise ValueError("Metal frames and samples must be positive")
     if options.source_prefer_hw < 0 or options.source_prefer_hw > 7:
         raise ValueError("--source-prefer-hw must be between 0 and 7")
     if options.source_ff_loglevel < 0 or options.source_ff_loglevel > 8:
@@ -712,6 +1003,7 @@ def main() -> int:
             "--src-height", "810",
             "--base-height", "1000",
             "--threads", *[str(item) for item in THREADS],
+            "--backend", "cpu",
             "--runs", "1",
             "--implementations", "old", "new",
             "--kernels", *[name for name, _ in KERNELS],
@@ -733,11 +1025,53 @@ def main() -> int:
             "--src-height", "810",
             "--base-height", "1000",
             "--threads", *[str(item) for item in THREADS],
+            "--backend", "cpu",
             "--runs", "1",
             "--kernels", *[name for name, _ in KERNELS],
             "--output", str(blank_output),
         ]
         run(blank_command, "blank fixed kernel old/new")
+        if options.metal_plugin:
+            common_metal = [
+                options.python,
+                str(options.metal_runner),
+                "--plugin", str(options.metal_plugin),
+                "--vspipe", str(options.vspipe),
+                "--formats", "grays", "p8", "p10",
+                "--kernels", *[item for item in (
+                    "bilinear", "spline16", "bicubic", "spline36",
+                    "lanczos3", "spline64")],
+                "--requests", *[str(item) for item in METAL_REQUESTS],
+                "--frames", str(options.metal_frames),
+                "--samples", str(options.metal_samples),
+                "--warmups", "1",
+            ]
+            explicit_output = output_root / "metal-plugin-explicit"
+            run(common_metal + [
+                "--candidate-backend", "metal",
+                "--json-out", str(explicit_output / "benchmark.json"),
+            ], "full explicit Metal vs CPU matrix")
+            if options.metal_api3_plugin:
+                for format_name, kernel in (
+                        ("p8", "bicubic"), ("p10", "spline64")):
+                    ab_output = output_root / (
+                        f"metal-api3-api4-{format_name}-{kernel}")
+                    run([
+                        options.python,
+                        str(options.metal_ab_runner),
+                        "--control-plugin", str(options.metal_api3_plugin),
+                        "--candidate-plugin", str(options.metal_plugin),
+                        "--control-backend", "metal",
+                        "--candidate-backend", "metal",
+                        "--vspipe", str(options.vspipe),
+                        "--json-out", str(ab_output / "benchmark.json"),
+                        "--formats", format_name,
+                        "--kernels", kernel,
+                        "--requests", "16", "32",
+                        "--frames", "512",
+                        "--samples", "5",
+                        "--warmups", "1",
+                    ], f"API3/API4 Metal {format_name}/{kernel}")
     else:
         perf_results = {
             threads: read_json(output_root /
@@ -753,8 +1087,22 @@ def main() -> int:
     blank_result = read_json(
         output_root / "blank-fixed-kernel-digimon-810p-release-20260805" /
         "benchmark.json")
+    metal_explicit = None
+    metal_api_ab = []
+    if options.metal_plugin:
+        metal_explicit = read_json(
+            output_root / "metal-plugin-explicit" / "benchmark.json")
+        if options.metal_api3_plugin:
+            metal_api_ab = [
+                read_json(output_root / name / "benchmark.json")
+                for name in (
+                    "metal-api3-api4-p8-bicubic",
+                    "metal-api3-api4-p10-spline64",
+                )
+            ]
     merge_report(options, options.release_output.expanduser().resolve(),
-                 perf_results, error_result, fixed_result, blank_result)
+                 perf_results, error_result, fixed_result, blank_result,
+                 metal_explicit, metal_api_ab)
     print(options.release_output.expanduser().resolve())
     return 0
 

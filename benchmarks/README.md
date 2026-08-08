@@ -31,7 +31,44 @@ python3 benchmarks/cpu_api_regression.py \
 
 It writes raw JSON/CSV samples, a summary CSV and Markdown report, and the
 exact warm-up and measurement commands. VSPipe-internal FPS is the primary
-metric; the default regression threshold is 3%.
+metric; the default regression threshold is 3%, and the command returns a
+nonzero status when any cell crosses it.
+
+## API4 Apple ARM validation
+
+`validate_api4_apple_arm.sh` is the consolidated migration evaluator. It uses
+VapourSynth R57 API3/API4 headers to build a preserved API3 control and the
+API4 candidate in fresh Ninja directories, while running both plugins through
+the local VapourSynth R78 Python/VSPipe runtime. It verifies effective ARM and
+x86 build commands, API4 registration and return signatures, Metal-off and
+Metal-on behavior, native-SIMD correctness and stable identities, 12 CPU A/B
+cells, and the bounded Metal integration and throughput cases.
+
+```sh
+bash benchmarks/validate_api4_apple_arm.sh \
+  --api3-control /path/to/api3-control-worktree \
+  --venv /path/to/vapoursynth/venv
+```
+
+The evaluator stops before additional heavy stages if macOS reports low free
+memory or new swap-outs. Its local result cannot satisfy the full release gate
+by itself: Windows x64 CUDA, Linux x64 CUDA, and macOS arm64 CI evidence for the
+exact candidate commit is mandatory. When a candidate has been pushed under
+separate authorization, provide the exported CI evidence through the path
+documented by `--help`.
+
+The Metal plugin A/B runner compares API3 and API4 in separate VSPipe processes
+with alternating order. The migration gate runs only P8 Bicubic B3 and P10
+Spline64 at requests 16/32, 512 frames, and five measured pairs, requiring each
+API4 ratio of medians to remain at or above `0.97x`. Correctness is established
+separately by `tests/vs_metal_integration.py`, which covers P8/P10, all six
+kernel classes, limited/full range, 17/32-frame tails, batch sizes 4/7,
+cancellation reuse, and high/low-concurrency automatic routing.
+
+The native Metal profilers and route analyzers are exploratory tools. Their
+stored API3 measurements explain the narrow routing policy but are not current
+API4 migration evidence; retain JSON, plugin hashes, and command lines with any
+new result.
 
 Each runner invokes its matching VapourSynth graph:
 

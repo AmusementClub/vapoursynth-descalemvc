@@ -36,11 +36,24 @@ CMakeUserPresets.json
 /venv/
 /env/
 
-# Reproducible benchmark output and profiler data
-/benchmark-results/
-/benchmark-results-*/
-/profile-results/
+# Local OMX/OMC orchestration state and generated evidence
+.omx/
+.omc/
+
+# All local benchmark/profile result trees and profiler data
+benchmark-results*/
+profile-results*/
+**/benchmark.json
+**/benchmark.csv
+**/benchmark.md
+**/release-benchmark.json
+**/summary.csv
+**/performance.csv
+**/errors.csv
+**/commands.txt
 *.uprof
+*.prof
+*.profdata
 *.profraw
 *.gcda
 *.gcno
