@@ -1,0 +1,2 @@
+PTX file    1: dsmvc_cuda.sm_75.ptx
+PTX file    2: dsmvc_cuda.sm_120.ptx

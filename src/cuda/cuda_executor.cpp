@@ -1089,6 +1089,7 @@ struct ExecutionSlot {
     DeviceBuffer intermediate;
     DeviceBuffer destination;
     DeviceBuffer integer_output;
+    DeviceBuffer f64_status;
 };
 
 class Runtime {
@@ -1114,6 +1115,13 @@ public:
         if (count < 1) throw std::runtime_error("no CUDA device is available");
         cuda_check(cudaGetDevice(&device_ordinal), "cudaGetDevice");
         CurrentDeviceGuard current(device_ordinal);
+        int compute_major = 0;
+        cuda_check(
+            cudaDeviceGetAttribute(
+                &compute_major, cudaDevAttrComputeCapabilityMajor,
+                device_ordinal),
+            "cudaDeviceGetAttribute(compute capability)");
+        native_double_supported = compute_major >= 2;
         cuda_check(cudaFree(nullptr), "CUDA primary-context initialization");
         try {
             cuda_check(
@@ -1273,6 +1281,7 @@ public:
     std::size_t limited_slot_count = 4U;
     std::size_t limited_slot_busy = 0U;
     bool adaptive_slots = true;
+    bool native_double_supported = false;
     std::mutex staging_mutex;
     std::condition_variable staging_available;
     std::size_t maximum_staging_count = 16U;
@@ -1348,6 +1357,12 @@ private:
     std::size_t total = 0U;
     const auto add_field = [&](const auto &values) {
         using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
+        const std::size_t alignment = alignof(Value);
+        const std::size_t remainder = total % alignment;
+        if (remainder != 0U) {
+            total = checked_add(
+                total, alignment - remainder, "CUDA packed plan alignment");
+        }
         total = checked_add(
             total,
             checked_product(values.size(), sizeof(Value), "CUDA plan field"),
@@ -1355,10 +1370,15 @@ private:
     };
     add_field(axis.transpose_offsets);
     add_field(axis.transpose_indices);
-    add_field(axis.transpose_weights);
-    add_field(axis.lower_ld);
-    add_field(axis.upper_l);
-    add_field(axis.inverse_diagonal);
+    if (axis.requires_float64()) {
+        add_field(axis.transpose_weights_f64);
+        add_field(axis.ldlt_bands_f64);
+    } else {
+        add_field(axis.transpose_weights);
+        add_field(axis.lower_ld);
+        add_field(axis.upper_l);
+        add_field(axis.inverse_diagonal);
+    }
     if (total > maximum_allocation_bytes) {
         throw std::length_error("CUDA packed plan exceeds 2 GiB");
     }
@@ -1379,11 +1399,26 @@ struct PackedPlan {
             static_cast<std::uint32_t>(axis->destination_size);
         descriptor.half_bandwidth =
             static_cast<std::uint32_t>(axis->half_bandwidth);
+        precision = axis->requires_float64()
+            ? cuda_kernel::PlanPrecision::float64
+            : cuda_kernel::PlanPrecision::float32;
+        if (precision == cuda_kernel::PlanPrecision::float64
+            && !runtime->native_double_supported) {
+            throw std::runtime_error(
+                "CUDA device does not support native Float64 execution");
+        }
 
         storage_bytes = packed_plan_storage_bytes(*axis);
         std::size_t total_bytes = 0U;
         const auto reserve_field = [&](const auto &values) {
             using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
+            const std::size_t alignment = alignof(Value);
+            const std::size_t remainder = total_bytes % alignment;
+            if (remainder != 0U) {
+                total_bytes = checked_add(
+                    total_bytes, alignment - remainder,
+                    "CUDA packed plan alignment");
+            }
             const std::size_t bytes = checked_product(
                 values.size(), sizeof(Value), "CUDA plan field");
             const std::size_t offset = total_bytes;
@@ -1392,10 +1427,24 @@ struct PackedPlan {
         };
         const std::size_t offsets_offset = reserve_field(axis->transpose_offsets);
         const std::size_t indices_offset = reserve_field(axis->transpose_indices);
-        const std::size_t weights_offset = reserve_field(axis->transpose_weights);
-        const std::size_t lower_offset = reserve_field(axis->lower_ld);
-        const std::size_t upper_offset = reserve_field(axis->upper_l);
-        const std::size_t diagonal_offset = reserve_field(axis->inverse_diagonal);
+        std::size_t weights_offset = 0U;
+        std::size_t lower_offset = 0U;
+        std::size_t upper_offset = 0U;
+        std::size_t diagonal_offset = 0U;
+        std::size_t weights_f64_offset = 0U;
+        std::size_t bands_f64_offset = 0U;
+        if (precision == cuda_kernel::PlanPrecision::float64) {
+            weights_f64_offset = reserve_field(axis->transpose_weights_f64);
+            bands_f64_offset = reserve_field(axis->ldlt_bands_f64);
+        } else {
+            weights_offset = reserve_field(axis->transpose_weights);
+            lower_offset = reserve_field(axis->lower_ld);
+            upper_offset = reserve_field(axis->upper_l);
+            diagonal_offset = reserve_field(axis->inverse_diagonal);
+        }
+        if (total_bytes != storage_bytes) {
+            throw std::logic_error("CUDA packed plan layout accounting mismatch");
+        }
         CurrentDeviceGuard context(runtime->device_ordinal);
         staging = runtime->plan_staging_arena.allocate(
             runtime->api, runtime->device_ordinal, storage_bytes);
@@ -1412,22 +1461,33 @@ struct PackedPlan {
         };
         {
             NvtxRange trace{NvtxLabel::plan_pack, storage_bytes};
+            std::memset(staging.data(), 0, storage_bytes);
             copy_field(offsets_offset, axis->transpose_offsets);
             copy_field(indices_offset, axis->transpose_indices);
-            copy_field(weights_offset, axis->transpose_weights);
-            copy_field(lower_offset, axis->lower_ld);
-            copy_field(upper_offset, axis->upper_l);
-            copy_field(diagonal_offset, axis->inverse_diagonal);
+            if (precision == cuda_kernel::PlanPrecision::float64) {
+                copy_field(weights_f64_offset, axis->transpose_weights_f64);
+                copy_field(bands_f64_offset, axis->ldlt_bands_f64);
+            } else {
+                copy_field(weights_offset, axis->transpose_weights);
+                copy_field(lower_offset, axis->lower_ld);
+                copy_field(upper_offset, axis->upper_l);
+                copy_field(diagonal_offset, axis->inverse_diagonal);
+            }
         }
 
         storage = runtime->plan_arena.allocate(
             runtime->api, runtime->device_ordinal, storage_bytes);
         transpose_offsets = storage.pointer() + offsets_offset;
         transpose_indices = storage.pointer() + indices_offset;
-        transpose_weights = storage.pointer() + weights_offset;
-        lower_ld = storage.pointer() + lower_offset;
-        upper_l = storage.pointer() + upper_offset;
-        inverse_diagonal = storage.pointer() + diagonal_offset;
+        if (precision == cuda_kernel::PlanPrecision::float64) {
+            transpose_weights_f64 = storage.pointer() + weights_f64_offset;
+            ldlt_bands_f64 = storage.pointer() + bands_f64_offset;
+        } else {
+            transpose_weights = storage.pointer() + weights_offset;
+            lower_ld = storage.pointer() + lower_offset;
+            upper_l = storage.pointer() + upper_offset;
+            inverse_diagonal = storage.pointer() + diagonal_offset;
+        }
         bool submitted = false;
         {
             NvtxRange trace{NvtxLabel::plan_upload, storage_bytes};
@@ -1503,6 +1563,8 @@ struct PackedPlan {
     std::shared_ptr<const AxisPlan> axis;
     const AxisPlan *identity = nullptr;
     cuda_kernel::AxisPlanDescriptor descriptor{};
+    cuda_kernel::PlanPrecision precision =
+        cuda_kernel::PlanPrecision::float32;
     DeviceArena::Allocation storage;
     mutable PinnedBlockPool::Allocation staging;
     mutable DeviceEventPool::Handle ready;
@@ -1513,6 +1575,8 @@ struct PackedPlan {
     DevicePointer lower_ld = nullptr;
     DevicePointer upper_l = nullptr;
     DevicePointer inverse_diagonal = nullptr;
+    DevicePointer transpose_weights_f64 = nullptr;
+    DevicePointer ldlt_bands_f64 = nullptr;
     mutable std::mutex upload_mutex;
     mutable std::atomic<bool> upload_complete{false};
     mutable std::atomic<std::uint32_t> execution_count{0U};
@@ -1735,6 +1799,66 @@ void launch_transpose(
         *runtime.api, status, "CUDA transpose kernel launch");
 }
 
+void launch_transpose_f64(
+    Runtime &runtime, ExecutionSlot &slot, TransposeSample sample,
+    std::uint32_t width, std::uint32_t height,
+    const cuda_kernel::IntegerConversionDescriptor *conversion,
+    DevicePointer requested_source, DevicePointer requested_destination) {
+    cudaError_t status = cudaErrorInvalidValue;
+    switch (sample) {
+    case TransposeSample::float32:
+        status = cuda_launch::transpose_f64(
+            device_as<const float>(requested_source), width, height,
+            device_as<double>(requested_destination), slot.stream);
+        break;
+    case TransposeSample::uint8:
+        status = cuda_launch::transpose_f64(
+            device_as<const std::uint8_t>(requested_source), width, height,
+            *conversion, device_as<double>(requested_destination), slot.stream);
+        break;
+    case TransposeSample::uint16:
+        status = cuda_launch::transpose_f64(
+            device_as<const std::uint16_t>(requested_source), width, height,
+            *conversion, device_as<double>(requested_destination), slot.stream);
+        break;
+    }
+    cuda_check(
+        *runtime.api, status, "CUDA Float64 transpose kernel launch");
+}
+
+void launch_promote_f64(
+    Runtime &runtime, ExecutionSlot &slot, DevicePointer source,
+    std::uint32_t element_count, DevicePointer destination) {
+    cuda_check(
+        *runtime.api,
+        cuda_launch::promote_f64(
+            device_as<const float>(source), element_count,
+            device_as<double>(destination), slot.stream),
+        "CUDA Float64 promotion kernel launch");
+}
+
+void schedule_f64_finite_check(
+    Runtime &runtime, ExecutionSlot &slot, DevicePointer source,
+    std::uint32_t element_count, std::uint32_t &host_nonfinite) {
+    cuda_check(
+        *runtime.api,
+        runtime.api->mem_zero_async(
+            slot.f64_status.pointer(), sizeof(std::uint32_t), slot.stream),
+        "cudaMemsetAsync(Float64 finite status)");
+    cuda_check(
+        *runtime.api,
+        cuda_launch::check_finite_f64(
+            device_as<const double>(source), element_count,
+            device_as<std::uint32_t>(slot.f64_status.pointer()), slot.stream),
+        "CUDA Float64 finite-check kernel launch");
+    cuda_check(
+        *runtime.api,
+        runtime.api->memcpy_dtoh_async(
+            &host_nonfinite, slot.f64_status.pointer(),
+            sizeof(host_nonfinite), slot.stream),
+        "cudaMemcpyAsync(Float64 finite status download)");
+}
+
 void launch_horizontal(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
     std::uint32_t vector_count, DevicePointer output,
@@ -1835,6 +1959,98 @@ void launch_vertical_split(
         "CUDA vertical-solve kernel launch");
 }
 
+void launch_horizontal_f64(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    std::uint32_t vector_count, DevicePointer source, DevicePointer output) {
+    cuda_check(
+        *runtime.api,
+        cuda_launch::inverse_horizontal_f64(
+            device_as<const double>(source), vector_count, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<const double>(plan.transpose_weights_f64),
+            device_as<const double>(plan.ldlt_bands_f64),
+            plan.precision, device_as<double>(output),
+            runtime.horizontal_threads, slot.stream),
+        "CUDA Float64 inverse-horizontal kernel launch");
+}
+
+void launch_horizontal_split_f64(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    std::uint32_t vector_count, DevicePointer source, DevicePointer output) {
+    cuda_check(
+        *runtime.api,
+        cuda_launch::rhs_horizontal_f64(
+            device_as<const double>(source), vector_count, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<const double>(plan.transpose_weights_f64),
+            plan.precision, device_as<double>(output), slot.stream),
+        "CUDA Float64 horizontal-RHS kernel launch");
+    cuda_check(
+        *runtime.api,
+        cuda_launch::solve_horizontal_f64(
+            vector_count, plan.descriptor,
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<const double>(plan.ldlt_bands_f64),
+            plan.precision, device_as<double>(output),
+            runtime.split_horizontal_threads, slot.stream),
+        "CUDA Float64 horizontal-solve kernel launch");
+}
+
+void launch_vertical_f64(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    DevicePointer source, std::uint32_t source_width, DevicePointer output) {
+    cuda_check(
+        *runtime.api,
+        cuda_launch::inverse_vertical_f64(
+            device_as<const double>(source), source_width, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<const double>(plan.transpose_weights_f64),
+            device_as<const double>(plan.ldlt_bands_f64),
+            plan.precision, device_as<double>(output),
+            runtime.vertical_threads, slot.stream),
+        "CUDA Float64 inverse-vertical kernel launch");
+}
+
+void launch_vertical_split_f64(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    DevicePointer source, std::uint32_t source_width, DevicePointer output) {
+    cuda_check(
+        *runtime.api,
+        cuda_launch::rhs_vertical_f64(
+            device_as<const double>(source), source_width, plan.descriptor,
+            device_as<const std::uint32_t>(plan.transpose_offsets),
+            device_as<const std::int32_t>(plan.transpose_indices),
+            device_as<const float>(plan.transpose_weights),
+            device_as<const double>(plan.transpose_weights_f64),
+            plan.precision, device_as<double>(output), slot.stream),
+        "CUDA Float64 vertical-RHS kernel launch");
+    cuda_check(
+        *runtime.api,
+        cuda_launch::solve_vertical_f64(
+            source_width, plan.descriptor,
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<const double>(plan.ldlt_bands_f64),
+            plan.precision, device_as<double>(output),
+            runtime.split_vertical_threads, slot.stream),
+        "CUDA Float64 vertical-solve kernel launch");
+}
+
 template <class Sample>
 void launch_conversion(
     Runtime &runtime, ExecutionSlot &slot, std::uint32_t element_count,
@@ -1844,6 +2060,30 @@ void launch_conversion(
         conversion, device_as<Sample>(slot.integer_output.pointer()),
         slot.stream);
     cuda_check(*runtime.api, status, "CUDA integer-conversion kernel launch");
+}
+
+template <class Sample>
+void launch_conversion_f64(
+    Runtime &runtime, ExecutionSlot &slot, DevicePointer source,
+    std::uint32_t element_count,
+    const cuda_kernel::IntegerConversionDescriptor *conversion,
+    DevicePointer output) {
+    cudaError_t status = cudaErrorInvalidValue;
+    if constexpr (std::is_same_v<Sample, float>) {
+        status = cuda_launch::convert_f64(
+            device_as<const double>(source), element_count,
+            device_as<float>(output), slot.stream);
+    } else if constexpr (std::is_same_v<Sample, std::uint8_t>) {
+        status = cuda_launch::convert_f64(
+            device_as<const double>(source), element_count, *conversion,
+            device_as<std::uint8_t>(output), slot.stream);
+    } else {
+        status = cuda_launch::convert_f64(
+            device_as<const double>(source), element_count, *conversion,
+            device_as<std::uint16_t>(output), slot.stream);
+    }
+    cuda_check(
+        *runtime.api, status, "CUDA Float64 output-conversion kernel launch");
 }
 
 template <class Sample>
@@ -1946,6 +2186,12 @@ struct CudaExecutor::Impl {
         const IntegerConversion *conversion,
         std::shared_ptr<const void> input_lifetime) const {
         NvtxRange execute_trace{NvtxLabel::execute_2d};
+        const bool use_float64 =
+            horizontal.requires_float64() || vertical.requires_float64();
+        if (use_float64 && !runtime->native_double_supported) {
+            throw std::runtime_error(
+                "CUDA device does not support native Float64 execution");
+        }
         std::shared_ptr<const PackedPlan> packed_horizontal;
         std::shared_ptr<const PackedPlan> packed_vertical;
         {
@@ -1968,11 +2214,16 @@ struct CudaExecutor::Impl {
         const std::size_t source_bytes = checked_product(
             source_elements, sizeof(Sample), "CUDA source image");
         const std::size_t transposed_bytes = checked_product(
-            source_elements, sizeof(float), "CUDA transposed image");
+            source_elements, use_float64 ? sizeof(double) : sizeof(float),
+            "CUDA transposed image");
         const std::size_t intermediate_bytes = checked_product(
-            intermediate_elements, sizeof(float), "CUDA intermediate image");
+            intermediate_elements,
+            use_float64 ? sizeof(double) : sizeof(float),
+            "CUDA intermediate image");
         const std::size_t destination_bytes = checked_product(
-            destination_elements, sizeof(float), "CUDA destination image");
+            destination_elements,
+            use_float64 ? sizeof(double) : sizeof(float),
+            "CUDA destination image");
         const std::size_t result_bytes = checked_product(
             destination_elements, sizeof(Sample), "CUDA output image");
         const std::size_t source_row_bytes = checked_product(
@@ -1993,7 +2244,7 @@ struct CudaExecutor::Impl {
             runtime->host_transfer == HostTransferMode::staging_decoupled
             && std::is_same_v<Sample, float>;
         const bool cache_requested =
-            input_lifetime && runtime->input_cache.enabled();
+            !use_float64 && input_lifetime && runtime->input_cache.enabled();
         std::shared_ptr<CachedInput> cached_input;
         std::optional<InputCacheKey> cache_key;
         bool cache_producer = false;
@@ -2075,6 +2326,7 @@ struct CudaExecutor::Impl {
         CurrentDeviceGuard context(runtime->device_ordinal);
         ExecutionSlot &slot = *runtime->slots[slot_index];
         const std::size_t source_capacity = runtime->horizontal_global_transpose
+                && !use_float64
             ? std::max(source_bytes, intermediate_bytes) : source_bytes;
         {
             NvtxRange trace{NvtxLabel::buffer_reserve};
@@ -2094,9 +2346,14 @@ struct CudaExecutor::Impl {
                 slot.host_destination.reserve(
                     runtime->api, runtime->device_ordinal, result_bytes);
             }
-            if constexpr (!std::is_same_v<Sample, float>) {
+            if (use_float64 || !std::is_same_v<Sample, float>) {
                 slot.integer_output.reserve(
                     runtime->api, runtime->device_ordinal, result_bytes);
+            }
+            if (use_float64) {
+                slot.f64_status.reserve(
+                    runtime->api, runtime->device_ordinal,
+                    sizeof(std::uint32_t));
             }
         }
 
@@ -2143,9 +2400,15 @@ struct CudaExecutor::Impl {
             }
             {
                 NvtxRange trace{NvtxLabel::input_transpose, source_elements};
-                launch_transpose(
-                    *runtime, slot, transpose, source_width, source_height,
-                    converted_ptr, slot.source.pointer(), transposed_input);
+                if (use_float64) {
+                    launch_transpose_f64(
+                        *runtime, slot, transpose, source_width, source_height,
+                        converted_ptr, slot.source.pointer(), transposed_input);
+                } else {
+                    launch_transpose(
+                        *runtime, slot, transpose, source_width, source_height,
+                        converted_ptr, slot.source.pointer(), transposed_input);
+                }
             }
         };
         if (!cached_input) {
@@ -2167,7 +2430,7 @@ struct CudaExecutor::Impl {
         }
 
         const DevicePointer horizontal_output =
-            runtime->horizontal_global_transpose
+            runtime->horizontal_global_transpose && !use_float64
             ? slot.source.pointer() : slot.intermediate.pointer();
         {
             NvtxRange trace{NvtxLabel::horizontal_plan_wait};
@@ -2175,7 +2438,16 @@ struct CudaExecutor::Impl {
         }
         {
             NvtxRange trace{NvtxLabel::horizontal_stage, source_height};
-            if (should_split_rhs(*runtime, *packed_horizontal)) {
+            if (use_float64
+                && should_split_rhs(*runtime, *packed_horizontal)) {
+                launch_horizontal_split_f64(
+                    *runtime, slot, *packed_horizontal, source_height,
+                    transposed_input, horizontal_output);
+            } else if (use_float64) {
+                launch_horizontal_f64(
+                    *runtime, slot, *packed_horizontal, source_height,
+                    transposed_input, horizontal_output);
+            } else if (should_split_rhs(*runtime, *packed_horizontal)) {
                 launch_horizontal_split(
                     *runtime, slot, *packed_horizontal, source_height,
                     horizontal_output, transposed_input);
@@ -2185,7 +2457,7 @@ struct CudaExecutor::Impl {
                     horizontal_output, transposed_input);
             }
         }
-        if (runtime->horizontal_global_transpose) {
+        if (runtime->horizontal_global_transpose && !use_float64) {
             NvtxRange trace{
                 NvtxLabel::intermediate_transpose, intermediate_elements};
             launch_transpose(
@@ -2199,7 +2471,18 @@ struct CudaExecutor::Impl {
         }
         {
             NvtxRange trace{NvtxLabel::vertical_stage, destination_width};
-            if (should_split_rhs(*runtime, *packed_vertical)) {
+            if (use_float64
+                && should_split_rhs(*runtime, *packed_vertical)) {
+                launch_vertical_split_f64(
+                    *runtime, slot, *packed_vertical,
+                    slot.intermediate.pointer(), destination_width,
+                    slot.destination.pointer());
+            } else if (use_float64) {
+                launch_vertical_f64(
+                    *runtime, slot, *packed_vertical,
+                    slot.intermediate.pointer(), destination_width,
+                    slot.destination.pointer());
+            } else if (should_split_rhs(*runtime, *packed_vertical)) {
                 launch_vertical_split(
                     *runtime, slot, *packed_vertical,
                     slot.intermediate.pointer(), destination_width,
@@ -2211,8 +2494,25 @@ struct CudaExecutor::Impl {
                     slot.destination.pointer());
             }
         }
+        std::uint32_t f64_nonfinite = 0U;
+        if (use_float64) {
+            schedule_f64_finite_check(
+                *runtime, slot, slot.destination.pointer(),
+                checked_u32(
+                    destination_elements, "CUDA destination element count"),
+                f64_nonfinite);
+        }
         DevicePointer result = slot.destination.pointer();
-        if constexpr (!std::is_same_v<Sample, float>) {
+        if (use_float64) {
+            NvtxRange trace{
+                NvtxLabel::output_conversion, destination_elements};
+            launch_conversion_f64<Sample>(
+                *runtime, slot, slot.destination.pointer(),
+                checked_u32(
+                    destination_elements, "CUDA destination element count"),
+                converted_ptr, slot.integer_output.pointer());
+            result = slot.integer_output.pointer();
+        } else if constexpr (!std::is_same_v<Sample, float>) {
             NvtxRange trace{
                 NvtxLabel::output_conversion, destination_elements};
             launch_conversion<Sample>(
@@ -2244,6 +2544,10 @@ struct CudaExecutor::Impl {
             release.release_completed();
         } else {
             release.mark_completed();
+        }
+        if (f64_nonfinite != 0U) {
+            throw std::runtime_error(
+                "CUDA Float64 2D execution produced a nonfinite value");
         }
         if (!direct_transfer) {
             NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
@@ -2302,6 +2606,11 @@ void CudaExecutor::inverse_rows(
     }
     if (row_count == 0) return;
     NvtxRange execute_trace{NvtxLabel::execute_rows};
+    const bool use_float64 = plan.requires_float64();
+    if (use_float64 && !impl_->runtime->native_double_supported) {
+        throw std::runtime_error(
+            "CUDA device does not support native Float64 execution");
+    }
     std::shared_ptr<const PackedPlan> packed;
     {
         NvtxRange trace{NvtxLabel::prepared_plan_lookup};
@@ -2317,11 +2626,17 @@ void CudaExecutor::inverse_rows(
         destination_width, height, "CUDA row destination");
     const std::size_t source_bytes = checked_product(
         source_elements, sizeof(float), "CUDA row source");
-    const std::size_t output_bytes = checked_product(
+    const std::size_t result_bytes = checked_product(
         output_elements, sizeof(float), "CUDA row destination");
+    const std::size_t transposed_bytes = checked_product(
+        source_elements, use_float64 ? sizeof(double) : sizeof(float),
+        "CUDA row transposed source");
+    const std::size_t output_bytes = checked_product(
+        output_elements, use_float64 ? sizeof(double) : sizeof(float),
+        "CUDA row workspace destination");
 
     const bool cache_requested =
-        input_lifetime && impl_->runtime->input_cache.enabled();
+        !use_float64 && input_lifetime && impl_->runtime->input_cache.enabled();
     std::shared_ptr<CachedInput> cached_input;
     std::optional<InputCacheKey> cache_key;
     bool cache_producer = false;
@@ -2345,14 +2660,22 @@ void CudaExecutor::inverse_rows(
         if (!cache_requested) {
             slot.transposed.reserve(
                 impl_->runtime->api, impl_->runtime->device_ordinal,
-                source_bytes);
+                transposed_bytes);
         }
         slot.destination.reserve(
             impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
         slot.host_source.reserve(
             impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
         slot.host_destination.reserve(
-            impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
+            impl_->runtime->api, impl_->runtime->device_ordinal, result_bytes);
+        if (use_float64) {
+            slot.integer_output.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                result_bytes);
+            slot.f64_status.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                sizeof(std::uint32_t));
+        }
     }
 
     if (cache_requested) {
@@ -2391,9 +2714,17 @@ void CudaExecutor::inverse_rows(
         }
         {
             NvtxRange trace{NvtxLabel::input_transpose, source_elements};
-            launch_transpose(
-                *impl_->runtime, slot, TransposeSample::float32,
-                width, height, nullptr, slot.source.pointer(), transposed_input);
+            if (use_float64) {
+                launch_transpose_f64(
+                    *impl_->runtime, slot, TransposeSample::float32,
+                    width, height, nullptr,
+                    slot.source.pointer(), transposed_input);
+            } else {
+                launch_transpose(
+                    *impl_->runtime, slot, TransposeSample::float32,
+                    width, height, nullptr,
+                    slot.source.pointer(), transposed_input);
+            }
         }
     };
     if (!cached_input) {
@@ -2415,7 +2746,7 @@ void CudaExecutor::inverse_rows(
     }
 
     const DevicePointer horizontal_output =
-        impl_->runtime->horizontal_global_transpose
+        impl_->runtime->horizontal_global_transpose && !use_float64
         ? slot.source.pointer() : slot.destination.pointer();
     {
         NvtxRange trace{NvtxLabel::horizontal_plan_wait};
@@ -2423,7 +2754,15 @@ void CudaExecutor::inverse_rows(
     }
     {
         NvtxRange trace{NvtxLabel::horizontal_stage, height};
-        if (should_split_rhs(*impl_->runtime, *packed)) {
+        if (use_float64 && should_split_rhs(*impl_->runtime, *packed)) {
+            launch_horizontal_split_f64(
+                *impl_->runtime, slot, *packed, height,
+                transposed_input, horizontal_output);
+        } else if (use_float64) {
+            launch_horizontal_f64(
+                *impl_->runtime, slot, *packed, height,
+                transposed_input, horizontal_output);
+        } else if (should_split_rhs(*impl_->runtime, *packed)) {
             launch_horizontal_split(
                 *impl_->runtime, slot, *packed, height, horizontal_output,
                 transposed_input);
@@ -2433,20 +2772,36 @@ void CudaExecutor::inverse_rows(
                 transposed_input);
         }
     }
-    if (impl_->runtime->horizontal_global_transpose) {
+    if (impl_->runtime->horizontal_global_transpose && !use_float64) {
         NvtxRange trace{NvtxLabel::intermediate_transpose, output_elements};
         launch_transpose(
             *impl_->runtime, slot, TransposeSample::float32,
             height, destination_width, nullptr,
             slot.source.pointer(), slot.destination.pointer());
     }
+    std::uint32_t f64_nonfinite = 0U;
+    if (use_float64) {
+        schedule_f64_finite_check(
+            *impl_->runtime, slot, slot.destination.pointer(),
+            checked_u32(output_elements, "CUDA row destination element count"),
+            f64_nonfinite);
+    }
+    DevicePointer result = slot.destination.pointer();
+    if (use_float64) {
+        NvtxRange trace{NvtxLabel::output_conversion, output_elements};
+        launch_conversion_f64<float>(
+            *impl_->runtime, slot, slot.destination.pointer(),
+            checked_u32(output_elements, "CUDA row destination element count"),
+            nullptr, slot.integer_output.pointer());
+        result = slot.integer_output.pointer();
+    }
     {
-        NvtxRange trace{NvtxLabel::destination_download, output_bytes};
+        NvtxRange trace{NvtxLabel::destination_download, result_bytes};
         cuda_check(
             *impl_->runtime->api,
             impl_->runtime->api->memcpy_dtoh_async(
-                slot.host_destination.data(), slot.destination.pointer(),
-                output_bytes, slot.stream),
+                slot.host_destination.data(), result,
+                result_bytes, slot.stream),
             "cudaMemcpyAsync(row destination download)");
     }
     {
@@ -2458,8 +2813,12 @@ void CudaExecutor::inverse_rows(
     }
     packed->mark_upload_complete();
     release.mark_completed();
+    if (f64_nonfinite != 0U) {
+        throw std::runtime_error(
+            "CUDA Float64 row execution produced a nonfinite value");
+    }
     {
-        NvtxRange trace{NvtxLabel::host_unpack, output_bytes};
+        NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
         unpack_host_rows(
             slot.host_destination.data(),
             checked_product(
@@ -2485,6 +2844,11 @@ void CudaExecutor::inverse_columns(
     }
     if (column_count == 0) return;
     NvtxRange execute_trace{NvtxLabel::execute_columns};
+    const bool use_float64 = plan.requires_float64();
+    if (use_float64 && !impl_->runtime->native_double_supported) {
+        throw std::runtime_error(
+            "CUDA device does not support native Float64 execution");
+    }
     std::shared_ptr<const PackedPlan> packed;
     {
         NvtxRange trace{NvtxLabel::prepared_plan_lookup};
@@ -2500,11 +2864,16 @@ void CudaExecutor::inverse_columns(
         width, destination_height, "CUDA column destination");
     const std::size_t source_bytes = checked_product(
         source_elements, sizeof(float), "CUDA column source");
-    const std::size_t output_bytes = checked_product(
+    const std::size_t result_bytes = checked_product(
         output_elements, sizeof(float), "CUDA column destination");
+    const std::size_t promoted_bytes = checked_product(
+        source_elements, sizeof(double), "CUDA promoted column source");
+    const std::size_t output_bytes = checked_product(
+        output_elements, use_float64 ? sizeof(double) : sizeof(float),
+        "CUDA column workspace destination");
 
     const bool cache_requested =
-        input_lifetime && impl_->runtime->input_cache.enabled();
+        !use_float64 && input_lifetime && impl_->runtime->input_cache.enabled();
     std::shared_ptr<CachedInput> cached_input;
     std::optional<InputCacheKey> cache_key;
     bool cache_producer = false;
@@ -2527,10 +2896,21 @@ void CudaExecutor::inverse_columns(
             impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
         slot.destination.reserve(
             impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
+        if (use_float64) {
+            slot.transposed.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                promoted_bytes);
+            slot.integer_output.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                result_bytes);
+            slot.f64_status.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                sizeof(std::uint32_t));
+        }
         slot.host_source.reserve(
             impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
         slot.host_destination.reserve(
-            impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
+            impl_->runtime->api, impl_->runtime->device_ordinal, result_bytes);
     }
 
     if (cache_requested) {
@@ -2545,8 +2925,10 @@ void CudaExecutor::inverse_columns(
         cached_input = std::move(acquired.input);
         cache_producer = acquired.producer;
     }
-    const DevicePointer device_input = cached_input
+    const DevicePointer uploaded_input = cached_input
         ? cached_input->pointer() : slot.source.pointer();
+    const DevicePointer device_input = use_float64
+        ? slot.transposed.pointer() : uploaded_input;
     const auto populate_input = [&] {
         {
             NvtxRange trace{NvtxLabel::host_pack, source_bytes};
@@ -2564,9 +2946,16 @@ void CudaExecutor::inverse_columns(
             cuda_check(
                 *impl_->runtime->api,
                 impl_->runtime->api->memcpy_htod_async(
-                    device_input, slot.host_source.data(), source_bytes,
+                    uploaded_input, slot.host_source.data(), source_bytes,
                     slot.stream),
                 "cudaMemcpyAsync(column source upload)");
+        }
+        if (use_float64) {
+            NvtxRange trace{NvtxLabel::input_transpose, source_elements};
+            launch_promote_f64(
+                *impl_->runtime, slot, uploaded_input,
+                checked_u32(source_elements, "CUDA column source element count"),
+                device_input);
         }
     };
     if (!cached_input) {
@@ -2593,7 +2982,15 @@ void CudaExecutor::inverse_columns(
     }
     {
         NvtxRange trace{NvtxLabel::vertical_stage, width};
-        if (should_split_rhs(*impl_->runtime, *packed)) {
+        if (use_float64 && should_split_rhs(*impl_->runtime, *packed)) {
+            launch_vertical_split_f64(
+                *impl_->runtime, slot, *packed, device_input, width,
+                slot.destination.pointer());
+        } else if (use_float64) {
+            launch_vertical_f64(
+                *impl_->runtime, slot, *packed, device_input, width,
+                slot.destination.pointer());
+        } else if (should_split_rhs(*impl_->runtime, *packed)) {
             launch_vertical_split(
                 *impl_->runtime, slot, *packed, device_input, width,
                 slot.destination.pointer());
@@ -2603,13 +3000,31 @@ void CudaExecutor::inverse_columns(
                 slot.destination.pointer());
         }
     }
+    std::uint32_t f64_nonfinite = 0U;
+    if (use_float64) {
+        schedule_f64_finite_check(
+            *impl_->runtime, slot, slot.destination.pointer(),
+            checked_u32(
+                output_elements, "CUDA column destination element count"),
+            f64_nonfinite);
+    }
+    DevicePointer result = slot.destination.pointer();
+    if (use_float64) {
+        NvtxRange trace{NvtxLabel::output_conversion, output_elements};
+        launch_conversion_f64<float>(
+            *impl_->runtime, slot, slot.destination.pointer(),
+            checked_u32(
+                output_elements, "CUDA column destination element count"),
+            nullptr, slot.integer_output.pointer());
+        result = slot.integer_output.pointer();
+    }
     {
-        NvtxRange trace{NvtxLabel::destination_download, output_bytes};
+        NvtxRange trace{NvtxLabel::destination_download, result_bytes};
         cuda_check(
             *impl_->runtime->api,
             impl_->runtime->api->memcpy_dtoh_async(
-                slot.host_destination.data(), slot.destination.pointer(),
-                output_bytes, slot.stream),
+                slot.host_destination.data(), result,
+                result_bytes, slot.stream),
             "cudaMemcpyAsync(column destination download)");
     }
     {
@@ -2621,8 +3036,12 @@ void CudaExecutor::inverse_columns(
     }
     packed->mark_upload_complete();
     release.mark_completed();
+    if (f64_nonfinite != 0U) {
+        throw std::runtime_error(
+            "CUDA Float64 column execution produced a nonfinite value");
+    }
     {
-        NvtxRange trace{NvtxLabel::host_unpack, output_bytes};
+        NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
         unpack_host_rows(
             slot.host_destination.data(),
             checked_product(width, sizeof(float), "CUDA output columns"), output,

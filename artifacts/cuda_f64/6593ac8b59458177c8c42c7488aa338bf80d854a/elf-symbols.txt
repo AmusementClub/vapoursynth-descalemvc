@@ -1,0 +1,191 @@
+
+Fatbin ptx code:
+================
+arch = sm_75
+code version = [9,3]
+host = linux
+compile_size = 64bit
+compressed
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+ptxasOptions =  --generate-line-info 
+
+Fatbin elf code:
+================
+arch = sm_75
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+symbols:
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_0_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_1_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_2_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_3_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_f32
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_check_finite_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_promote_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32
+
+Fatbin elf code:
+================
+arch = sm_86
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+symbols:
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_0_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_1_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_2_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_3_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_f32
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_check_finite_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_promote_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32
+
+Fatbin elf code:
+================
+arch = sm_89
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+symbols:
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_0_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_1_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_2_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_3_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_f32
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_check_finite_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_promote_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32
+
+Fatbin ptx code:
+================
+arch = sm_120
+code version = [9,3]
+host = linux
+compile_size = 64bit
+compressed
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+ptxasOptions =  --generate-line-info 
+
+Fatbin elf code:
+================
+arch = sm_120
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+symbols:
+STT_OBJECT       STB_WEAK   STV_DEFAULT  U .nv.reservedSmem.offset0
+STT_?            STB_WEAK   STO_RESERVED_SHARED   __nv_reservedSMEM_offset_0_alias
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_0_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_1_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_2_$__cuda_sm20_div_rn_f64_full
+STT_FUNC         STB_LOCAL  STV_DEFAULT    $__internal_3_$__cuda_sm20_div_rn_f64_full
+STT_OBJECT       STB_WEAK   STV_DEFAULT  U .nv.reservedSmem.cap
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_f64_f32
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_check_finite_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_promote_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32_f64
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_convert_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_solve_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_inverse_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_vertical
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal_column_major
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_rhs_horizontal
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u16
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_u8
+STT_FUNC         STB_GLOBAL STO_ENTRY      dsmvc_cuda_transpose_f32
