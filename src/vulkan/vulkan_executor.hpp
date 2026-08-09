@@ -2,12 +2,17 @@
 
 #include <dsmvc/engine.hpp>
 
+#include "vulkan_f64.hpp"
+
 #include <memory>
+#include <string>
 
 namespace dsmvc::vulkan_detail {
 
 [[nodiscard]] bool backend_available() noexcept;
 void require_backend_available();
+[[nodiscard]] VulkanFloat64Capabilities selected_float64_capabilities();
+[[nodiscard]] std::string selected_float64_capability_report();
 
 class VulkanExecutor {
 public:
