@@ -205,8 +205,8 @@ public:
         return parallelism_;
     }
 
-    template <class Function>
-    bool try_run(std::size_t task_count, Function &&function) {
+    bool try_run(std::size_t task_count,
+                 std::function<void(std::size_t)> function) {
         task_count = std::min(task_count, parallelism_);
         if (task_count < 2U
             || in_use_.test_and_set(std::memory_order_acquire)) {
@@ -216,7 +216,7 @@ public:
         std::shared_ptr<JobState> state;
         try {
             state = std::make_shared<JobState>(
-                task_count, std::forward<Function>(function));
+                task_count, std::move(function));
         } catch (...) {
             in_use_.clear(std::memory_order_release);
             throw;
