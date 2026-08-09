@@ -317,6 +317,7 @@ struct DeviceInfo {
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties properties{};
     VkPhysicalDeviceMemoryProperties memory{};
+    VulkanFloat64Capabilities float64{};
     std::uint32_t queue_family = std::numeric_limits<std::uint32_t>::max();
     bool dedicated_compute = false;
     bool eligible = false;
@@ -340,8 +341,26 @@ struct DeviceInfo {
         DeviceInfo info;
         info.index = index;
         info.physical = physical_devices[index];
-        vkGetPhysicalDeviceProperties(info.physical, &info.properties);
+        VkPhysicalDeviceFloatControlsProperties float_controls{};
+        float_controls.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
+        VkPhysicalDeviceProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties.pNext = &float_controls;
+        vkGetPhysicalDeviceProperties2(info.physical, &properties);
+        info.properties = properties.properties;
         vkGetPhysicalDeviceMemoryProperties(info.physical, &info.memory);
+        VkPhysicalDeviceFeatures2 features{};
+        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        vkGetPhysicalDeviceFeatures2(info.physical, &features);
+        info.float64 = {
+            features.features.shaderFloat64 == VK_TRUE,
+            float_controls.shaderRoundingModeRTEFloat64 == VK_TRUE,
+            float_controls.shaderSignedZeroInfNanPreserveFloat64 == VK_TRUE,
+            float_controls.shaderDenormPreserveFloat64 == VK_TRUE,
+            info.properties.limits.minStorageBufferOffsetAlignment,
+            info.properties.limits.maxStorageBufferRange,
+        };
 
         std::uint32_t queue_count = 0U;
         vkGetPhysicalDeviceQueueFamilyProperties(
@@ -416,6 +435,32 @@ struct DeviceInfo {
                 << device.properties.deviceID << std::dec << ", Vulkan "
                 << version_string(device.properties.apiVersion) << ", "
                 << device.reason << ')';
+    }
+    return message.str();
+}
+
+[[nodiscard]] std::string float64_capability_report(const DeviceInfo &device) {
+    const auto &capabilities = device.float64;
+    std::ostringstream message;
+    message << "device=" << device.properties.deviceName
+            << " vendor_id=0x" << std::hex << device.properties.vendorID
+            << " device_id=0x" << device.properties.deviceID << std::dec
+            << " api=" << version_string(device.properties.apiVersion)
+            << " driver=" << version_string(device.properties.driverVersion)
+            << " shaderFloat64=" << capabilities.shader_float64
+            << " shaderRoundingModeRTEFloat64="
+            << capabilities.rounding_mode_rte_float64
+            << " shaderSignedZeroInfNanPreserveFloat64="
+            << capabilities.signed_zero_inf_nan_preserve_float64
+            << " shaderDenormPreserveFloat64="
+            << capabilities.denorm_preserve_float64
+            << " minStorageBufferOffsetAlignment="
+            << capabilities.min_storage_buffer_offset_alignment
+            << " maxStorageBufferRange="
+            << capabilities.max_storage_buffer_range
+            << " strictFloat64=" << capabilities.strict_supported();
+    if (!capabilities.strict_supported()) {
+        message << " missing=\"" << capabilities.missing_requirements() << '"';
     }
     return message.str();
 }
@@ -2898,6 +2943,17 @@ bool backend_available() noexcept {
 void require_backend_available() {
     auto instance = create_instance(false);
     (void)select_device(enumerate_devices(instance.instance));
+}
+
+VulkanFloat64Capabilities selected_float64_capabilities() {
+    auto instance = create_instance(false);
+    return select_device(enumerate_devices(instance.instance)).float64;
+}
+
+std::string selected_float64_capability_report() {
+    auto instance = create_instance(false);
+    return float64_capability_report(
+        select_device(enumerate_devices(instance.instance)));
 }
 
 VulkanExecutor::VulkanExecutor() : impl_(std::make_shared<Impl>()) {}
