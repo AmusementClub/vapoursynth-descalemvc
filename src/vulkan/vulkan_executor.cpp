@@ -2,14 +2,19 @@
 
 #include "vulkan_convert_128_spv.hpp"
 #include "vulkan_convert_256_spv.hpp"
+#include "vulkan_convert_f64_spv.hpp"
 #include "vulkan_inverse_32_spv.hpp"
 #include "vulkan_inverse_64_spv.hpp"
+#include "vulkan_inverse_f64_spv.hpp"
 #include "vulkan_rhs_128_spv.hpp"
 #include "vulkan_rhs_256_spv.hpp"
+#include "vulkan_rhs_f64_spv.hpp"
 #include "vulkan_solve_32_spv.hpp"
 #include "vulkan_solve_64_spv.hpp"
+#include "vulkan_solve_f64_spv.hpp"
 #include "vulkan_transpose_128_spv.hpp"
 #include "vulkan_transpose_256_spv.hpp"
+#include "vulkan_transpose_f64_spv.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -635,6 +640,11 @@ public:
     VkPipeline rhs_pipeline = VK_NULL_HANDLE;
     VkPipeline solve_pipeline = VK_NULL_HANDLE;
     VkPipeline convert_pipeline = VK_NULL_HANDLE;
+    VkPipeline transpose_f64_pipeline = VK_NULL_HANDLE;
+    VkPipeline inverse_f64_pipeline = VK_NULL_HANDLE;
+    VkPipeline rhs_f64_pipeline = VK_NULL_HANDLE;
+    VkPipeline solve_f64_pipeline = VK_NULL_HANDLE;
+    VkPipeline convert_f64_pipeline = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
     PFN_vkSetDebugUtilsObjectNameEXT set_object_name = nullptr;
     PFN_vkCmdBeginDebugUtilsLabelEXT command_begin_label = nullptr;
@@ -1995,6 +2005,9 @@ Runtime::Runtime()
         nullptr,
         timeline_enabled ? VK_TRUE : VK_FALSE,
     };
+    VkPhysicalDeviceFeatures enabled_features{};
+    enabled_features.shaderFloat64 =
+        selected.float64.strict_supported() ? VK_TRUE : VK_FALSE;
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         timeline_enabled ? &timeline_enable : nullptr,
@@ -2005,7 +2018,7 @@ Runtime::Runtime()
         nullptr,
         0U,
         nullptr,
-        nullptr,
+        &enabled_features,
     };
     check(vkCreateDevice(selected.physical, &device_info, nullptr, &device),
           "vkCreateDevice");
@@ -2117,6 +2130,29 @@ Runtime::Runtime()
                 sizeof(embedded::vulkan_solve_32_spv), "dsmvc split solve 32");
         }
 
+        if (selected.float64.strict_supported()) {
+            transpose_f64_pipeline = create_pipeline(
+                embedded::vulkan_transpose_f64_spv,
+                sizeof(embedded::vulkan_transpose_f64_spv),
+                "dsmvc Float64 transpose 32x8");
+            rhs_f64_pipeline = create_pipeline(
+                embedded::vulkan_rhs_f64_spv,
+                sizeof(embedded::vulkan_rhs_f64_spv),
+                "dsmvc Float64 split RHS 32x8");
+            inverse_f64_pipeline = create_pipeline(
+                embedded::vulkan_inverse_f64_spv,
+                sizeof(embedded::vulkan_inverse_f64_spv),
+                "dsmvc Float64 fused inverse 32");
+            solve_f64_pipeline = create_pipeline(
+                embedded::vulkan_solve_f64_spv,
+                sizeof(embedded::vulkan_solve_f64_spv),
+                "dsmvc Float64 split solve 32");
+            convert_f64_pipeline = create_pipeline(
+                embedded::vulkan_convert_f64_spv,
+                sizeof(embedded::vulkan_convert_f64_spv),
+                "dsmvc Float64 conversion 256");
+        }
+
         if (timeline_enabled) {
             const VkSemaphoreTypeCreateInfo type_info{
                 VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -2175,9 +2211,11 @@ void Runtime::destroy_device_objects() noexcept {
     plan_arena.reset();
     if (timeline) vkDestroySemaphore(device, timeline, nullptr);
     timeline = VK_NULL_HANDLE;
-    for (VkPipeline *pipeline : {&convert_pipeline, &solve_pipeline,
-                                 &rhs_pipeline, &inverse_pipeline,
-                                 &transpose_pipeline}) {
+    for (VkPipeline *pipeline : {
+             &convert_f64_pipeline, &solve_f64_pipeline, &rhs_f64_pipeline,
+             &inverse_f64_pipeline, &transpose_f64_pipeline,
+             &convert_pipeline, &solve_pipeline, &rhs_pipeline,
+             &inverse_pipeline, &transpose_pipeline}) {
         if (*pipeline) vkDestroyPipeline(device, *pipeline, nullptr);
         *pipeline = VK_NULL_HANDLE;
     }
