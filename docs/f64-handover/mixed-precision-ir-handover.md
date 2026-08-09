@@ -8,7 +8,8 @@ high-precision result contract.
 
 IR is an alternative execution strategy, not a change to `f64mode`, padding,
 geometry, or the least-squares operator. It is admitted only when it matches the
-CPU direct-F64 result/oracle gates and beats the relevant fallback in plugin E2E.
+CPU direct-F64 result/oracle gates. Whether a correct IR implementation replaces
+or supplements a direct-F64 route is decided separately from correctness.
 
 ## Implementation Status
 
@@ -17,10 +18,10 @@ residual and provides ordered F32/F64 oracles, immutable fixtures, hash layers,
 and a numerical axis benchmark. The IR loop, correction-only solve, convergence
 telemetry, and backend fallbacks are not implemented.
 
-IR is not an independent parallel integration lane. Metal evaluates it against
-direct float-float only after Metal F32 convergence. CUDA and Vulkan may evaluate
-it only after their native F64 baselines pass. The first CPU optimization wave
-keeps direct Double and does not implement IR.
+IR is not an independent parallel integration lane. Metal F32 convergence is
+complete on Apple ARM64, but Metal IR and direct float-float remain unimplemented.
+CUDA and Vulkan may evaluate IR only after their native F64 baselines pass. The
+first CPU optimization wave keeps direct Double and does not implement IR.
 
 ## Mathematical Contract
 
@@ -179,13 +180,13 @@ Report the full iteration histogram, not only mean iterations. Separate:
   fallback; and
 - unchanged F32 controls.
 
-## Performance Admission
+## Optional Routing and Performance Decision
 
-- No automatic route is admitted unless paired plugin median is at least
-  `1.03x` CPU direct F64 and no important case regresses by more than `3%`.
-- CUDA/Vulkan IR must also beat or materially extend the usefulness of their
-  native direct-F64 route on the same device. A device capability/performance
-  ratio is only a routing hint, not benchmark evidence.
+- Correctness admission has no throughput threshold. F64 and emulated
+  high-precision execution are expected to be slower than F32.
+- CUDA/Vulkan/Metal routing may consider whether IR materially extends the
+  usefulness of the direct high-precision route on the same device. A device
+  capability/performance ratio is only a routing hint, not benchmark evidence.
 - Metal Phase 0 compares IR, complete float-float direct solve, and CPU F64 from
   the same source/binary provenance and thermal window.
 - A fast one-correction microcase cannot admit a route whose conditioned p95
@@ -193,7 +194,9 @@ Report the full iteration histogram, not only mean iterations. Separate:
 
 ## Definition of Done
 
-IR is complete only when shared fixtures, independent references, forced
-fallbacks, exact integer output, artifact inspection, target hardware, complete
-residual histories, and paired plugin performance all pass. A convergent
-standalone kernel or a float-float arithmetic microtest alone is not completion.
+IR numerical correctness is complete only when shared fixtures, independent
+references, forced fallbacks, exact integer output, artifact inspection, target
+hardware, and complete residual histories all pass. A convergent standalone
+kernel or a float-float arithmetic microtest alone is not completion. Production
+or automatic routing additionally requires separately authorized plugin E2E
+evaluation.

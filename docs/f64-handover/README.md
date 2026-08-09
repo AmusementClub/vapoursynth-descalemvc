@@ -21,8 +21,9 @@ high-precision execution is implemented.
 
 The following Release checks were recorded on 2026-08-09:
 
-- Apple ARM64 with Metal: 8 of 8 tests passed, including the numerical contract,
-  conditioned CPU F64 fallback, and the 32-entrypoint Metal artifact inventory.
+- Apple ARM64 with Metal: 9 of 9 tests passed, including the numerical contract,
+  direct Metal F32 numerical contract, conditioned CPU F64 fallback, and the
+  32-entrypoint Metal artifact inventory.
 - Apple ARM64 CPU-only: 3 of 3 tests passed.
 - macOS x86_64 CPU-only: 2 of 2 tests passed; conditioned rows, columns, and 2D
   fixtures matched their scalar output fixtures. The numerical benchmark
@@ -46,6 +47,17 @@ The shared candidate also establishes:
   `4.5922e-9` x86_64 endpoint error versus a `2.69779e-8` bound); and
 - a machine-readable axis benchmark for ordered/current/native CPU F32,
   automatic-risk F64, and forced F64.
+
+The Apple ARM64 correctness lane additionally establishes:
+
+- NEON F32 rows, columns, scalar fallbacks, and SIMD tails match the ordered-FMA
+  contract at `0 ULP` for B1/B3/B5/B7 fixtures;
+- NEON F64 rows, columns, safe/risky and risky/safe 2D, and forced-F64/F64 2D
+  match the ordered Double contract at `0 ULP`; and
+- direct Metal F32 execution matches the ordered-FMA contract at `0 ULP` for
+  horizontal and vertical B1/B3/B5/B7 plus generic B9. A retained F64 plan is
+  rejected by the direct Metal executor and remains observable CPU F64 work in
+  the plugin scheduler.
 
 The axis benchmark is not the CPU lane's complete rows/columns/2D/integer/plugin
 performance harness. Its timings cannot be used as a release speed claim.
@@ -175,7 +187,7 @@ Every backend follows this order:
 1. **Plan gate:** prove plan hashes, precision metadata, cache identity, and
    original high-precision fields are consumed correctly.
 2. **F32 control gate:** prove the backend's F32 path matches the ordered strict
-   fixtures and stays within its performance budget.
+   fixtures, including vector-width boundaries and scalar tails.
 3. **High-precision gate:** compare rows, columns, mixed-axis 2D, float, U8,
    U10, and U16 against CPU direct F64 and independent conditioned anchors.
 4. **IR gate where applicable:** retain complete residual history, scaled
@@ -187,9 +199,10 @@ Every backend follows this order:
    for expected precision operations and bind it to source/binary hashes.
 7. **Hardware gate:** run on a real supported target; compile-only and software
    emulation cannot close the gate.
-8. **Performance gate:** report executor and plugin E2E separately. Automatic
-   high precision requires paired plugin median at least `1.03x` CPU F64 while
-   F32/CPU controls stay within `3%`.
+8. **Optional route gate:** after correctness is complete, report executor and
+   plugin E2E separately before changing automatic routing. This gate chooses
+   where a correct result executes; it does not reject a correct CPU or backend
+   F64 implementation because high precision is slower.
 
 Native high precision should normally produce identical final F32 output; any
 difference is limited to one output ULP and cannot worsen the independent
@@ -229,7 +242,6 @@ Stop a backend branch without changing shared routing when:
 - direct risky execution consumes F32 factors, or IR rounds its working solution
   or two-axis intermediate to F32;
 - explicit CUDA/Vulkan can silently execute CPU;
-- F32 controls exceed the backend's frozen performance budget;
 - high-precision float output exceeds one ULP or worsens an independent anchor;
 - integer output differs;
 - target features or exact artifact evidence are missing;
@@ -237,3 +249,7 @@ Stop a backend branch without changing shared routing when:
   eight-correction cap; or
 - correctness requires changing padding, geometry, regularization, or the
   least-squares operator.
+
+Performance regression is not a global correctness stop condition. It may stop
+an optional optimization or automatic-route proposal, but the correct direct
+F64 path remains admissible even when it is materially slower than F32.

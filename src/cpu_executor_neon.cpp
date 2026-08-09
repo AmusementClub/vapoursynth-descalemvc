@@ -279,7 +279,7 @@ void inverse_rows_f64_neon_impl(
             workspace.scalar_source[static_cast<std::size_t>(column)] =
                 static_cast<double>(source[column]);
         }
-        detail::inverse_axis_f64(
+        detail::inverse_axis_f64_ordered(
             plan, workspace.scalar_source.data(), 1,
             workspace.scalar_destination.data(), 1);
         auto *destination = output
@@ -340,7 +340,7 @@ void inverse_columns_f64_neon_impl(
                     static_cast<std::ptrdiff_t>(row) * input_row_stride
                     + column]);
         }
-        detail::inverse_axis_f64(
+        detail::inverse_axis_f64_ordered(
             plan, workspace.scalar_source.data(), 1,
             workspace.scalar_destination.data(), 1);
         for (std::int32_t row = 0; row < plan.destination_size; ++row) {
@@ -2078,7 +2078,7 @@ void inverse_rows_neon(const AxisPlan &plan,
         || input_row_stride < packed.padded_source_size
         || output_row_stride < packed.padded_destination_size) {
         for (std::int32_t row = 0; row < row_count; ++row) {
-            dsmvc::inverse_axis_f32(
+            detail::inverse_axis_f32_ordered(
                 plan,
                 input + static_cast<std::ptrdiff_t>(row) * input_row_stride, 1,
                 output + static_cast<std::ptrdiff_t>(row) * output_row_stride,
@@ -2149,8 +2149,9 @@ void inverse_columns_neon(const AxisPlan &plan,
     }
     for (std::int32_t column = vector_columns;
          column < column_count; ++column) {
-        dsmvc::inverse_axis_f32(plan, input + column, input_row_stride,
-                               output + column, output_row_stride);
+        detail::inverse_axis_f32_ordered(
+            plan, input + column, input_row_stride,
+            output + column, output_row_stride);
     }
 }
 

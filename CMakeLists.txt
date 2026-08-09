@@ -574,6 +574,26 @@ if(DSMVC_ENABLE_METAL)
         set_tests_properties(
             dsmvc_metal_artifact_inventory PROPERTIES TIMEOUT 30)
 
+        dsmvc_add_numerical_contract_test(
+            dsmvc_metal_numerical_contract_tests
+            BACKEND metal
+            SOURCES
+                tests/metal_numerical_contract_tests.mm
+                src/metal_float_executor_apple.mm
+                "${DSMVC_METALLIB_HEADER}"
+            LIBRARIES
+                "${DSMVC_METAL_FRAMEWORK}"
+                "${DSMVC_FOUNDATION_FRAMEWORK}"
+            INCLUDE_DIRECTORIES
+                "${DSMVC_METAL_GENERATED_DIR}")
+        set_source_files_properties(
+            src/metal_float_executor_apple.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        set_tests_properties(
+            dsmvc_metal_numerical_contract_tests PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK dsmvc_metal_device)
+
         add_executable(dsmvc_hybrid_batch_coordinator_tests
             tests/hybrid_batch_coordinator_tests.cpp
             src/hybrid_batch_coordinator.cpp)
