@@ -9,6 +9,21 @@ spirv_as=${DSMVC_SPIRV_AS_EXECUTABLE:-"$sdk/bin/spirv-as"}
 spirv_val=${DSMVC_SPIRV_VAL_EXECUTABLE:-"$sdk/bin/spirv-val"}
 output=${1:-"$root/build-vulkan-f64/generated/vulkan_f64"}
 embed=${DSMVC_VULKAN_F64_EMBED:-0}
+capability_report_file=${DSMVC_VULKAN_F64_CAPABILITY_REPORT_FILE:-}
+
+runtime_capability_report=not-recorded
+if [[ -n "$capability_report_file" ]]; then
+    if [[ ! -r "$capability_report_file" ]]; then
+        echo "Float64 capability report is not readable: $capability_report_file" >&2
+        exit 1
+    fi
+    runtime_capability_report=$(grep -m1 \
+        'shaderDenormPreserveFloat64=[01]' "$capability_report_file" || true)
+    if [[ -z "$runtime_capability_report" ]]; then
+        echo "Float64 capability report does not record denorm preservation" >&2
+        exit 1
+    fi
+fi
 
 mkdir -p "$output"
 
@@ -109,6 +124,7 @@ fi
     echo "float64_denorm_preserve_policy=probe-only"
     echo "float64_denorm_preserve_spirv=not-requested"
     echo "float64_denorm_boundary=subnormal intermediates may flush to zero; normal-range values unaffected"
+    echo "runtime_capability_report=$runtime_capability_report"
     "$glslc" --version
     "$spirv_val" --version
     sha256sum \
