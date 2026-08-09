@@ -5,6 +5,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -638,8 +639,31 @@ void write_metadata(std::ostream &output, const Options &options) {
            << "\"memory_bus_width_bits\":"
            << memory_bus_width << ','
            << "\"cuda_runtime_version\":" << runtime_version << ','
-           << "\"cuda_driver_version\":" << driver_version
-           << "}\n";
+           << "\"cuda_driver_version\":" << driver_version << ','
+           << "\"cuda_environment\":{";
+    constexpr std::array environment_names{
+        "DSMVC_CUDA_STREAMS",
+        "DSMVC_CUDA_SPLIT_RHS",
+        "DSMVC_CUDA_HOST_TRANSFER",
+        "DSMVC_CUDA_HORIZONTAL_THREADS",
+        "DSMVC_CUDA_VERTICAL_THREADS",
+        "DSMVC_CUDA_SPLIT_HORIZONTAL_THREADS",
+        "DSMVC_CUDA_SPLIT_VERTICAL_THREADS",
+        "DSMVC_CUDA_HORIZONTAL_GLOBAL_TRANSPOSE",
+        "DSMVC_CUDA_INPUT_CACHE_MB",
+        "DSMVC_CUDA_PLAN_CACHE_MB",
+    };
+    for (std::size_t index = 0U; index < environment_names.size(); ++index) {
+        if (index != 0U) output << ',';
+        const char *value = std::getenv(environment_names[index]);
+        output << quoted(environment_names[index]) << ':';
+        if (value) {
+            output << quoted(value);
+        } else {
+            output << "null";
+        }
+    }
+    output << "}}\n";
     output.flush();
 }
 
