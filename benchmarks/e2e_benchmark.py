@@ -50,6 +50,10 @@ def repeated_arange(start: float, stop: float, step: float) -> list[float]:
     return values
 
 
+def integer_tenths(start: int, stop: int) -> list[float]:
+    return [value / 10.0 for value in range(start, stop)]
+
+
 def scaler(kernel: str, b: float = 0.0, c: float = 0.5,
            taps: int = 3) -> dict:
     if kernel == "bicubic":
@@ -162,10 +166,10 @@ def recipe_candidates(case: str, profile: str) -> list[dict]:
     repetitions = 1
     if case == "getfnative":
         if profile == "full":
-            heights = repeated_arange(700.0, 980.0, 0.1)
+            heights = integer_tenths(7000, 9800)
             scalers = GETFNATIVE_SCALERS
         elif profile == "stratified32x4":
-            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            full_heights = integer_tenths(7000, 9800)
             heights = [
                 full_heights[(2 * index + 1) * len(full_heights) // 16]
                 for index in range(8)
@@ -173,7 +177,7 @@ def recipe_candidates(case: str, profile: str) -> list[dict]:
             scalers = STRATIFIED_GETFNATIVE_SCALERS
             repetitions = 4
         elif profile == "stratified256":
-            full_heights = [value / 10.0 for value in range(7000, 9800)]
+            full_heights = integer_tenths(7000, 9800)
             heights = [
                 full_heights[(2 * index + 1) * len(full_heights) // 128]
                 for index in range(64)
@@ -186,7 +190,7 @@ def recipe_candidates(case: str, profile: str) -> list[dict]:
         if profile in ("stratified32x4", "stratified256"):
             raise ValueError(
                 "stratified profiles are defined only for getfnative")
-        heights = (repeated_arange(840.0, 880.0, 0.1)
+        heights = (integer_tenths(8400, 8800)
                    if profile == "full" else SMOKE_HEIGHTS[case])
         scalers = GETFNATIVE_V2_SCALERS
     else:
@@ -717,6 +721,29 @@ def frame_hash(frame, clip) -> str:
     return digest.hexdigest()
 
 
+def frame_route(frame, backend: str) -> dict:
+    if backend != "metal":
+        return {
+            "route": "cpu",
+            "metal_batch": 0,
+            "metal_marker": 0,
+        }
+    try:
+        metal_batch = int(frame.props.get("_DSMVCMetalBatch", -1))
+        metal_marker = int(frame.props.get("_DSMVCMetal", -1))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return {
+            "route": "unknown",
+            "metal_batch": -1,
+            "metal_marker": -1,
+        }
+    return {
+        "route": "metal" if metal_batch > 0 else "cpu",
+        "metal_batch": metal_batch,
+        "metal_marker": metal_marker,
+    }
+
+
 def worker_errors(options) -> int:
     import vapoursynth as vs
 
@@ -758,6 +785,7 @@ def worker_errors(options) -> int:
             options.backend)
         old_frame = old.get_frame(0)
         new_frame = new.get_frame(0)
+        new_route = frame_route(new_frame, options.backend)
         old_reconstructed = resize_with_scaler(
             core, old, candidate["scaler"], arguments,
             source.width, source.height)
@@ -806,6 +834,9 @@ def worker_errors(options) -> int:
             "new_output": clip_description(new),
             "old_sha256": frame_hash(old_frame, old),
             "new_sha256": frame_hash(new_frame, new),
+            "new_route": new_route["route"],
+            "new_metal_batch": new_route["metal_batch"],
+            "new_metal_marker": new_route["metal_marker"],
             "output_shape_equal": (
                 old.width, old.height, old.format.id
             ) == (new.width, new.height, new.format.id),
@@ -968,6 +999,10 @@ def add_ranks(rows: list[dict]) -> None:
 def error_summary(payload: dict) -> dict:
     rows = payload["rows"]
     add_ranks(rows)
+    route_counts = {}
+    for row in rows:
+        route = row.get("new_route", "unknown")
+        route_counts[route] = route_counts.get(route, 0) + 1
     old_best = min(rows, key=lambda row: row["old_vs_source"]["thresholded_mae"])
     new_best = min(rows, key=lambda row: row["new_vs_source"]["thresholded_mae"])
     scalers = {}
@@ -1005,6 +1040,7 @@ def error_summary(payload: dict) -> dict:
         "max_reconstruction_max_abs": max(
             row["reconstruction_old_new"]["max_abs"] for row in rows),
         "max_rank_change": max(row["rank_change"] for row in rows),
+        "new_route_counts": route_counts,
         "algorithm_summary": scalers,
     }
 
@@ -1016,7 +1052,7 @@ def write_error_csv(payloads: dict[str, dict], output: Path) -> None:
         "new_source_mae", "old_new_source_mae_delta", "output_old_new_mae",
         "output_old_new_max_abs", "reconstruction_old_new_mae",
         "reconstruction_old_new_max_abs", "old_rank", "new_rank",
-        "rank_change",
+        "rank_change", "new_route", "new_metal_batch", "new_metal_marker",
     ]
     with output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -1048,6 +1084,9 @@ def write_error_csv(payloads: dict[str, dict], output: Path) -> None:
                     "old_rank": row["old_rank"],
                     "new_rank": row["new_rank"],
                     "rank_change": row["rank_change"],
+                    "new_route": row.get("new_route", "unknown"),
+                    "new_metal_batch": row.get("new_metal_batch", ""),
+                    "new_metal_marker": row.get("new_metal_marker", ""),
                 })
 
 
