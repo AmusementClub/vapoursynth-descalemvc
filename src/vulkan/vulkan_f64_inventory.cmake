@@ -12,5 +12,11 @@ set(DSMVC_VULKAN_F64_BACKEND_TESTS
     src/vulkan/vulkan_f64_policy_tests.cpp
     src/vulkan/vulkan_f64_runtime_tests.cpp)
 
+set(DSMVC_VULKAN_F64_BACKEND_BENCHMARKS
+    src/vulkan/vulkan_f64_benchmark.cpp
+    src/vulkan/vulkan_f64_benchmark_pair.py
+    src/vulkan/vulkan_f64_plugin_benchmark.py
+    src/vulkan/vulkan_f64_plugin_benchmark.vpy)
+
 set(DSMVC_VULKAN_F64_ARTIFACT_SCRIPT
     src/vulkan/vulkan_f64_artifacts.sh)
