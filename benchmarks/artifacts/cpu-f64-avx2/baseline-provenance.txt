@@ -1,0 +1,38 @@
+CPU F64 AVX2 lane baseline evidence
+==================================
+
+Recorded: 2026-08-09T19:55:30+08:00
+Source SHA: af1d982cb400393d9ee1fbb48cb433f53814469b
+Compiler: GCC 15.2.0
+CMake: 4.4.2
+System: Linux 7.0.0-29-generic x86_64
+CPU: AMD Ryzen 9 5950X 16-Core Processor, AVX2/FMA, no AVX-512
+
+Build configuration:
+cmake -S . -B build-cpu-f64 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDSMVC_BUILD_BENCHMARKS=ON -DDSMVC_ENABLE_CUDA=OFF -DDSMVC_ENABLE_VULKAN=OFF -DDSMVC_ENABLE_METAL=OFF -DDSMVC_VAPOURSYNTH_SDK=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth
+cmake --build build-cpu-f64 -j8
+g++ -std=c++23 -O3 -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math -Iinclude benchmarks/cpu_f64_avx2_benchmark.cpp build-cpu-f64/libdsmvc_engine.a -pthread -o build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark
+
+Binary SHA-256:
+b3c90ba77fc87adc05f54d501b0d35c26b547eb4eb583bf3b92e561282d47b30  build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark
+349d997649c8e9d6867ca7dbc9b64a0c816f2c50e480c06ee9b90d3b6971135f  build-cpu-f64/dsmvc_numerical_contract_benchmark
+dc01428731996b6fd7678eeb14abe0f2e6a310826fb29b3d71ba81fcbfe9e6db  build-cpu-f64/libdsmvc_engine.a
+4a9a58a991c56a6db230e76a7ba5aa56b6418955adb25b7cde8d659df26bb6bc  benchmarks/cpu_f64_avx2_benchmark.cpp
+
+Commands:
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 120s build-cpu-f64/dsmvc_numerical_contract_benchmark --samples 11 --iterations 8 --source-id af1d982cb400393d9ee1fbb48cb433f53814469b --json-out benchmarks/artifacts/cpu-f64-avx2/baseline-numerical-contract.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 180s build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark --check-only --source-id af1d982cb400393d9ee1fbb48cb433f53814469b --binary-sha256 b3c90ba77fc87adc05f54d501b0d35c26b547eb4eb583bf3b92e561282d47b30 --json-out benchmarks/artifacts/cpu-f64-avx2/baseline-complete-check.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 240s build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark --samples 7 --iterations 1 --source-id af1d982cb400393d9ee1fbb48cb433f53814469b --binary-sha256 b3c90ba77fc87adc05f54d501b0d35c26b547eb4eb583bf3b92e561282d47b30 --json-out benchmarks/artifacts/cpu-f64-avx2/baseline-complete-paired.json'
+
+Results:
+- Complete correctness matrix: 76/76 cases passed.
+- Float scalar/native difference: 0 ULP for every baseline case.
+- U8/U10/U16 scalar/native output: bit exact for every baseline case.
+- Representative aggregate scalar/native paired speedup median: 2.7748665997845094x.
+- The baseline native F64 route is scalar Double. Its large cases can use the
+  existing four-worker automatic CPU scheduler, while explicit scalar is one
+  worker; the aggregate is not an AVX2 F64 speedup claim.
+- Raw samples and per-case medians/MAD/min/max are retained in
+  baseline-complete-paired.json. Plan metadata and check-only results are in
+  baseline-complete-check.json. The pre-existing axis diagnostic is retained
+  in baseline-numerical-contract.json.
