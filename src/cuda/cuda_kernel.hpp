@@ -5,6 +5,11 @@
 
 namespace dsmvc::cuda_kernel {
 
+enum class PlanPrecision : std::uint8_t {
+    float32,
+    float64,
+};
+
 struct AxisPlanDescriptor {
     std::uint32_t source_size = 0U;
     std::uint32_t destination_size = 0U;

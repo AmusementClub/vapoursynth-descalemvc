@@ -552,6 +552,205 @@ __device__ __forceinline__ Sample convert_output(
     return static_cast<Sample>(__float2uint_rn(value));
 }
 
+__device__ __forceinline__ double plan_weight_f64(
+    kernel::PlanPrecision precision, std::uint32_t position,
+    const float *__restrict__ weights_f32,
+    const double *__restrict__ weights_f64) {
+    return precision == kernel::PlanPrecision::float64
+        ? weights_f64[position]
+        : static_cast<double>(weights_f32[position]);
+}
+
+__device__ __forceinline__ double lower_factor_f64(
+    kernel::PlanPrecision precision, std::uint32_t size,
+    std::uint32_t index, std::uint32_t distance,
+    const float *__restrict__ lower_f32,
+    const double *__restrict__ bands_f64) {
+    return precision == kernel::PlanPrecision::float64
+        ? bands_f64[distance * size + index - distance]
+        : static_cast<double>(
+              lower_f32[(distance - 1U) * size + index]);
+}
+
+__device__ __forceinline__ double upper_factor_f64(
+    kernel::PlanPrecision precision, std::uint32_t size,
+    std::uint32_t index, std::uint32_t distance,
+    const float *__restrict__ upper_f32,
+    const double *__restrict__ bands_f64) {
+    return precision == kernel::PlanPrecision::float64
+        ? bands_f64[distance * size + index]
+        : static_cast<double>(
+              upper_f32[(distance - 1U) * size + index]);
+}
+
+__device__ __forceinline__ void solve_axis_f64(
+    const kernel::AxisPlanDescriptor &plan,
+    const float *__restrict__ lower_f32,
+    const float *__restrict__ upper_f32,
+    const float *__restrict__ diagonal_f32,
+    const double *__restrict__ bands_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output,
+    std::uint32_t output_stride) {
+    const std::uint32_t size = plan.destination_size;
+    for (std::uint32_t index = 0U; index < size; ++index) {
+        double value = output[index * output_stride];
+        const std::uint32_t available = minimum(plan.half_bandwidth, index);
+        for (std::uint32_t distance = available;
+             distance > 0U; --distance) {
+            value = __fma_rn(
+                -lower_factor_f64(
+                    precision, size, index, distance, lower_f32, bands_f64),
+                output[(index - distance) * output_stride], value);
+        }
+        if (precision == kernel::PlanPrecision::float64) {
+            output[index * output_stride] = value;
+        } else {
+            output[index * output_stride] = __dmul_rn(
+                value, static_cast<double>(diagonal_f32[index]));
+        }
+    }
+    if (precision == kernel::PlanPrecision::float64) {
+        for (std::uint32_t index = 0U; index < size; ++index) {
+            output[index * output_stride] = __ddiv_rn(
+                output[index * output_stride], bands_f64[index]);
+        }
+    }
+    if (size < 2U) return;
+    for (std::uint32_t reverse = size - 1U; reverse > 0U; --reverse) {
+        const std::uint32_t index = reverse - 1U;
+        const std::uint32_t available = minimum(
+            plan.half_bandwidth, size - index - 1U);
+        double value = output[index * output_stride];
+        for (std::uint32_t distance = available;
+             distance > 0U; --distance) {
+            value = __fma_rn(
+                -upper_factor_f64(
+                    precision, size, index, distance, upper_f32, bands_f64),
+                output[(index + distance) * output_stride], value);
+        }
+        output[index * output_stride] = value;
+    }
+}
+
+__device__ __forceinline__ void inverse_axis_f64(
+    const kernel::AxisPlanDescriptor &plan,
+    const std::uint32_t *__restrict__ transpose_offsets,
+    const std::int32_t *__restrict__ transpose_indices,
+    const float *__restrict__ weights_f32,
+    const float *__restrict__ lower_f32,
+    const float *__restrict__ upper_f32,
+    const float *__restrict__ diagonal_f32,
+    const double *__restrict__ weights_f64,
+    const double *__restrict__ bands_f64,
+    kernel::PlanPrecision precision,
+    const double *__restrict__ input,
+    std::uint32_t input_stride,
+    double *__restrict__ output,
+    std::uint32_t output_stride) {
+    for (std::uint32_t index = 0U;
+         index < plan.destination_size; ++index) {
+        double value = 0.0;
+        const std::uint32_t begin = transpose_offsets[index];
+        const std::uint32_t end = transpose_offsets[index + 1U];
+        for (std::uint32_t position = begin; position < end; ++position) {
+            const auto source = static_cast<std::uint32_t>(
+                transpose_indices[position]);
+            value = __fma_rn(
+                plan_weight_f64(
+                    precision, position, weights_f32, weights_f64),
+                input[source * input_stride], value);
+        }
+        output[index * output_stride] = value;
+    }
+    solve_axis_f64(
+        plan, lower_f32, upper_f32, diagonal_f32, bands_f64,
+        precision, output, output_stride);
+}
+
+template <bool ColumnMajorOutput>
+__device__ __forceinline__ void rhs_axis_2d_f64(
+    const kernel::AxisPlanDescriptor &plan,
+    const std::uint32_t *__restrict__ transpose_offsets,
+    const std::int32_t *__restrict__ transpose_indices,
+    const float *__restrict__ weights_f32,
+    const double *__restrict__ weights_f64,
+    kernel::PlanPrecision precision,
+    const double *__restrict__ input,
+    std::uint32_t vector_count,
+    double *__restrict__ output) {
+    const std::uint32_t vector = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::uint32_t index = blockIdx.y * blockDim.y + threadIdx.y;
+    if (vector >= vector_count || index >= plan.destination_size) return;
+
+    double value = 0.0;
+    const std::uint32_t begin = transpose_offsets[index];
+    const std::uint32_t end = transpose_offsets[index + 1U];
+    for (std::uint32_t position = begin; position < end; ++position) {
+        const auto source = static_cast<std::uint32_t>(
+            transpose_indices[position]);
+        value = __fma_rn(
+            plan_weight_f64(
+                precision, position, weights_f32, weights_f64),
+            input[source * vector_count + vector], value);
+    }
+    if constexpr (ColumnMajorOutput) {
+        output[index * vector_count + vector] = value;
+    } else {
+        output[vector * plan.destination_size + index] = value;
+    }
+}
+
+template <class Sample, bool Convert>
+__device__ __forceinline__ void transpose_source_f64(
+    const Sample *__restrict__ source,
+    std::uint32_t source_width,
+    std::uint32_t source_height,
+    kernel::IntegerConversionDescriptor conversion,
+    double *__restrict__ transposed,
+    double (&tile)[32][33]) {
+    const std::uint32_t x = blockIdx.x * 32U + threadIdx.x;
+    const std::uint32_t y = blockIdx.y * 32U + threadIdx.y;
+#pragma unroll
+    for (std::uint32_t offset = 0U; offset < 32U; offset += 8U) {
+        if (x < source_width && y + offset < source_height) {
+            const Sample value = source[(y + offset) * source_width + x];
+            if constexpr (Convert) {
+                tile[threadIdx.y + offset][threadIdx.x] = __dmul_rn(
+                    __dsub_rn(
+                        static_cast<double>(value),
+                        static_cast<double>(conversion.input_offset)),
+                    static_cast<double>(conversion.input_scale));
+            } else {
+                tile[threadIdx.y + offset][threadIdx.x] =
+                    static_cast<double>(value);
+            }
+        }
+    }
+    __syncthreads();
+
+    const std::uint32_t output_x = blockIdx.y * 32U + threadIdx.x;
+    const std::uint32_t output_y = blockIdx.x * 32U + threadIdx.y;
+#pragma unroll
+    for (std::uint32_t offset = 0U; offset < 32U; offset += 8U) {
+        if (output_x < source_height && output_y + offset < source_width) {
+            transposed[(output_y + offset) * source_height + output_x] =
+                tile[threadIdx.x][threadIdx.y + offset];
+        }
+    }
+}
+
+template <class Sample>
+__device__ __forceinline__ Sample convert_output_f64(
+    double value, const kernel::IntegerConversionDescriptor &conversion) {
+    value = __dadd_rn(
+        __dmul_rn(value, static_cast<double>(conversion.output_scale)),
+        static_cast<double>(conversion.output_offset));
+    value = fmin(
+        fmax(value, 0.0), static_cast<double>(conversion.output_maximum));
+    return static_cast<Sample>(__double2uint_rn(value));
+}
+
 } // namespace
 
 extern "C" __global__ void dsmvc_cuda_transpose_f32(
@@ -781,6 +980,189 @@ extern "C" __global__ void dsmvc_cuda_convert_u16(
     }
 }
 
+extern "C" __global__ void dsmvc_cuda_transpose_f32_f64(
+    const float *__restrict__ source,
+    std::uint32_t source_width,
+    std::uint32_t source_height,
+    double *__restrict__ transposed) {
+    __shared__ double tile[32][33];
+    transpose_source_f64<float, false>(
+        source, source_width, source_height, {}, transposed, tile);
+}
+
+extern "C" __global__ void dsmvc_cuda_transpose_u8_f64(
+    const std::uint8_t *__restrict__ source,
+    std::uint32_t source_width,
+    std::uint32_t source_height,
+    kernel::IntegerConversionDescriptor conversion,
+    double *__restrict__ transposed) {
+    __shared__ double tile[32][33];
+    transpose_source_f64<std::uint8_t, true>(
+        source, source_width, source_height, conversion, transposed, tile);
+}
+
+extern "C" __global__ void dsmvc_cuda_transpose_u16_f64(
+    const std::uint16_t *__restrict__ source,
+    std::uint32_t source_width,
+    std::uint32_t source_height,
+    kernel::IntegerConversionDescriptor conversion,
+    double *__restrict__ transposed) {
+    __shared__ double tile[32][33];
+    transpose_source_f64<std::uint16_t, true>(
+        source, source_width, source_height, conversion, transposed, tile);
+}
+
+extern "C" __global__ void dsmvc_cuda_promote_f32_f64(
+    const float *__restrict__ source,
+    std::uint32_t element_count,
+    double *__restrict__ destination) {
+    const std::uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < element_count) {
+        destination[index] = static_cast<double>(source[index]);
+    }
+}
+
+extern "C" __global__ void dsmvc_cuda_inverse_horizontal_f64(
+    const double *__restrict__ source,
+    std::uint32_t vector_count,
+    kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *__restrict__ offsets,
+    const std::int32_t *__restrict__ indices,
+    const float *__restrict__ weights_f32,
+    const float *__restrict__ lower_f32,
+    const float *__restrict__ upper_f32,
+    const float *__restrict__ diagonal_f32,
+    const double *__restrict__ weights_f64,
+    const double *__restrict__ bands_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output) {
+    const std::uint32_t vector = blockIdx.x * blockDim.x + threadIdx.x;
+    if (vector >= vector_count) return;
+    inverse_axis_f64(
+        plan, offsets, indices, weights_f32, lower_f32, upper_f32,
+        diagonal_f32, weights_f64, bands_f64, precision,
+        source + vector, vector_count,
+        output + vector * plan.destination_size, 1U);
+}
+
+extern "C" __global__ void dsmvc_cuda_inverse_vertical_f64(
+    const double *__restrict__ source,
+    std::uint32_t source_width,
+    kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *__restrict__ offsets,
+    const std::int32_t *__restrict__ indices,
+    const float *__restrict__ weights_f32,
+    const float *__restrict__ lower_f32,
+    const float *__restrict__ upper_f32,
+    const float *__restrict__ diagonal_f32,
+    const double *__restrict__ weights_f64,
+    const double *__restrict__ bands_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output) {
+    const std::uint32_t column = blockIdx.x * blockDim.x + threadIdx.x;
+    if (column >= source_width) return;
+    inverse_axis_f64(
+        plan, offsets, indices, weights_f32, lower_f32, upper_f32,
+        diagonal_f32, weights_f64, bands_f64, precision,
+        source + column, source_width, output + column, source_width);
+}
+
+extern "C" __global__ void dsmvc_cuda_rhs_horizontal_f64(
+    const double *__restrict__ source,
+    std::uint32_t vector_count,
+    kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *__restrict__ offsets,
+    const std::int32_t *__restrict__ indices,
+    const float *__restrict__ weights_f32,
+    const double *__restrict__ weights_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output) {
+    rhs_axis_2d_f64<false>(
+        plan, offsets, indices, weights_f32, weights_f64, precision,
+        source, vector_count, output);
+}
+
+extern "C" __global__ void dsmvc_cuda_rhs_vertical_f64(
+    const double *__restrict__ source,
+    std::uint32_t source_width,
+    kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *__restrict__ offsets,
+    const std::int32_t *__restrict__ indices,
+    const float *__restrict__ weights_f32,
+    const double *__restrict__ weights_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output) {
+    rhs_axis_2d_f64<true>(
+        plan, offsets, indices, weights_f32, weights_f64, precision,
+        source, source_width, output);
+}
+
+extern "C" __global__ void dsmvc_cuda_solve_horizontal_f64(
+    std::uint32_t vector_count,
+    kernel::AxisPlanDescriptor plan,
+    const float *__restrict__ lower_f32,
+    const float *__restrict__ upper_f32,
+    const float *__restrict__ diagonal_f32,
+    const double *__restrict__ bands_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output) {
+    const std::uint32_t vector = blockIdx.x * blockDim.x + threadIdx.x;
+    if (vector >= vector_count) return;
+    solve_axis_f64(
+        plan, lower_f32, upper_f32, diagonal_f32, bands_f64, precision,
+        output + vector * plan.destination_size, 1U);
+}
+
+extern "C" __global__ void dsmvc_cuda_solve_vertical_f64(
+    std::uint32_t source_width,
+    kernel::AxisPlanDescriptor plan,
+    const float *__restrict__ lower_f32,
+    const float *__restrict__ upper_f32,
+    const float *__restrict__ diagonal_f32,
+    const double *__restrict__ bands_f64,
+    kernel::PlanPrecision precision,
+    double *__restrict__ output) {
+    const std::uint32_t column = blockIdx.x * blockDim.x + threadIdx.x;
+    if (column >= source_width) return;
+    solve_axis_f64(
+        plan, lower_f32, upper_f32, diagonal_f32, bands_f64, precision,
+        output + column, source_width);
+}
+
+extern "C" __global__ void dsmvc_cuda_convert_f64_f32(
+    const double *__restrict__ source,
+    std::uint32_t element_count,
+    float *__restrict__ output) {
+    const std::uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < element_count) {
+        output[index] = static_cast<float>(source[index]);
+    }
+}
+
+extern "C" __global__ void dsmvc_cuda_convert_f64_u8(
+    const double *__restrict__ source,
+    std::uint32_t element_count,
+    kernel::IntegerConversionDescriptor conversion,
+    std::uint8_t *__restrict__ output) {
+    const std::uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < element_count) {
+        output[index] = convert_output_f64<std::uint8_t>(
+            source[index], conversion);
+    }
+}
+
+extern "C" __global__ void dsmvc_cuda_convert_f64_u16(
+    const double *__restrict__ source,
+    std::uint32_t element_count,
+    kernel::IntegerConversionDescriptor conversion,
+    std::uint16_t *__restrict__ output) {
+    const std::uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < element_count) {
+        output[index] = convert_output_f64<std::uint16_t>(
+            source[index], conversion);
+    }
+}
+
 namespace dsmvc::cuda_detail::cuda_launch {
 namespace {
 
@@ -825,6 +1207,44 @@ cudaError_t transpose(
     dsmvc_cuda_transpose_u16<<<
         dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
         0U, stream>>>(source, width, height, conversion, destination);
+    return launch_status();
+}
+
+cudaError_t transpose_f64(
+    const float *source, std::uint32_t width, std::uint32_t height,
+    double *destination, cudaStream_t stream) {
+    dsmvc_cuda_transpose_f32_f64<<<
+        dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
+        0U, stream>>>(source, width, height, destination);
+    return launch_status();
+}
+
+cudaError_t transpose_f64(
+    const std::uint8_t *source, std::uint32_t width, std::uint32_t height,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    double *destination, cudaStream_t stream) {
+    dsmvc_cuda_transpose_u8_f64<<<
+        dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
+        0U, stream>>>(source, width, height, conversion, destination);
+    return launch_status();
+}
+
+cudaError_t transpose_f64(
+    const std::uint16_t *source, std::uint32_t width, std::uint32_t height,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    double *destination, cudaStream_t stream) {
+    dsmvc_cuda_transpose_u16_f64<<<
+        dim3(divide_up(width, 32U), divide_up(height, 32U)), dim3(32U, 8U),
+        0U, stream>>>(source, width, height, conversion, destination);
+    return launch_status();
+}
+
+cudaError_t promote_f64(
+    const float *source, std::uint32_t element_count,
+    double *destination, cudaStream_t stream) {
+    dsmvc_cuda_promote_f32_f64<<<
+        divide_up(element_count, conversion_threads), conversion_threads,
+        0U, stream>>>(source, element_count, destination);
     return launch_status();
 }
 
@@ -923,6 +1343,100 @@ cudaError_t solve_vertical(
     return launch_status();
 }
 
+cudaError_t inverse_horizontal_f64(
+    const double *source, std::uint32_t vector_count,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights_f32, const float *lower_f32,
+    const float *upper_f32, const float *diagonal_f32,
+    const double *weights_f64, const double *bands_f64,
+    cuda_kernel::PlanPrecision precision, double *output,
+    unsigned int threads, cudaStream_t stream) {
+    dsmvc_cuda_inverse_horizontal_f64<<<
+        divide_up(vector_count, threads), threads, 0U, stream>>>(
+        source, vector_count, plan, offsets, indices,
+        weights_f32, lower_f32, upper_f32, diagonal_f32,
+        weights_f64, bands_f64, precision, output);
+    return launch_status();
+}
+
+cudaError_t inverse_vertical_f64(
+    const double *source, std::uint32_t source_width,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights_f32, const float *lower_f32,
+    const float *upper_f32, const float *diagonal_f32,
+    const double *weights_f64, const double *bands_f64,
+    cuda_kernel::PlanPrecision precision, double *output,
+    unsigned int threads, cudaStream_t stream) {
+    dsmvc_cuda_inverse_vertical_f64<<<
+        divide_up(source_width, threads), threads, 0U, stream>>>(
+        source, source_width, plan, offsets, indices,
+        weights_f32, lower_f32, upper_f32, diagonal_f32,
+        weights_f64, bands_f64, precision, output);
+    return launch_status();
+}
+
+cudaError_t rhs_horizontal_f64(
+    const double *source, std::uint32_t vector_count,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights_f32, const double *weights_f64,
+    cuda_kernel::PlanPrecision precision, double *output,
+    cudaStream_t stream) {
+    const dim3 grid(
+        divide_up(vector_count, rhs_vector_threads),
+        divide_up(plan.destination_size, rhs_index_threads));
+    dsmvc_cuda_rhs_horizontal_f64<<<
+        grid, dim3(rhs_vector_threads, rhs_index_threads), 0U, stream>>>(
+        source, vector_count, plan, offsets, indices,
+        weights_f32, weights_f64, precision, output);
+    return launch_status();
+}
+
+cudaError_t rhs_vertical_f64(
+    const double *source, std::uint32_t source_width,
+    cuda_kernel::AxisPlanDescriptor plan,
+    const std::uint32_t *offsets, const std::int32_t *indices,
+    const float *weights_f32, const double *weights_f64,
+    cuda_kernel::PlanPrecision precision, double *output,
+    cudaStream_t stream) {
+    const dim3 grid(
+        divide_up(source_width, rhs_vector_threads),
+        divide_up(plan.destination_size, rhs_index_threads));
+    dsmvc_cuda_rhs_vertical_f64<<<
+        grid, dim3(rhs_vector_threads, rhs_index_threads), 0U, stream>>>(
+        source, source_width, plan, offsets, indices,
+        weights_f32, weights_f64, precision, output);
+    return launch_status();
+}
+
+cudaError_t solve_horizontal_f64(
+    std::uint32_t vector_count, cuda_kernel::AxisPlanDescriptor plan,
+    const float *lower_f32, const float *upper_f32,
+    const float *diagonal_f32, const double *bands_f64,
+    cuda_kernel::PlanPrecision precision, double *output,
+    unsigned int threads, cudaStream_t stream) {
+    dsmvc_cuda_solve_horizontal_f64<<<
+        divide_up(vector_count, threads), threads, 0U, stream>>>(
+        vector_count, plan, lower_f32, upper_f32, diagonal_f32,
+        bands_f64, precision, output);
+    return launch_status();
+}
+
+cudaError_t solve_vertical_f64(
+    std::uint32_t source_width, cuda_kernel::AxisPlanDescriptor plan,
+    const float *lower_f32, const float *upper_f32,
+    const float *diagonal_f32, const double *bands_f64,
+    cuda_kernel::PlanPrecision precision, double *output,
+    unsigned int threads, cudaStream_t stream) {
+    dsmvc_cuda_solve_vertical_f64<<<
+        divide_up(source_width, threads), threads, 0U, stream>>>(
+        source_width, plan, lower_f32, upper_f32, diagonal_f32,
+        bands_f64, precision, output);
+    return launch_status();
+}
+
 cudaError_t convert(
     const float *source, std::uint32_t element_count,
     cuda_kernel::IntegerConversionDescriptor conversion,
@@ -938,6 +1452,34 @@ cudaError_t convert(
     cuda_kernel::IntegerConversionDescriptor conversion,
     std::uint16_t *output, cudaStream_t stream) {
     dsmvc_cuda_convert_u16<<<divide_up(element_count, conversion_threads),
+        conversion_threads, 0U, stream>>>(
+        source, element_count, conversion, output);
+    return launch_status();
+}
+
+cudaError_t convert_f64(
+    const double *source, std::uint32_t element_count,
+    float *output, cudaStream_t stream) {
+    dsmvc_cuda_convert_f64_f32<<<divide_up(element_count, conversion_threads),
+        conversion_threads, 0U, stream>>>(source, element_count, output);
+    return launch_status();
+}
+
+cudaError_t convert_f64(
+    const double *source, std::uint32_t element_count,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    std::uint8_t *output, cudaStream_t stream) {
+    dsmvc_cuda_convert_f64_u8<<<divide_up(element_count, conversion_threads),
+        conversion_threads, 0U, stream>>>(
+        source, element_count, conversion, output);
+    return launch_status();
+}
+
+cudaError_t convert_f64(
+    const double *source, std::uint32_t element_count,
+    cuda_kernel::IntegerConversionDescriptor conversion,
+    std::uint16_t *output, cudaStream_t stream) {
+    dsmvc_cuda_convert_f64_u16<<<divide_up(element_count, conversion_threads),
         conversion_threads, 0U, stream>>>(
         source, element_count, conversion, output);
     return launch_status();
