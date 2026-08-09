@@ -23,7 +23,7 @@ set(DSMVC_CUDA_ARCHITECTURES
     "Native SM targets embedded in the CUDA module")
 set(DSMVC_CUDA_PTX_ARCHITECTURES "75;120" CACHE STRING
     "Virtual compute targets embedded as CUDA PTX fallbacks")
-option(DSMVC_BUILD_BENCHMARKS "Build the fixed-recipe CPU benchmark" OFF)
+option(DSMVC_BUILD_BENCHMARKS "Build CPU and numerical contract benchmarks" OFF)
 
 set(DSMVC_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
@@ -312,12 +312,19 @@ install(FILES dsmvc.py DESTINATION python)
 install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md DESTINATION share/dsmvc)
 
 if(BUILD_TESTING)
+    include(cmake/numerical_contract.cmake)
+
     add_executable(dsmvc_engine_tests tests/engine_tests.cpp)
     target_compile_features(dsmvc_engine_tests PRIVATE cxx_std_23)
     target_include_directories(dsmvc_engine_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(dsmvc_engine_tests PRIVATE dsmvc_engine)
     add_test(NAME dsmvc_engine_tests COMMAND dsmvc_engine_tests)
+
+    dsmvc_add_numerical_contract_test(
+        dsmvc_numerical_contract_tests
+        BACKEND shared
+        SOURCES tests/numerical_contract_tests.cpp)
 
     if(DSMVC_ENABLE_CUDA)
         add_test(NAME dsmvc_cuda_artifact_inventory
@@ -429,6 +436,25 @@ if(DSMVC_BUILD_BENCHMARKS)
     else()
         target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
             -Wall -Wextra -Wpedantic -ffp-contract=off)
+    endif()
+
+    add_executable(dsmvc_numerical_contract_benchmark
+        benchmarks/numerical_contract_benchmark.cpp)
+    target_compile_features(
+        dsmvc_numerical_contract_benchmark PRIVATE cxx_std_23)
+    target_include_directories(dsmvc_numerical_contract_benchmark PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_link_libraries(
+        dsmvc_numerical_contract_benchmark PRIVATE dsmvc_engine)
+    if(MSVC)
+        target_compile_options(dsmvc_numerical_contract_benchmark PRIVATE
+            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_definitions(dsmvc_numerical_contract_benchmark PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(dsmvc_numerical_contract_benchmark PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
     endif()
 endif()
 

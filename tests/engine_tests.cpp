@@ -983,7 +983,9 @@ void test_conditioned_bilinear_reference() {
     std::vector<float> legacy(robust.size());
     dsmvc::inverse_axis_f32(conditioned, input, robust);
     auto float32_only = conditioned;
+    float32_only.normal_inf_norm = 0.0;
     float32_only.transpose_weights_f64.clear();
+    float32_only.normal_bands_f64.clear();
     float32_only.ldlt_bands_f64.clear();
     float32_only.inverse_diagonal_f64.clear();
     dsmvc::inverse_axis_f32(float32_only, input, legacy);
@@ -1059,11 +1061,16 @@ void test_condition_aware_float64_axis() {
             "conditioned 978.1 reciprocal condition estimate drifted");
     require(conditioned.transpose_weights_f64.size()
                 == conditioned.transpose_weights.size()
+                && conditioned.normal_bands_f64.size()
+                    == (static_cast<std::size_t>(conditioned.half_bandwidth) + 1U)
+                        * static_cast<std::size_t>(conditioned.destination_size)
                 && conditioned.ldlt_bands_f64.size()
                     == (static_cast<std::size_t>(conditioned.half_bandwidth) + 1U)
                         * static_cast<std::size_t>(conditioned.destination_size)
                 && conditioned.inverse_diagonal_f64.size()
-                    == static_cast<std::size_t>(conditioned.destination_size),
+                    == static_cast<std::size_t>(conditioned.destination_size)
+                && std::isfinite(conditioned.normal_inf_norm)
+                && conditioned.normal_inf_norm > 0.0,
             "conditioned plan did not retain complete Float64 data");
     require(conditioned.storage_bytes() > exact.storage_bytes(),
             "Float64 plan storage was not included in cache accounting");
@@ -1082,7 +1089,9 @@ void test_condition_aware_float64_axis() {
     std::vector<float> legacy(robust.size());
     dsmvc::inverse_axis_f32(conditioned, input, robust);
     auto float32_only = conditioned;
+    float32_only.normal_inf_norm = 0.0;
     float32_only.transpose_weights_f64.clear();
+    float32_only.normal_bands_f64.clear();
     float32_only.ldlt_bands_f64.clear();
     float32_only.inverse_diagonal_f64.clear();
     require(float32_only.valid() && !float32_only.requires_float64(),
@@ -1545,12 +1554,33 @@ void test_axis_plan_validation() {
     rejects(std::move(malformed), "non-finite Float64 transpose weight");
 
     malformed = make_conditioned_lanczos2_plan();
+    malformed.normal_bands_f64.pop_back();
+    rejects(std::move(malformed), "truncated Float64 normal bands");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.normal_bands_f64.front() =
+        std::numeric_limits<double>::quiet_NaN();
+    rejects(std::move(malformed), "non-finite Float64 normal band");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.normal_inf_norm = std::numeric_limits<double>::infinity();
+    rejects(std::move(malformed), "non-finite normal infinity norm");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.normal_inf_norm = 0.0;
+    rejects(std::move(malformed), "zero normal infinity norm");
+
+    malformed = make_conditioned_lanczos2_plan();
     malformed.ldlt_bands_f64.pop_back();
     rejects(std::move(malformed), "truncated Float64 factor bands");
 
     malformed = make_conditioned_lanczos2_plan();
     malformed.inverse_diagonal_f64.pop_back();
     rejects(std::move(malformed), "truncated Float64 inverse diagonal");
+
+    malformed = valid;
+    malformed.normal_inf_norm = 1.0;
+    rejects(std::move(malformed), "normal infinity norm on Float32 plan");
 
     malformed = valid;
     malformed.transpose_offsets.front() = 1U;

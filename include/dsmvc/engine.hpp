@@ -91,9 +91,13 @@ struct AxisPlan {
 
     // The Float32 normal-equation path is retained for well-conditioned axes.
     // This is either a conservative lower bound or a Hager 1-norm estimate.
-    // Unsafe axes also retain the original Float64 transpose and LDLT bands.
+    // Unsafe axes also retain the original Float64 transpose, normal matrix,
+    // and LDLT bands. The unfactored normal matrix supports independent
+    // high-precision residual evaluation without reconstructing it from F32.
     double normal_rcond = 1.0;
+    double normal_inf_norm = 0.0;
     std::vector<double> transpose_weights_f64;
+    std::vector<double> normal_bands_f64;
     std::vector<double> ldlt_bands_f64;
     std::vector<double> inverse_diagonal_f64;
 

@@ -34,6 +34,60 @@ exact warm-up and measurement commands. VSPipe-internal FPS is the primary
 metric; the default regression threshold is 3%, and the command returns a
 nonzero status when any cell crosses it.
 
+## Numerical contract baseline
+
+`dsmvc_numerical_contract_tests` freezes the shared planner and arithmetic
+contract used before backend-specific F32 or F64 work. Its fixtures cover
+B1/B3/B5/B7, all four explicit padding modes, SIMD tails, a forced-F32
+conditioned plan, forced and automatic F64 plans, retained normal-matrix
+metadata, cache accounting, a mixed safe/risky 2D case, and an independent QR
+anchor.
+
+`dsmvc_numerical_contract_benchmark` is the matching lightweight axis baseline.
+It records ordered-reference, current-scalar, and native-CPU routes for ordinary
+F32, automatic-risk F64, and forced F64. It is not a full rows/columns/2D,
+integer, or plugin benchmark, and its timings are not release throughput claims.
+
+```sh
+cmake -S . -B build-numerical-contract -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=ON \
+  -DDSMVC_BUILD_BENCHMARKS=ON \
+  -DDSMVC_ENABLE_CUDA=OFF \
+  -DDSMVC_ENABLE_VULKAN=OFF \
+  -DDSMVC_ENABLE_METAL=OFF
+cmake --build build-numerical-contract --target \
+  dsmvc_engine_tests \
+  dsmvc_numerical_contract_tests \
+  dsmvc_numerical_contract_benchmark
+ctest --test-dir build-numerical-contract --output-on-failure \
+  -R '^dsmvc_(engine|numerical_contract)_tests$'
+./build-numerical-contract/dsmvc_numerical_contract_benchmark \
+  --samples 5 --iterations 32 \
+  --source-id "$(git rev-parse HEAD)" \
+  --json-out build-numerical-contract/numerical-contract.json
+```
+
+Append an explicit dirty/candidate suffix to `--source-id` when the executable
+does not come from a clean commit. Preserve the JSON outside a build directory
+when it is intended as review or release evidence.
+
+The JSON deliberately exposes two plan identities:
+
+- `f32_contract_identity` hashes the request, padding and precision
+  classification, indices, and all ordered F32 planner arrays. This is the
+  cross-platform and cross-backend contract and must match exactly.
+- `complete_identity` additionally hashes all Double metadata and arrays. It
+  binds evidence to a concrete host/toolchain plan, but is not a cross-libm
+  bit-identity gate because transcendental coefficient generation can differ in
+  low Double bits.
+
+`result_identity` binds one measured route to its output. Strict F32 fixtures
+use exact identities. F64 routes additionally use the independent QR,
+high-precision error, final-output ULP, and integer-exactness gates defined by
+the handover plan. Existing old-descale and published CPU release data are not
+rerun by this baseline.
+
 ## API4 Apple ARM validation
 
 `validate_api4_apple_arm.sh` is the consolidated migration evaluator. It uses
