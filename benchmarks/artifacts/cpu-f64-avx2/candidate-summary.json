@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "lane": "cpu-f64-avx2",
+  "recorded": "2026-08-09T20:35:49+08:00",
+  "source_sha": "031301332c2b64fe5d1f062a190d1b935d16e5eb",
+  "baseline": {
+    "production_sha": "af1d982cb400393d9ee1fbb48cb433f53814469b",
+    "benchmark_sha": "9510b14d04e1f9a9d58b2d2d67a82e25347645a7",
+    "benchmark_binary_sha256": "b3c90ba77fc87adc05f54d501b0d35c26b547eb4eb583bf3b92e561282d47b30"
+  },
+  "binaries": {
+    "engine_archive_sha256": "cdcb32ef5bcd278a8f86f8b94948c6e85799d1d96e736fb2c9153d9ce5ecc030",
+    "benchmark_sha256": "9718d636e6593a1a7eefdb355c247b664b5d5a4d06fe3283e7e8ecebe7a32da8",
+    "numerical_benchmark_sha256": "21d1f41241a363df772dabd690f7f9ba0c5866214560f6d48d670c834538269f",
+    "plugin_sha256": "02e9526f8feba47507e8c86e1bc279777514cf51b776e7830d149085b4a09acb"
+  },
+  "host": {
+    "system": "Linux 7.0.0-29-generic",
+    "architecture": "x86_64",
+    "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+    "cores": 16,
+    "threads": 32,
+    "isa": "AVX2/FMA",
+    "avx512": false,
+    "compiler": "GCC 15.2.0",
+    "cmake": "4.4.2"
+  },
+  "correctness": {
+    "complete_case_count": 76,
+    "failed_cases": 0,
+    "float_maximum_ulp": 0,
+    "integer_bit_exact": true,
+    "all_finite": true,
+    "all_guards_intact": true,
+    "f32_identities_unchanged": true,
+    "f64_identities_unchanged": true,
+    "qr_endpoint_error": 4.57457e-09,
+    "qr_condition_scaled_bound": 2.69779e-08,
+    "plugin_smoke": "dsmvc Debicubic CPU, GrayS 64x64 to 32x32"
+  },
+  "performance": {
+    "representative_aggregate": {
+      "baseline_paired_median": 2.7748665997845094,
+      "candidate_paired_median": 5.0667419694545641,
+      "relative_improvement_percent": 82.59407388621986,
+      "candidate_scalar_ns_median": 297362300,
+      "candidate_native_ns_median": 58443166,
+      "samples": 11,
+      "iterations": 1
+    },
+    "f32_control": {
+      "baseline_scalar_native_ratio": 9.243744262489265,
+      "candidate_scalar_native_ratio": 9.26060036972916,
+      "ratio_delta_percent": 0.18235150996437355
+    },
+    "adjacent_risky_risky": [
+      {"sample": "float", "baseline_native_ns": 6520685, "candidate_native_ns": 2775643.6666666665, "native_delta_percent": -57.43325023879138},
+      {"sample": "u8-limited-luma", "baseline_native_ns": 6641666, "candidate_native_ns": 6419823.333333333, "native_delta_percent": -3.340165956352925},
+      {"sample": "u10-limited-chroma", "baseline_native_ns": 7136064.666666667, "candidate_native_ns": 6448766, "native_delta_percent": -9.63134022421509},
+      {"sample": "u16-full", "baseline_native_ns": 6954661, "candidate_native_ns": 6350347.666666667, "native_delta_percent": -8.689328399088513}
+    ],
+    "adjacent_safe_risky": [
+      {"sample": "float", "baseline_native_ns": 4569407.333333333, "candidate_native_ns": 1206403.3333333333, "native_delta_percent": -73.5982536611969},
+      {"sample": "u8-limited-luma", "baseline_native_ns": 4959227.666666667, "candidate_native_ns": 4942374.333333333, "native_delta_percent": -0.3398378631941701},
+      {"sample": "u10-limited-chroma", "baseline_native_ns": 4886922, "candidate_native_ns": 4854002.333333333, "native_delta_percent": -0.6736278309059762},
+      {"sample": "u16-full", "baseline_native_ns": 4883542, "candidate_native_ns": 4866762.333333333, "native_delta_percent": -0.34359623950540596}
+    ]
+  },
+  "scope": {
+    "four_rhs_avx2_f64": ["rows", "columns", "float-2d"],
+    "scalar_tail_rhs": [1, 2, 3],
+    "integer_f64_conversion_vectorized": false,
+    "iterative_refinement": false
+  }
+}

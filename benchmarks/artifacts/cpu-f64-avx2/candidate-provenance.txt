@@ -1,0 +1,81 @@
+CPU F64 AVX2 lane candidate evidence
+===================================
+
+Recorded: 2026-08-09T20:35:49+08:00
+Optimized source SHA: 031301332c2b64fe5d1f062a190d1b935d16e5eb
+Baseline production SHA: af1d982cb400393d9ee1fbb48cb433f53814469b
+Baseline benchmark SHA: 9510b14d04e1f9a9d58b2d2d67a82e25347645a7
+Compiler: GCC 15.2.0
+CMake: 4.4.2
+System: Linux 7.0.0-29-generic x86_64
+CPU: AMD Ryzen 9 5950X 16-Core Processor, 16C/32T, AVX2/FMA, no AVX-512
+
+Build configuration:
+cmake -S . -B build-cpu-f64 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDSMVC_BUILD_BENCHMARKS=ON -DDSMVC_ENABLE_CUDA=OFF -DDSMVC_ENABLE_VULKAN=OFF -DDSMVC_ENABLE_METAL=OFF -DDSMVC_VAPOURSYNTH_SDK=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth
+cmake --build build-cpu-f64 -j8
+g++ -std=c++23 -O3 -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math -Iinclude benchmarks/cpu_f64_avx2_benchmark.cpp build-cpu-f64/libdsmvc_engine.a -pthread -o build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark
+
+Binary SHA-256:
+cdcb32ef5bcd278a8f86f8b94948c6e85799d1d96e736fb2c9153d9ce5ecc030  build-cpu-f64/libdsmvc_engine.a
+9718d636e6593a1a7eefdb355c247b664b5d5a4d06fe3283e7e8ecebe7a32da8  build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark
+21d1f41241a363df772dabd690f7f9ba0c5866214560f6d48d670c834538269f  build-cpu-f64/dsmvc_numerical_contract_benchmark
+02e9526f8feba47507e8c86e1bc279777514cf51b776e7830d149085b4a09acb  build-cpu-f64/dsmvc.so
+4a9a58a991c56a6db230e76a7ba5aa56b6418955adb25b7cde8d659df26bb6bc  benchmarks/cpu_f64_avx2_benchmark.cpp
+
+Validation commands:
+ctest --test-dir build-cpu-f64 --output-on-failure
+build-cpu-f64/dsmvc_numerical_contract_tests --emit-goldens
+PYTHONPATH=/home/owen/vapoursynth/lib/python3.14/site-packages LD_LIBRARY_PATH=/home/owen/vapoursynth/lib python3 -c 'import vapoursynth as vs; core=vs.core; core.std.LoadPlugin(path="/home/owen/dev/dsmvc-wt-cpu/build-cpu-f64/dsmvc.so"); clip=core.std.BlankClip(width=64,height=64,format=vs.GRAYS,length=1); out=core.dsmvc.Debicubic(clip,width=32,height=32,b=0.0,c=0.5,backend="cpu"); frame=out.get_frame(0); print(frame.width, frame.height, frame.format.name)'
+
+Benchmark commands (all serialized by the required lock):
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 180s build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark --check-only --source-id 031301332c2b64fe5d1f062a190d1b935d16e5eb --binary-sha256 9718d636e6593a1a7eefdb355c247b664b5d5a4d06fe3283e7e8ecebe7a32da8 --json-out benchmarks/artifacts/cpu-f64-avx2/candidate-generic-complete-check.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 180s build-cpu-f64/dsmvc_numerical_contract_benchmark --samples 21 --iterations 64 --source-id 031301332c2b64fe5d1f062a190d1b935d16e5eb --json-out benchmarks/artifacts/cpu-f64-avx2/candidate-generic-numerical-contract.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 300s build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark --samples 11 --iterations 1 --source-id 031301332c2b64fe5d1f062a190d1b935d16e5eb --binary-sha256 9718d636e6593a1a7eefdb355c247b664b5d5a4d06fe3283e7e8ecebe7a32da8 --json-out benchmarks/artifacts/cpu-f64-avx2/candidate-generic-complete-paired.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 300s /tmp/dsmvc-cpu-baseline-9510b14/build/dsmvc_cpu_f64_avx2_benchmark --samples 21 --iterations 3 --case-filter b3-risky-risky-2d --source-id 9510b14d04e1f9a9d58b2d2d67a82e25347645a7 --binary-sha256 b3c90ba77fc87adc05f54d501b0d35c26b547eb4eb583bf3b92e561282d47b30 --json-out benchmarks/artifacts/cpu-f64-avx2/baseline-risky-risky-targeted-final.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 300s build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark --samples 21 --iterations 3 --case-filter b3-risky-risky-2d --source-id 031301332c2b64fe5d1f062a190d1b935d16e5eb --binary-sha256 9718d636e6593a1a7eefdb355c247b664b5d5a4d06fe3283e7e8ecebe7a32da8 --json-out benchmarks/artifacts/cpu-f64-avx2/candidate-generic-risky-risky-targeted-final.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 300s /tmp/dsmvc-cpu-baseline-9510b14/build/dsmvc_cpu_f64_avx2_benchmark --samples 21 --iterations 3 --case-filter b3-safe-risky-2d --source-id 9510b14d04e1f9a9d58b2d2d67a82e25347645a7 --binary-sha256 b3c90ba77fc87adc05f54d501b0d35c26b547eb4eb583bf3b92e561282d47b30 --json-out benchmarks/artifacts/cpu-f64-avx2/baseline-safe-risky-targeted-final.json'
+flock -w 300 /tmp/dsmvc-bench.lock -c 'timeout 300s build-cpu-f64/dsmvc_cpu_f64_avx2_benchmark --samples 21 --iterations 3 --case-filter b3-safe-risky-2d --source-id 031301332c2b64fe5d1f062a190d1b935d16e5eb --binary-sha256 9718d636e6593a1a7eefdb355c247b664b5d5a4d06fe3283e7e8ecebe7a32da8 --json-out benchmarks/artifacts/cpu-f64-avx2/candidate-generic-safe-risky-targeted-final.json'
+
+Correctness results:
+- Complete matrix: 76/76 passed across rows, columns, single-axis and two-axis
+  2D, risky/risky, risky/safe, safe/risky, B1/B3/B5/B7/generic B9,
+  float/U8/U10/U16, and RHS counts 1/2/3/4/5/7.
+- Float scalar/native difference: 0 ULP in all 76 cases (gate: at most 1).
+- U8/U10/U16 outputs: bit exact in all cases.
+- All outputs finite and all output guards intact.
+- F32 plan/result identities and F64 fixture identities match the exact baseline.
+- Independent ordered-F64 QR endpoint error is 4.57457e-09 against a
+  condition-scaled bound of 2.69779e-08.
+- RHS 1/2/3 remain scalar tails; RHS 4 is vectorized; RHS 5/7 combine one
+  four-RHS AVX2 group with scalar tails.
+- Object inspection contains vfmadd231pd, vfnmadd231pd, vmulpd, vcvtps2pd,
+  and vcvtpd2ps in the AVX2 object.
+
+Performance results:
+- Representative aggregate paired median: baseline 2.7748665998x, candidate
+  5.0667419695x, an 82.5941% relative improvement.
+- F32 scalar/native control ratio: baseline 9.2437442625x, candidate
+  9.2606003697x (+0.1824%); no F32 regression.
+- Adjacent 21x3 risky/risky baseline-to-candidate native medians:
+  float -57.43%, U8 -3.34%, U10 -9.63%, U16 -8.69%.
+- Adjacent 21x3 safe/risky baseline-to-candidate native medians:
+  float -73.60%, U8 -0.34%, U10 -0.67%, U16 -0.34%.
+- Every representative case in the complete matrix has a non-regressed native
+  median. Raw alternating samples, MAD, minima, and maxima are retained in the
+  JSON artifacts.
+
+Artifact interpretation:
+- The files ending in -final.json are the adjacent baseline/candidate targeted
+  pairs used for the integer regression gate.
+- candidate-generic-complete-check.json, candidate-generic-complete-paired.json,
+  and candidate-generic-numerical-contract.json are the final complete runs.
+- Files containing -noisy or lacking the -final targeted suffix are retained
+  diagnostic runs showing shared-machine variance; they are not the selected
+  gate comparison.
+
+Hardware and validation boundary:
+- Validated on Linux x86_64, Ryzen 9 5950X, AVX2/FMA, no AVX-512.
+- No Windows/MSVC, AVX-512, or non-x86/NEON runtime validation was performed.
+- CUDA, Vulkan, and Metal were disabled for this CPU-lane build.
+- Public F64 rejection remains unchanged; this lane did not enable release F64.
+- CPU iterative refinement was not implemented.
