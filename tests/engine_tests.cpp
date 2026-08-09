@@ -1,6 +1,9 @@
 #include <dsmvc/engine.hpp>
 
+#include "axis_plan_internal.hpp"
+
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <cmath>
@@ -937,6 +940,468 @@ void test_identity_bilinear() {
     }
 }
 
+[[nodiscard]] dsmvc::AxisPlan make_conditioned_lanczos2_plan() {
+    dsmvc::AxisRequest request;
+    request.source_size = 1080;
+    request.destination_size = 980;
+    request.active_length = 978.1;
+    request.shift = 0.95;
+    request.kernel.kind = dsmvc::KernelKind::lanczos;
+    request.kernel.taps = 2;
+    return dsmvc::build_axis_plan(request);
+}
+
+[[nodiscard]] dsmvc::AxisPlan make_conditioned_bilinear_plan() {
+    dsmvc::AxisRequest request;
+    request.source_size = 1920;
+    request.destination_size = 1734;
+    request.active_length = 1732.0888888888887;
+    request.shift = 0.9555555555556339;
+    request.kernel.kind = dsmvc::KernelKind::bilinear;
+    return dsmvc::build_axis_plan(request);
+}
+
+void test_conditioned_bilinear_reference() {
+    const auto conditioned = make_conditioned_bilinear_plan();
+    require(conditioned.requires_float64(),
+            "conditioned bilinear geometry did not select Float64");
+    require(conditioned.normal_rcond > 2.0e-6
+                && conditioned.normal_rcond < 2.5e-6,
+            "conditioned bilinear reciprocal condition estimate drifted");
+
+    std::vector<float> input(
+        static_cast<std::size_t>(conditioned.source_size));
+    std::uint32_t state = 0x9743b111U;
+    for (float &value : input) {
+        state ^= state << 13U;
+        state ^= state >> 17U;
+        state ^= state << 5U;
+        value = static_cast<float>(state & 0xffffU) / 65535.0F;
+    }
+    std::vector<float> robust(
+        static_cast<std::size_t>(conditioned.destination_size));
+    std::vector<float> legacy(robust.size());
+    dsmvc::inverse_axis_f32(conditioned, input, robust);
+    auto float32_only = conditioned;
+    float32_only.transpose_weights_f64.clear();
+    float32_only.ldlt_bands_f64.clear();
+    float32_only.inverse_diagonal_f64.clear();
+    dsmvc::inverse_axis_f32(float32_only, input, legacy);
+
+    // Independent 60-digit solve of the retained bilinear operator.
+    constexpr double first_reference = 64.704580093370353;
+    constexpr double last_reference = 6.4342414526327527;
+    const double robust_error = std::max(
+        std::abs(static_cast<double>(robust.front()) - first_reference),
+        std::abs(static_cast<double>(robust.back()) - last_reference));
+    const double legacy_error = std::max(
+        std::abs(static_cast<double>(legacy.front()) - first_reference),
+        std::abs(static_cast<double>(legacy.back()) - last_reference));
+    require(robust_error < 3.0e-6,
+            "Float64 bilinear solve differs from the high-precision reference");
+    require(legacy_error > robust_error * 500.0,
+            "conditioned bilinear solve did not improve on Float32 factors");
+
+    dsmvc::AxisRequest identity_request;
+    identity_request.source_size = 4;
+    identity_request.destination_size = 4;
+    identity_request.active_length = 4.0;
+    identity_request.kernel.kind = dsmvc::KernelKind::bilinear;
+    const auto identity = dsmvc::build_axis_plan(identity_request);
+    const auto input_stride = conditioned.source_size;
+    const auto output_stride = conditioned.destination_size;
+    std::vector<float> input_2d(
+        static_cast<std::size_t>(identity.source_size)
+            * static_cast<std::size_t>(input_stride));
+    std::vector<float> reference(
+        static_cast<std::size_t>(identity.destination_size)
+            * static_cast<std::size_t>(output_stride));
+    std::vector<float> output(reference.size(), output_fill);
+    fill_deterministic(input_2d.data(), input_2d.size(), 0x97432d64U);
+    for (std::int32_t row = 0; row < identity.source_size; ++row) {
+        dsmvc::inverse_axis_f32(
+            conditioned,
+            input_2d.data() + static_cast<std::ptrdiff_t>(row) * input_stride,
+            1,
+            reference.data() + static_cast<std::ptrdiff_t>(row) * output_stride,
+            1);
+    }
+    const dsmvc::CpuExecutor executor(dsmvc::CpuPath::automatic);
+    executor.inverse_2d(
+        conditioned, identity, input_2d.data(), input_stride,
+        output.data(), output_stride);
+    const auto stats = compare_matrix(
+        reference.data(), output.data(), identity.destination_size,
+        conditioned.destination_size, output_stride);
+    require(stats.non_finite == 0U && stats.maximum < 3.0e-6F,
+            "horizontal Float64 2D path differs from the axis reference");
+    require(executor.packing_stats().pack_executions == 0U,
+            "horizontal Float64 2D path packed a Float32 plan");
+}
+
+void test_condition_aware_float64_axis() {
+    dsmvc::AxisRequest exact_request;
+    exact_request.source_size = 1080;
+    exact_request.destination_size = 978;
+    exact_request.active_length = 978.0;
+    exact_request.shift = 0.0;
+    exact_request.kernel.kind = dsmvc::KernelKind::lanczos;
+    exact_request.kernel.taps = 2;
+    const auto exact = dsmvc::build_axis_plan(exact_request);
+    require(!exact.requires_float64() && exact.normal_rcond >= 1.0e-4,
+            "exact 978.0 geometry did not retain the Float32 fast path");
+
+    auto conditioned = make_conditioned_lanczos2_plan();
+    require(conditioned.requires_float64(),
+            "conditioned 978.1 geometry did not select Float64");
+    require(conditioned.normal_rcond > 3.5e-6
+                && conditioned.normal_rcond < 4.5e-6,
+            "conditioned 978.1 reciprocal condition estimate drifted");
+    require(conditioned.transpose_weights_f64.size()
+                == conditioned.transpose_weights.size()
+                && conditioned.ldlt_bands_f64.size()
+                    == (static_cast<std::size_t>(conditioned.half_bandwidth) + 1U)
+                        * static_cast<std::size_t>(conditioned.destination_size)
+                && conditioned.inverse_diagonal_f64.size()
+                    == static_cast<std::size_t>(conditioned.destination_size),
+            "conditioned plan did not retain complete Float64 data");
+    require(conditioned.storage_bytes() > exact.storage_bytes(),
+            "Float64 plan storage was not included in cache accounting");
+
+    std::vector<float> input(
+        static_cast<std::size_t>(conditioned.source_size));
+    std::uint32_t state = 0x9781a5c3U;
+    for (float &value : input) {
+        state ^= state << 13U;
+        state ^= state >> 17U;
+        state ^= state << 5U;
+        value = static_cast<float>(state & 0xffffU) / 65535.0F;
+    }
+    std::vector<float> robust(
+        static_cast<std::size_t>(conditioned.destination_size));
+    std::vector<float> legacy(robust.size());
+    dsmvc::inverse_axis_f32(conditioned, input, robust);
+    auto float32_only = conditioned;
+    float32_only.transpose_weights_f64.clear();
+    float32_only.ldlt_bands_f64.clear();
+    float32_only.inverse_diagonal_f64.clear();
+    require(float32_only.valid() && !float32_only.requires_float64(),
+            "Float32 comparison plan is invalid");
+    dsmvc::inverse_axis_f32(float32_only, input, legacy);
+
+    // Direct Float64 Householder QR references for the retained operator.
+    constexpr double first_qr = 74.22802437585693;
+    constexpr double last_qr = -119.91860242539072;
+    const double robust_error = std::max(
+        std::abs(static_cast<double>(robust.front()) - first_qr),
+        std::abs(static_cast<double>(robust.back()) - last_qr));
+    const double legacy_error = std::max(
+        std::abs(static_cast<double>(legacy.front()) - first_qr),
+        std::abs(static_cast<double>(legacy.back()) - last_qr));
+    require(robust_error < 4.0e-6,
+            "Float64 conditioned solve differs from the QR reference");
+    require(legacy_error > robust_error * 20.0,
+            "conditioned Float64 solve did not improve on Float32 factors");
+
+    auto retained = std::make_shared<const dsmvc::AxisPlan>(conditioned);
+    dsmvc::CpuExecutor prepared(dsmvc::CpuPath::automatic);
+    prepared.prepare(retained);
+    require(prepared.packing_stats().pack_executions == 0U,
+            "Float64 plan was packed for a Float32 SIMD path");
+    prepared.seal();
+    std::vector<float> one_row(robust.size());
+    prepared.inverse_rows(
+        *retained, input.data(), conditioned.source_size,
+        one_row.data(), conditioned.destination_size, 1);
+    require(prepared.packing_stats().pack_executions == 0U,
+            "Float64 execution lazily packed a Float32 SIMD plan");
+    require(one_row == robust,
+            "prepared Float64 row execution differs from the axis solve");
+
+    constexpr std::int32_t batch_count = 269;
+    const auto row_input_stride = conditioned.source_size + 3;
+    const auto row_output_stride = conditioned.destination_size + 3;
+    std::vector<float> row_input(
+        static_cast<std::size_t>(batch_count)
+            * static_cast<std::size_t>(row_input_stride));
+    std::vector<float> row_reference(
+        static_cast<std::size_t>(batch_count)
+            * static_cast<std::size_t>(row_output_stride),
+        output_fill);
+    std::vector<float> row_candidate(row_reference.size(), output_fill);
+    fill_deterministic(row_input.data(), row_input.size(), 0x9781f64aU);
+    for (std::int32_t row = 0; row < batch_count; ++row) {
+        dsmvc::inverse_axis_f32(
+            conditioned,
+            row_input.data() + static_cast<std::ptrdiff_t>(row)
+                * row_input_stride,
+            1,
+            row_reference.data() + static_cast<std::ptrdiff_t>(row)
+                * row_output_stride,
+            1);
+    }
+    prepared.inverse_rows(
+        conditioned, row_input.data(), row_input_stride,
+        row_candidate.data(), row_output_stride, batch_count);
+    auto stats = compare_matrix(
+        row_reference.data(), row_candidate.data(), batch_count,
+        conditioned.destination_size, row_output_stride);
+    std::cout << "conditioned Float64 rows: max_error=" << stats.maximum
+              << " mean_error=" << stats.mean << '\n';
+    require(stats.non_finite == 0U && stats.maximum < 4.0e-6F,
+            "batched Float64 rows differ from scalar Double");
+
+    const auto column_stride = batch_count + 3;
+    std::vector<float> column_input(
+        static_cast<std::size_t>(conditioned.source_size)
+            * static_cast<std::size_t>(column_stride));
+    std::vector<float> column_reference(
+        static_cast<std::size_t>(conditioned.destination_size)
+            * static_cast<std::size_t>(column_stride),
+        output_fill);
+    std::vector<float> column_candidate(column_reference.size(), output_fill);
+    fill_deterministic(
+        column_input.data(), column_input.size(), 0x9781c01aU);
+    for (std::int32_t column = 0; column < batch_count; ++column) {
+        dsmvc::inverse_axis_f32(
+            conditioned, column_input.data() + column, column_stride,
+            column_reference.data() + column, column_stride);
+    }
+    prepared.inverse_columns(
+        conditioned, column_input.data(), column_stride,
+        column_candidate.data(), column_stride, batch_count);
+    stats = compare_matrix(
+        column_reference.data(), column_candidate.data(),
+        conditioned.destination_size, batch_count, column_stride);
+    std::cout << "conditioned Float64 columns: max_error=" << stats.maximum
+              << " mean_error=" << stats.mean << '\n';
+    require(stats.non_finite == 0U && stats.maximum < 4.0e-6F,
+            "batched Float64 columns differ from scalar Double");
+    require(prepared.packing_stats().pack_executions == 0U,
+            "batched Float64 execution packed a Float32 plan");
+}
+
+void test_conditioned_float64_2d_intermediate() {
+    dsmvc::AxisRequest horizontal_request;
+    horizontal_request.source_size = 8;
+    horizontal_request.destination_size = 8;
+    horizontal_request.active_length = 8.0;
+    horizontal_request.kernel.kind = dsmvc::KernelKind::bilinear;
+    const auto horizontal = dsmvc::build_axis_plan(horizontal_request);
+    const auto vertical = make_conditioned_lanczos2_plan();
+    require(!horizontal.requires_float64() && vertical.requires_float64(),
+            "2D precision-routing fixture is invalid");
+
+    constexpr std::int32_t stride = 8;
+    std::vector<float> input(
+        static_cast<std::size_t>(vertical.source_size) * stride);
+    for (std::size_t index = 0; index < input.size(); ++index) {
+        input[index] = static_cast<float>((index * 73U + 19U) & 4095U)
+            / 4095.0F;
+    }
+    std::vector<float> output(
+        static_cast<std::size_t>(vertical.destination_size) * stride);
+    std::vector<float> reference(output.size());
+    const dsmvc::CpuExecutor executor(dsmvc::CpuPath::automatic);
+    executor.inverse_2d(
+        horizontal, vertical, input.data(), stride, output.data(), stride);
+
+    std::vector<float> source_column(
+        static_cast<std::size_t>(vertical.source_size));
+    std::vector<float> destination_column(
+        static_cast<std::size_t>(vertical.destination_size));
+    for (std::int32_t column = 0; column < stride; ++column) {
+        for (std::int32_t row = 0; row < vertical.source_size; ++row) {
+            source_column[static_cast<std::size_t>(row)] =
+                input[static_cast<std::ptrdiff_t>(row) * stride + column];
+        }
+        dsmvc::inverse_axis_f32(vertical, source_column, destination_column);
+        for (std::int32_t row = 0; row < vertical.destination_size; ++row) {
+            reference[static_cast<std::ptrdiff_t>(row) * stride + column] =
+                destination_column[static_cast<std::size_t>(row)];
+        }
+    }
+    const auto stats = compare_matrix(
+        reference.data(), output.data(), vertical.destination_size,
+        stride, stride);
+    std::cout << "conditioned Float64 2D: max_error=" << stats.maximum
+              << " mean_error=" << stats.mean << '\n';
+    require(stats.non_finite == 0U && stats.maximum < 4.0e-6F,
+            "conditioned 2D path differs from the scalar Double reference");
+    require(executor.packing_stats().pack_executions == 0U,
+            "conditioned 2D path packed a Float32 axis plan");
+
+    const dsmvc::IntegerConversion conversion{
+        0.0F, 1.0F / 1023.0F, 1023.0F, 0.0F, 1023U};
+    const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
+
+    const auto nontrivial_horizontal = make_plan(
+        dsmvc::KernelKind::bicubic, 17, 13, 12.75, 0.125);
+    require(!nontrivial_horizontal.requires_float64(),
+            "safe horizontal Double fixture selected Float64");
+    constexpr std::int32_t nontrivial_input_stride = 20;
+    constexpr std::int32_t nontrivial_output_stride = 16;
+    std::vector<float> nontrivial_input(
+        static_cast<std::size_t>(vertical.source_size)
+            * nontrivial_input_stride);
+    std::vector<float> nontrivial_reference(
+        static_cast<std::size_t>(vertical.destination_size)
+            * nontrivial_output_stride,
+        output_fill);
+    std::vector<float> nontrivial_output(
+        nontrivial_reference.size(), output_fill);
+    fill_deterministic(
+        nontrivial_input.data(), nontrivial_input.size(), 0xf64b3a5eU);
+    scalar.inverse_2d(
+        nontrivial_horizontal, vertical,
+        nontrivial_input.data(), nontrivial_input_stride,
+        nontrivial_reference.data(), nontrivial_output_stride);
+    executor.inverse_2d(
+        nontrivial_horizontal, vertical,
+        nontrivial_input.data(), nontrivial_input_stride,
+        nontrivial_output.data(), nontrivial_output_stride);
+    const auto nontrivial_stats = compare_matrix(
+        nontrivial_reference.data(), nontrivial_output.data(),
+        vertical.destination_size, nontrivial_horizontal.destination_size,
+        nontrivial_output_stride);
+    std::cout << "conditioned Float64 2D nontrivial horizontal: max_error="
+              << nontrivial_stats.maximum
+              << " mean_error=" << nontrivial_stats.mean << '\n';
+    require(nontrivial_stats.non_finite == 0U
+                && nontrivial_stats.maximum < 4.0e-6F,
+            "safe horizontal axis lost Double intermediate precision");
+
+    std::vector<std::uint16_t> integer_input(input.size());
+    for (std::size_t index = 0; index < integer_input.size(); ++index) {
+        integer_input[index] = static_cast<std::uint16_t>(
+            (index * 73U + 19U) & 1023U);
+    }
+    std::vector<std::uint16_t> integer_reference(output.size());
+    std::vector<std::uint16_t> integer_output(output.size());
+    std::vector<std::uint16_t> integer_streamed(output.size());
+    scalar.inverse_2d_u16(
+        horizontal, vertical, integer_input.data(), stride,
+        integer_reference.data(), stride, conversion);
+    executor.inverse_2d_u16(
+        horizontal, vertical, integer_input.data(), stride,
+        integer_output.data(), stride, conversion);
+    executor.inverse_2d_u16_streamed(
+        horizontal, vertical, integer_input.data(), stride,
+        integer_streamed.data(), stride, conversion);
+    require(integer_output == integer_reference,
+            "conditioned U16 2D path differs from scalar Double");
+    require(integer_streamed == integer_reference,
+            "conditioned streamed U16 path differs from scalar Double");
+}
+
+void test_padding_index_patterns() {
+    constexpr std::int32_t size = 4;
+    constexpr std::int64_t first = -8;
+    const auto check = [](dsmvc::BorderMode mode,
+                          const std::array<std::int32_t, 20> &expected,
+                          std::string_view label) {
+        for (std::size_t offset = 0; offset < expected.size(); ++offset) {
+            const auto index = first + static_cast<std::int64_t>(offset);
+            const auto actual = dsmvc::detail::padding_index(index, size, mode);
+            require(actual == expected[offset],
+                    std::string(label) + " padding pattern differs at index "
+                        + std::to_string(index));
+        }
+    };
+
+    check(dsmvc::BorderMode::zero,
+          {-1, -1, -1, -1, -1, -1, -1, -1, 0, 1,
+           2, 3, -1, -1, -1, -1, -1, -1, -1, -1},
+          "zero");
+    check(dsmvc::BorderMode::repeat,
+          {0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+           2, 3, 3, 3, 3, 3, 3, 3, 3, 3},
+          "repeat");
+    check(dsmvc::BorderMode::reflect101,
+          {2, 1, 0, 1, 2, 3, 2, 1, 0, 1,
+           2, 3, 2, 1, 0, 1, 2, 3, 2, 1},
+          "reflect101");
+    check(dsmvc::BorderMode::symmetric,
+          {0, 1, 2, 3, 3, 2, 1, 0, 0, 1,
+           2, 3, 3, 2, 1, 0, 0, 1, 2, 3},
+          "symmetric");
+    check(dsmvc::BorderMode::mirror,
+          {-1, -1, -1, -1, 3, 2, 1, 0, 0, 1,
+           2, 3, 3, 2, 1, 0, -1, -1, -1, -1},
+          "legacy mirror");
+
+    for (const auto mode : {
+             dsmvc::BorderMode::repeat,
+             dsmvc::BorderMode::reflect101,
+             dsmvc::BorderMode::symmetric}) {
+        require(dsmvc::detail::padding_index(-1000000000000LL, 1, mode) == 0
+                    && dsmvc::detail::padding_index(1000000000000LL, 1, mode) == 0,
+                "single-pixel periodic padding did not remain at index zero");
+    }
+
+    bool rejected = false;
+    try {
+        (void)dsmvc::detail::padding_index(
+            0, size, static_cast<dsmvc::BorderMode>(255));
+    } catch (const std::invalid_argument &) {
+        rejected = true;
+    }
+    require(rejected, "invalid padding mode was accepted");
+}
+
+void test_f64_mode_selection_and_cache() {
+    dsmvc::clear_planner_caches();
+    dsmvc::AxisRequest request;
+    request.source_size = 1080;
+    request.destination_size = 980;
+    request.active_length = 978.1;
+    request.shift = 0.95;
+    request.kernel.kind = dsmvc::KernelKind::lanczos;
+    request.kernel.taps = 2;
+
+    const auto automatic = dsmvc::get_or_build_axis_plan(request);
+    request.f64_mode = dsmvc::F64Mode::float32_only;
+    const auto float32 = dsmvc::get_or_build_axis_plan(request);
+    request.f64_mode = dsmvc::F64Mode::float64_only;
+    const auto float64 = dsmvc::get_or_build_axis_plan(request);
+
+    require(automatic->requires_float64(),
+            "automatic mode did not promote a conditioned plan");
+    require(!float32->requires_float64(),
+            "Float32-only mode retained Float64 factors");
+    require(float64->requires_float64(),
+            "Float64-only mode did not retain Float64 factors");
+    require(automatic != float32 && automatic != float64 && float32 != float64,
+            "precision modes shared a plan-cache entry");
+    require(automatic->normal_rcond == float32->normal_rcond
+                && automatic->normal_rcond == float64->normal_rcond,
+            "precision mode changed the condition estimate");
+
+    const auto stats = dsmvc::planner_cache_stats();
+    require(stats.plan_builds == 3 && stats.plan_entries == 3,
+            "precision modes were not cached independently");
+    require(stats.geometry_builds == 1 && stats.geometry_hits >= 2,
+            "precision modes did not reuse sampling geometry");
+
+    request.source_size = 8;
+    request.destination_size = 8;
+    request.active_length = 8.0;
+    request.shift = 0.0;
+    request.kernel.kind = dsmvc::KernelKind::bilinear;
+    request.f64_mode = dsmvc::F64Mode::float64_only;
+    require(dsmvc::build_axis_plan(request).requires_float64(),
+            "Float64-only mode did not promote a well-conditioned plan");
+
+    request.f64_mode = static_cast<dsmvc::F64Mode>(255);
+    bool rejected = false;
+    try {
+        (void)dsmvc::build_axis_plan(request);
+    } catch (const std::invalid_argument &) {
+        rejected = true;
+    }
+    require(rejected, "invalid f64 mode was accepted");
+}
+
 void test_custom_plan() {
     dsmvc::AxisRequest request;
     request.source_size = 48;
@@ -1069,6 +1534,23 @@ void test_axis_plan_validation() {
     malformed.inverse_diagonal.front() =
         std::numeric_limits<float>::quiet_NaN();
     rejects(std::move(malformed), "non-finite inverse diagonal");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.normal_rcond = std::numeric_limits<double>::quiet_NaN();
+    rejects(std::move(malformed), "non-finite reciprocal condition estimate");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.transpose_weights_f64.front() =
+        std::numeric_limits<double>::quiet_NaN();
+    rejects(std::move(malformed), "non-finite Float64 transpose weight");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.ldlt_bands_f64.pop_back();
+    rejects(std::move(malformed), "truncated Float64 factor bands");
+
+    malformed = make_conditioned_lanczos2_plan();
+    malformed.inverse_diagonal_f64.pop_back();
+    rejects(std::move(malformed), "truncated Float64 inverse diagonal");
 
     malformed = valid;
     malformed.transpose_offsets.front() = 1U;
@@ -1437,6 +1919,11 @@ int main() {
             dsmvc::BackendKind::vulkan, dsmvc::vulkan_available(), "Vulkan");
         test_cpu_path_selection();
         test_identity_bilinear();
+        test_conditioned_bilinear_reference();
+        test_condition_aware_float64_axis();
+        test_conditioned_float64_2d_intermediate();
+        test_padding_index_patterns();
+        test_f64_mode_selection_and_cache();
         test_custom_plan();
         test_inverse_only_cache();
         test_large_support_compatibility();

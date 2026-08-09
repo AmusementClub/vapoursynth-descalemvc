@@ -43,7 +43,7 @@ void require(bool condition, const std::string &message) {
     request.active_length = static_cast<double>(destination) - 0.25;
     request.shift = 0.125;
     request.kernel.kind = KernelKind::spline64;
-    request.border = BorderMode::mirror;
+    request.border = BorderMode::symmetric;
     auto plan = std::make_shared<const AxisPlan>(dsmvc::build_axis_plan(request));
     require(plan->valid() && plan->half_bandwidth >= 5,
             "wide Metal scheduler test plan is invalid");
@@ -1253,6 +1253,43 @@ void test_error_propagation(
             "invalid GPU submission was not propagated to its full batch");
 }
 
+void test_float64_plan_cpu_fallback(const std::shared_ptr<Client> &client) {
+    AxisRequest request;
+    request.source_size = 1080;
+    request.destination_size = 980;
+    request.active_length = 978.1;
+    request.shift = 0.95;
+    request.kernel.kind = KernelKind::lanczos;
+    request.kernel.taps = 2;
+    auto plan = std::make_shared<const AxisPlan>(
+        dsmvc::build_axis_plan(request));
+    require(plan->requires_float64(),
+            "Metal Float64 fallback fixture did not select Float64");
+
+    std::vector<float> source(static_cast<std::size_t>(plan->source_size));
+    std::vector<float> destination(
+        static_cast<std::size_t>(plan->destination_size));
+    for (std::size_t index = 0; index < source.size(); ++index) {
+        source[index] = static_cast<float>((index * 37U + 11U) & 4095U)
+            / 4095.0F;
+    }
+    bool used_cpu = false;
+    const RunResult result = dsmvc::metal::run(
+        client,
+        horizontal_job(plan, source.data(), destination.data(), 1U),
+        [&] {
+            used_cpu = true;
+            solve_rows(*plan, source, destination, 1U);
+        },
+        false);
+    require(used_cpu && result.metal_batch_size == 0U,
+            "Float64 axis plan entered the Float32 Metal path");
+    require(std::all_of(
+                destination.begin(), destination.end(),
+                [](float value) { return std::isfinite(value); }),
+            "Float64 Metal CPU fallback produced non-finite output");
+}
+
 } // namespace
 
 int main() {
@@ -1274,6 +1311,7 @@ int main() {
         }
         test_shared_input_automatic_admission(
             small_plan, small_source, small_height);
+        test_float64_plan_cpu_fallback(first);
         test_automatic_admission_boundaries(
             first, small_plan, small_source, small_height);
         test_recent_input_expiry_and_key_isolation(

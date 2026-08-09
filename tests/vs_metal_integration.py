@@ -35,6 +35,7 @@ TAIL_SIGNATURE = (
     "src_width:float:opt;src_height:float:opt;"
     "border_handling:int:opt;force:int:opt;force_h:int:opt;"
     "force_v:int:opt;opt:int:opt;backend:data:opt;"
+    "padding:int:opt;f64mode:int:opt;"
 )
 EXPECTED_SIGNATURES = {
     "Debilinear": GEOMETRY_SIGNATURE + TAIL_SIGNATURE,
@@ -51,7 +52,7 @@ EXPECTED_SIGNATURES = {
         + "border_handling:int:opt;force:int:opt;force_h:int:opt;"
         + "force_v:int:opt;opt:int:opt;"
         + "custom:func:opt;support:int:opt;custom_kernel:func:opt;"
-        + "backend:data:opt;"
+        + "backend:data:opt;padding:int:opt;f64mode:int:opt;"
     ),
 }
 
@@ -243,6 +244,34 @@ def compare_grays(reference: vs.VideoFrame, candidate: vs.VideoFrame,
     return difference
 
 
+def test_conditioned_float64_fallback(core: vs.Core) -> None:
+    source = patterned_grays_source(core, 1)
+    geometry = {
+        "width": 1920,
+        "height": 980,
+        "src_width": 1920.0,
+        "src_height": 978.1,
+        "src_top": 0.95,
+        "force_h": 1,
+    }
+    for f64mode, label in ((0, "automatic"), (2, "forced")):
+        cpu_frame = core.dsmvc.Delanczos(
+            source, taps=2, backend="cpu", f64mode=f64mode,
+            **geometry).get_frame(0)
+        metal_frame = core.dsmvc.Delanczos(
+            source, taps=2, backend="metal", f64mode=f64mode,
+            **geometry).get_frame(0)
+        case = f"conditioned-float64/{label}/explicit-metal"
+        maximum = compare_grays(cpu_frame, metal_frame, case)
+        assigned, _ranges = metal_assignments(
+            [metal_frame], 1, case, track_range=False, copies_per_frame=2)
+        require(assigned == 0,
+                f"{label} Float64 plan entered the Metal executor")
+        require(int(metal_frame.props.get("_DSMVCMetal", -1)) == 0,
+                f"{label} Float64 plan did not publish _DSMVCMetal=0")
+        print(f"{label} Float64 Metal fallback: max_error={maximum}")
+
+
 def patterned_general_source(core: vs.Core, format_id: int,
                              length: int = 16) -> vs.VideoNode:
     blank = core.std.BlankClip(
@@ -275,7 +304,7 @@ def patterned_general_source(core: vs.Core, format_id: int,
 
 def compare_general_clips(core: vs.Core, cpu_clip: vs.VideoNode,
                           metal_clip: vs.VideoNode, label: str,
-                          threads: int) -> None:
+                          threads: int, *, expect_metal: bool = True) -> None:
     cpu_frames = collect(cpu_clip, threads)
     metal_frames = collect(metal_clip, threads)
     require(len(cpu_frames) == len(metal_frames), f"{label}: frame count differs")
@@ -298,7 +327,11 @@ def compare_general_clips(core: vs.Core, cpu_clip: vs.VideoNode,
     assigned, _ranges = metal_assignments(
         metal_frames, 7, label,
         copies_per_frame=2 * metal_clip.format.num_planes)
-    require(assigned > 0, f"{label}: no frame executed on Metal")
+    if expect_metal:
+        require(assigned > 0, f"{label}: no frame executed on Metal")
+    else:
+        require(assigned == 0,
+                f"{label}: conditioned plan entered the Metal executor")
 
 
 def test_general_surface(core: vs.Core, threads: int) -> None:
@@ -330,18 +363,32 @@ def test_general_surface(core: vs.Core, threads: int) -> None:
         "general/vertical-only", threads)
 
     custom_source = patterned_general_source(core, vs.GRAYS)
-    custom_kernel = lambda x: max(1.0 - abs(x) / 5.0, 0.0)
+    custom_kernel = lambda x: max(1.0 - abs(x), 0.0)
     compare_general_clips(
         core,
         core.dsmvc.Descale(
             custom_source, width=112, height=96, src_left=0.125,
-            src_width=111.75, custom_kernel=custom_kernel, taps=5,
+            src_width=111.75, custom_kernel=custom_kernel, taps=1,
             border_handling=0, backend="cpu"),
         core.dsmvc.Descale(
             custom_source, width=112, height=96, src_left=0.125,
-            src_width=111.75, custom_kernel=custom_kernel, taps=5,
+            src_width=111.75, custom_kernel=custom_kernel, taps=1,
             border_handling=0, backend="metal"),
         "general/horizontal-custom", threads)
+
+    conditioned_custom = lambda x: max(1.0 - abs(x) / 5.0, 0.0)
+    compare_general_clips(
+        core,
+        core.dsmvc.Descale(
+            custom_source, width=112, height=96, src_left=0.125,
+            src_width=111.75, custom_kernel=conditioned_custom, taps=5,
+            border_handling=0, backend="cpu"),
+        core.dsmvc.Descale(
+            custom_source, width=112, height=96, src_left=0.125,
+            src_width=111.75, custom_kernel=conditioned_custom, taps=5,
+            border_handling=0, backend="metal"),
+        "general/horizontal-custom-conditioned", threads,
+        expect_metal=False)
 
     generic_source = patterned_general_source(core, vs.GRAYS)
     compare_general_clips(
@@ -386,6 +433,48 @@ def expect_error(callback, contains: str) -> None:
                 f"unexpected error: {error}")
         return
     raise AssertionError(f"expected a VapourSynth error containing {contains!r}")
+
+
+def test_precision_and_padding_arguments(
+        core: vs.Core, source: vs.VideoNode) -> None:
+    geometry = {
+        "width": 80, "height": 48,
+        "src_left": 0.25, "src_top": 0.125,
+        "src_width": 79.5, "src_height": 47.75,
+    }
+    default = core.dsmvc.Debicubic(
+        source, backend="cpu", **geometry).get_frame(0)
+    symmetric = core.dsmvc.Debicubic(
+        source, backend="cpu", padding=3, **geometry).get_frame(0)
+    require(np.array_equal(np.asarray(default[0]), np.asarray(symmetric[0])),
+            "default padding is not symmetric")
+    for padding in range(4):
+        core.dsmvc.Debicubic(
+            source, backend="cpu", padding=padding,
+            **geometry).get_frame(0)
+
+    expect_error(
+        lambda: core.dsmvc.Debicubic(
+            source, backend="cpu", padding=3, border_handling=0,
+            **geometry),
+        "either padding or border_handling")
+    expect_error(
+        lambda: core.dsmvc.Debicubic(
+            source, backend="cpu", padding=4, **geometry),
+        "padding must be")
+    expect_error(
+        lambda: core.dsmvc.Debicubic(
+            source, backend="cpu", f64mode=3, **geometry),
+        "f64mode must be")
+
+    automatic = core.dsmvc.Debicubic(
+        source, backend="cpu", f64mode=0, **geometry).get_frame(0)
+    float64 = core.dsmvc.Debicubic(
+        source, backend="cpu", f64mode=2, **geometry).get_frame(0)
+    maximum = float(np.max(np.abs(
+        np.asarray(automatic[0]) - np.asarray(float64[0]))))
+    require(maximum <= 2.0e-5,
+            f"forced Float64 CPU output differs from automatic: {maximum}")
 
 
 def test_tails(core: vs.Core, threads: int) -> None:
@@ -509,6 +598,7 @@ def run(options: argparse.Namespace) -> None:
         np.asarray(scalar[0]) - np.asarray(simd[0]))))
     require(cpu_error <= 1.5e-6,
             f"CPU scalar/native SIMD mismatch: {cpu_error}")
+    test_precision_and_padding_arguments(core, cpu_source)
     for backend in ("vulkan", "cuda"):
         expect_error(
             lambda backend=backend: core.dsmvc.Debicubic(
@@ -523,6 +613,11 @@ def run(options: argparse.Namespace) -> None:
         print(
             "dsmvc API4 Metal-off smoke passed: "
             f"scalar/native SIMD max_error={cpu_error}")
+        return
+
+    test_conditioned_float64_fallback(core)
+    if options.conditioned_only:
+        print("dsmvc conditioned Float64 Metal fallback test passed")
         return
 
     all_gpu_ranges = {vs.YUV420P8: set(), vs.YUV420P10: set()}
@@ -585,6 +680,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--expect-metal", choices=("enabled", "disabled"),
         default="enabled")
+    result.add_argument("--conditioned-only", action="store_true")
     return result
 
 

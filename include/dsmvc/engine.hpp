@@ -38,9 +38,19 @@ enum class CpuPath : std::uint8_t {
 };
 
 enum class BorderMode : std::uint8_t {
-    zero,
-    repeat,
-    mirror,
+    zero = 0,
+    repeat = 1,
+    reflect101 = 2,
+    symmetric = 3,
+    // Original descale performs one edge-duplicating reflection, not a
+    // periodic extension. Kept for the legacy border_handling parameter.
+    mirror = 4,
+};
+
+enum class F64Mode : std::uint8_t {
+    automatic = 0,
+    float32_only = 1,
+    float64_only = 2,
 };
 
 struct KernelSpec {
@@ -56,7 +66,8 @@ struct AxisRequest {
     double active_length = 0.0;
     double shift = 0.0;
     KernelSpec kernel{};
-    BorderMode border = BorderMode::mirror;
+    BorderMode border = BorderMode::symmetric;
+    F64Mode f64_mode = F64Mode::automatic;
 };
 
 using CustomKernel = std::function<double(double)>;
@@ -78,7 +89,16 @@ struct AxisPlan {
     std::vector<float> upper_l;
     std::vector<float> inverse_diagonal;
 
+    // The Float32 normal-equation path is retained for well-conditioned axes.
+    // This is either a conservative lower bound or a Hager 1-norm estimate.
+    // Unsafe axes also retain the original Float64 transpose and LDLT bands.
+    double normal_rcond = 1.0;
+    std::vector<double> transpose_weights_f64;
+    std::vector<double> ldlt_bands_f64;
+    std::vector<double> inverse_diagonal_f64;
+
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] bool requires_float64() const noexcept;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
 };
 

@@ -26,6 +26,7 @@ TAIL_SIGNATURE = (
     "src_width:float:opt;src_height:float:opt;"
     "border_handling:int:opt;force:int:opt;force_h:int:opt;"
     "force_v:int:opt;opt:int:opt;backend:data:opt;"
+    "padding:int:opt;f64mode:int:opt;"
 )
 EXPECTED_SIGNATURES = {
     "Debilinear": GEOMETRY_SIGNATURE + TAIL_SIGNATURE,
@@ -42,7 +43,7 @@ EXPECTED_SIGNATURES = {
         + "border_handling:int:opt;force:int:opt;force_h:int:opt;"
         + "force_v:int:opt;opt:int:opt;"
         + "custom:func:opt;support:int:opt;custom_kernel:func:opt;"
-        + "backend:data:opt;"
+        + "backend:data:opt;padding:int:opt;f64mode:int:opt;"
     ),
 }
 
@@ -208,6 +209,40 @@ def run(options) -> None:
                           border_handling=border, backend="cpu", **geometry)
         compare_clips(old, new, f"border/{border}")
 
+    default_padding = direct_call(
+        core.dsmvc, "Debicubic", float_source, backend="cpu", **geometry)
+    symmetric_padding = direct_call(
+        core.dsmvc, "Debicubic", float_source,
+        padding=3, backend="cpu", **geometry)
+    compare_clips(default_padding, symmetric_padding, "padding/default-symmetric")
+    for padding in range(4):
+        direct_call(
+            core.dsmvc, "Debicubic", float_source,
+            padding=padding, backend="cpu", **geometry).get_frame(0)
+    expect_error(
+        lambda: direct_call(
+            core.dsmvc, "Debicubic", float_source,
+            padding=3, border_handling=0, backend="cpu", **geometry),
+        "either padding or border_handling")
+    expect_error(
+        lambda: direct_call(
+            core.dsmvc, "Debicubic", float_source,
+            padding=4, backend="cpu", **geometry),
+        "padding must be")
+    expect_error(
+        lambda: direct_call(
+            core.dsmvc, "Debicubic", float_source,
+            f64mode=3, backend="cpu", **geometry),
+        "f64mode must be")
+
+    automatic_precision = direct_call(
+        core.dsmvc, "Debicubic", float_source,
+        f64mode=0, backend="cpu", **geometry)
+    forced_float64 = direct_call(
+        core.dsmvc, "Debicubic", float_source,
+        f64mode=2, backend="cpu", **geometry)
+    compare_clips(automatic_precision, forced_float64, "f64mode/forced-f64")
+
     identity_arguments = {"width": 96, "height": 64,
                           "src_width": 96.0, "src_height": 64.0}
     for flags in ({"force": 1}, {"force_h": 1}, {"force_v": 1}):
@@ -343,6 +378,10 @@ def run(options) -> None:
             "wrapper SIMD option aliases differ")
     require(new_wrapper.Opt(2).name == "AVX2",
             "wrapper changed the canonical legacy AVX2 option name")
+    require(tuple(int(value) for value in new_wrapper.Padding) == (0, 1, 2, 3),
+            "wrapper padding values differ")
+    require(tuple(int(value) for value in new_wrapper.F64Mode) == (0, 1, 2),
+            "wrapper f64mode values differ")
     rgb = core.std.BlankClip(width=96, height=64, format=vs.RGB24)
     new_rgb = new_wrapper.Debicubic(
         rgb, 80, 48, b=0.0, c=1.0,
@@ -352,6 +391,21 @@ def run(options) -> None:
         yuv, 80, 48, gray=True, backend="cpu")
     new_yuv444 = new_wrapper.Debicubic(
         yuv, 80, 48, yuv444=True, backend="cpu")
+    new_explicit_modes = new_wrapper.Debicubic(
+        yuv, 80, 48, gray=True, backend="cpu",
+        padding=new_wrapper.Padding.REFLECT101,
+        f64mode=new_wrapper.F64Mode.F64)
+    new_explicit_modes.get_frame(0)
+    try:
+        new_wrapper.Debicubic(
+            yuv, 80, 48, gray=True,
+            border_handling=new_wrapper.BorderHandling.MIRROR,
+            padding=new_wrapper.Padding.SYMMETRIC)
+    except ValueError as error:
+        require("either padding or border_handling" in str(error),
+                f"unexpected wrapper conflict error: {error}")
+    else:
+        raise AssertionError("wrapper accepted padding with border_handling")
     if old_wrapper is not None:
         compare_clips(
             old_wrapper.Debicubic(rgb, 80, 48, b=0.0, c=1.0),

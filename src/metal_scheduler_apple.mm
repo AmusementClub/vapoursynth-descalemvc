@@ -2454,12 +2454,19 @@ private:
     }
 
     [[nodiscard]] static bool eligible_for_gpu(const FrameJob &job) noexcept {
-        return !job.planes.empty();
+        if (job.planes.empty()) return false;
+        return std::all_of(
+            job.planes.begin(), job.planes.end(), [](const PlaneJob &plane) {
+                return (!plane.process_horizontal || (plane.horizontal
+                            && !plane.horizontal->requires_float64()))
+                    && (!plane.process_vertical || (plane.vertical
+                            && !plane.vertical->requires_float64()));
+            });
     }
 
     [[nodiscard]] static bool eligible_for_automatic_gpu(
         const FrameJob &job, std::uint64_t work_floor) noexcept {
-        return job.maximum_half_bandwidth >= 5U
+        return eligible_for_gpu(job) && job.maximum_half_bandwidth >= 5U
             && job.estimated_work >= work_floor;
     }
 

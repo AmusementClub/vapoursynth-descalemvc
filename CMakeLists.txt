@@ -314,6 +314,8 @@ install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md DESTINATION share/dsmvc)
 if(BUILD_TESTING)
     add_executable(dsmvc_engine_tests tests/engine_tests.cpp)
     target_compile_features(dsmvc_engine_tests PRIVATE cxx_std_23)
+    target_include_directories(dsmvc_engine_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(dsmvc_engine_tests PRIVATE dsmvc_engine)
     add_test(NAME dsmvc_engine_tests COMMAND dsmvc_engine_tests)
 
@@ -392,6 +394,16 @@ if(BUILD_TESTING)
         set_tests_properties(dsmvc_vs_api4_smoke PROPERTIES TIMEOUT 60)
     endif()
     if(DSMVC_ENABLE_METAL AND DSMVC_VS_PYTHON)
+        add_test(
+            NAME dsmvc_vs_conditioned_float64_metal
+            COMMAND "${DSMVC_VS_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/vs_metal_integration.py"
+                --plugin "$<TARGET_FILE:dsmvc>"
+                --expect-metal enabled
+                --conditioned-only)
+        set_tests_properties(dsmvc_vs_conditioned_float64_metal PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK dsmvc_metal_device)
         add_test(
             NAME dsmvc_vs_metal_integration
             COMMAND "${DSMVC_VS_PYTHON}"

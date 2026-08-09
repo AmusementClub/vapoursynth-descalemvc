@@ -9,8 +9,30 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace dsmvc {
+
+#if defined(DSMVC_HAS_CUDA) || defined(DSMVC_HAS_VULKAN)
+namespace {
+
+void require_backend_float32(const AxisPlan &plan, BackendKind backend) {
+    if (plan.requires_float64()) {
+        throw std::runtime_error(
+            std::string{"backend '"} + backend_name(backend)
+            + "' does not support Float64 axis plans");
+    }
+}
+
+void require_backend_float32(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    BackendKind backend) {
+    require_backend_float32(horizontal, backend);
+    require_backend_float32(vertical, backend);
+}
+
+} // namespace
+#endif
 
 struct Executor::Impl {
     Impl(BackendKind requested, CpuPath cpu_path)
@@ -83,10 +105,16 @@ void Executor::prepare(std::shared_ptr<const AxisPlan> plan) const {
         return;
     }
 #if defined(DSMVC_HAS_CUDA)
-    if (impl_->cuda) impl_->cuda->prepare(std::move(plan));
+    if (impl_->cuda) {
+        if (plan) require_backend_float32(*plan, impl_->backend);
+        impl_->cuda->prepare(std::move(plan));
+    }
 #endif
 #if defined(DSMVC_HAS_VULKAN)
-    if (impl_->vulkan) impl_->vulkan->prepare(std::move(plan));
+    if (impl_->vulkan) {
+        if (plan) require_backend_float32(*plan, impl_->backend);
+        impl_->vulkan->prepare(std::move(plan));
+    }
 #endif
 }
 
@@ -124,6 +152,7 @@ void Executor::inverse_rows(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(plan, impl_->backend);
         impl_->cuda->inverse_rows(
             plan, input, input_row_stride, output, output_row_stride, row_count,
             std::move(input_lifetime));
@@ -131,6 +160,7 @@ void Executor::inverse_rows(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(plan, impl_->backend);
         impl_->vulkan->inverse_rows(
             plan, input, input_row_stride, output, output_row_stride, row_count,
             std::move(input_lifetime));
@@ -152,6 +182,7 @@ void Executor::inverse_columns(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(plan, impl_->backend);
         impl_->cuda->inverse_columns(
             plan, input, input_row_stride, output, output_row_stride, column_count,
             std::move(input_lifetime));
@@ -159,6 +190,7 @@ void Executor::inverse_columns(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(plan, impl_->backend);
         impl_->vulkan->inverse_columns(
             plan, input, input_row_stride, output, output_row_stride,
             column_count, std::move(input_lifetime));
@@ -179,6 +211,7 @@ void Executor::inverse_2d(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->cuda->inverse_2d(
             horizontal, vertical, input, input_row_stride,
             output, output_row_stride, std::move(input_lifetime));
@@ -186,6 +219,7 @@ void Executor::inverse_2d(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->vulkan->inverse_2d(
             horizontal, vertical, input, input_row_stride, output,
             output_row_stride, std::move(input_lifetime));
@@ -207,6 +241,7 @@ void Executor::inverse_2d_u8(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->cuda->inverse_2d_u8(
             horizontal, vertical, input, input_row_stride,
             output, output_row_stride, conversion, std::move(input_lifetime));
@@ -214,6 +249,7 @@ void Executor::inverse_2d_u8(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->vulkan->inverse_2d_u8(
             horizontal, vertical, input, input_row_stride, output,
             output_row_stride, conversion, std::move(input_lifetime));
@@ -235,6 +271,7 @@ void Executor::inverse_2d_u16(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->cuda->inverse_2d_u16(
             horizontal, vertical, input, input_row_stride,
             output, output_row_stride, conversion, std::move(input_lifetime));
@@ -242,6 +279,7 @@ void Executor::inverse_2d_u16(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->vulkan->inverse_2d_u16(
             horizontal, vertical, input, input_row_stride, output,
             output_row_stride, conversion, std::move(input_lifetime));
@@ -263,6 +301,7 @@ void Executor::inverse_2d_u8_streamed(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->cuda->inverse_2d_u8(
             horizontal, vertical, input, input_row_stride,
             output, output_row_stride, conversion, std::move(input_lifetime));
@@ -270,6 +309,7 @@ void Executor::inverse_2d_u8_streamed(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->vulkan->inverse_2d_u8(
             horizontal, vertical, input, input_row_stride, output,
             output_row_stride, conversion, std::move(input_lifetime));
@@ -291,6 +331,7 @@ void Executor::inverse_2d_u16_streamed(
     }
 #if defined(DSMVC_HAS_CUDA)
     if (impl_->cuda) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->cuda->inverse_2d_u16(
             horizontal, vertical, input, input_row_stride,
             output, output_row_stride, conversion, std::move(input_lifetime));
@@ -298,6 +339,7 @@ void Executor::inverse_2d_u16_streamed(
 #endif
 #if defined(DSMVC_HAS_VULKAN)
     if (impl_->vulkan) {
+        require_backend_float32(horizontal, vertical, impl_->backend);
         impl_->vulkan->inverse_2d_u16(
             horizontal, vertical, input, input_row_stride, output,
             output_row_stride, conversion, std::move(input_lifetime));

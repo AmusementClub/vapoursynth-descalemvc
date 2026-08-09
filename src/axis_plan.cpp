@@ -1,5 +1,7 @@
 #include <dsmvc/engine.hpp>
 
+#include "axis_plan_internal.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -12,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -41,6 +44,7 @@ struct PlanKey {
     std::uint64_t b;
     std::uint64_t c;
     BorderMode border;
+    F64Mode f64_mode;
 
     friend bool operator==(const PlanKey &, const PlanKey &) = default;
 };
@@ -73,6 +77,7 @@ struct KeyHash {
             mix(static_cast<std::uint32_t>(key.taps));
             mix(key.b);
             mix(key.c);
+            mix(static_cast<std::uint8_t>(key.f64_mode));
         } else {
             mix(static_cast<std::uint32_t>(key.support));
         }
@@ -349,29 +354,15 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
 
 [[nodiscard]] std::int32_t border_index(
     double pixel_center, std::int32_t size, BorderMode border) {
-    double mapped = pixel_center;
-    if (pixel_center < 0.0 || pixel_center >= static_cast<double>(size)) {
-        if (border == BorderMode::zero) return -1;
-        if (border == BorderMode::repeat) {
-            mapped = pixel_center < 0.0 ? 0.0 : static_cast<double>(size) - 0.5;
-        } else {
-            mapped = pixel_center < 0.0
-                ? -pixel_center
-                : std::min(2.0 * static_cast<double>(size) - pixel_center,
-                           static_cast<double>(size) - 0.5);
-        }
-    }
-    constexpr double minimum_index =
-        static_cast<double>(std::numeric_limits<std::int32_t>::min());
-    constexpr double maximum_index_exclusive =
-        static_cast<double>(std::numeric_limits<std::int32_t>::max()) + 1.0;
-    if (!std::isfinite(mapped) || mapped < minimum_index
-        || mapped >= maximum_index_exclusive) {
+    const double index = std::floor(pixel_center);
+    constexpr double int64_limit = 0x1p63;
+    if (!std::isfinite(index) || index < -int64_limit
+        || index >= int64_limit) {
         throw std::out_of_range(
-            "shift places filter support outside the 32-bit pixel grid");
+            "shift places filter support outside the 64-bit pixel grid");
     }
-    const auto index = static_cast<std::int32_t>(std::floor(mapped));
-    return index >= 0 && index < size ? index : -1;
+    return detail::padding_index(
+        static_cast<std::int64_t>(index), size, border);
 }
 
 [[nodiscard]] std::int32_t filter_support(const AxisRequest &request) {
@@ -382,6 +373,20 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
         || !std::isfinite(request.shift)) {
         throw std::invalid_argument(
             "active length and shift must be finite, with positive active length");
+    }
+    switch (request.border) {
+    case BorderMode::zero:
+    case BorderMode::repeat:
+    case BorderMode::reflect101:
+    case BorderMode::symmetric:
+    case BorderMode::mirror: break;
+    default: throw std::invalid_argument("padding mode is invalid");
+    }
+    switch (request.f64_mode) {
+    case F64Mode::automatic:
+    case F64Mode::float32_only:
+    case F64Mode::float64_only: break;
+    default: throw std::invalid_argument("f64 mode is invalid");
     }
     std::int32_t support = 0;
     switch (request.kernel.kind) {
@@ -413,6 +418,7 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
         bicubic ? std::bit_cast<std::uint64_t>(request.kernel.b) : 0U,
         bicubic ? std::bit_cast<std::uint64_t>(request.kernel.c) : 0U,
         request.border,
+        request.f64_mode,
     };
 }
 
@@ -639,6 +645,102 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
     return bands;
 }
 
+struct SymmetricBandConditionBounds {
+    double one_norm = 0.0;
+    double diagonal_dominance_rcond = 0.0;
+};
+
+[[nodiscard]] SymmetricBandConditionBounds symmetric_band_condition_bounds(
+    const std::vector<double> &bands, std::int32_t n,
+    std::int32_t half_bandwidth, std::vector<double> &workspace) {
+    const auto width = static_cast<std::size_t>(n);
+    workspace.assign(width, 0.0);
+    for (std::int32_t column = 0; column < n; ++column) {
+        workspace[static_cast<std::size_t>(column)] +=
+            std::abs(bands[static_cast<std::size_t>(column)]);
+        const auto available = std::min(half_bandwidth, n - column - 1);
+        for (std::int32_t distance = 1; distance <= available; ++distance) {
+            const double value = std::abs(
+                bands[static_cast<std::size_t>(distance) * width
+                      + static_cast<std::size_t>(column)]);
+            workspace[static_cast<std::size_t>(column)] += value;
+            workspace[static_cast<std::size_t>(column + distance)] += value;
+        }
+    }
+    const double one_norm = *std::max_element(
+        workspace.begin(), workspace.end());
+    double minimum_margin = std::numeric_limits<double>::infinity();
+    for (std::int32_t row = 0; row < n; ++row) {
+        const double diagonal = std::abs(
+            bands[static_cast<std::size_t>(row)]);
+        minimum_margin = std::min(
+            minimum_margin,
+            2.0 * diagonal - workspace[static_cast<std::size_t>(row)]);
+    }
+    return {
+        one_norm,
+        minimum_margin > 0.0 && one_norm > 0.0
+            ? minimum_margin / one_norm : 0.0,
+    };
+}
+
+[[nodiscard]] double reciprocal_condition_lower_bound(
+    double matrix_one_norm, const std::vector<double> &factors,
+    std::int32_t n, std::int32_t half_bandwidth,
+    std::vector<double> &workspace) {
+    const auto width = static_cast<std::size_t>(n);
+    constexpr double epsilon = std::numeric_limits<double>::epsilon();
+
+    // For L = I + E, |L^-1| <= (I - |E|)^-1. Row and column sums of
+    // that comparison inverse give conservative infinity/one-norm bounds
+    // without running the iterative estimator for clearly safe plans.
+    workspace.assign(width, 1.0);
+    double inverse_l_infinity_norm = 1.0;
+    double inverse_diagonal_norm = 0.0;
+    for (std::int32_t row = 0; row < n; ++row) {
+        double sum = 1.0;
+        const auto available = std::min(half_bandwidth, row);
+        for (std::int32_t distance = 1; distance <= available; ++distance) {
+            const auto column = row - distance;
+            sum += std::abs(
+                       factors[static_cast<std::size_t>(distance) * width
+                               + static_cast<std::size_t>(column)])
+                * workspace[static_cast<std::size_t>(column)];
+        }
+        workspace[static_cast<std::size_t>(row)] = sum;
+        inverse_l_infinity_norm = std::max(inverse_l_infinity_norm, sum);
+        inverse_diagonal_norm = std::max(
+            inverse_diagonal_norm,
+            1.0 / std::abs(
+                factors[static_cast<std::size_t>(row)] + epsilon));
+    }
+
+    std::fill(workspace.begin(), workspace.end(), 1.0);
+    double inverse_l_one_norm = 1.0;
+    for (std::int32_t column = n - 1; column >= 0; --column) {
+        double sum = 1.0;
+        const auto available = std::min(half_bandwidth, n - column - 1);
+        for (std::int32_t distance = 1; distance <= available; ++distance) {
+            sum += std::abs(
+                       factors[static_cast<std::size_t>(distance) * width
+                               + static_cast<std::size_t>(column)])
+                * workspace[static_cast<std::size_t>(column + distance)];
+        }
+        workspace[static_cast<std::size_t>(column)] = sum;
+        inverse_l_one_norm = std::max(inverse_l_one_norm, sum);
+    }
+
+    const double inverse_norm_bound = inverse_l_one_norm
+        * inverse_diagonal_norm * inverse_l_infinity_norm;
+    if (!(matrix_one_norm > 0.0) || !(inverse_norm_bound > 0.0)
+        || !std::isfinite(matrix_one_norm)
+        || !std::isfinite(inverse_norm_bound)) {
+        return 0.0;
+    }
+    return std::clamp(
+        1.0 / (matrix_one_norm * inverse_norm_bound), 0.0, 1.0);
+}
+
 void factor_banded_ldlt(
     std::vector<double> &bands, std::int32_t n,
     std::int32_t half_bandwidth) noexcept {
@@ -666,6 +768,88 @@ void factor_banded_ldlt(
     }
 }
 
+void solve_banded_ldlt(
+    const std::vector<double> &factors, std::int32_t n,
+    std::int32_t half_bandwidth, double *values,
+    std::ptrdiff_t stride) noexcept {
+    const auto width = static_cast<std::size_t>(n);
+    constexpr double epsilon = std::numeric_limits<double>::epsilon();
+    for (std::int32_t i = 0; i < n; ++i) {
+        double value = values[static_cast<std::ptrdiff_t>(i) * stride];
+        const auto available = std::min(half_bandwidth, i);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            value -= factors[static_cast<std::size_t>(distance) * width
+                             + static_cast<std::size_t>(i - distance)]
+                * values[static_cast<std::ptrdiff_t>(i - distance) * stride];
+        }
+        values[static_cast<std::ptrdiff_t>(i) * stride] = value;
+    }
+    for (std::int32_t i = 0; i < n; ++i) {
+        values[static_cast<std::ptrdiff_t>(i) * stride] /=
+            factors[static_cast<std::size_t>(i)] + epsilon;
+    }
+    for (std::int32_t i = n - 2; i >= 0; --i) {
+        double value = values[static_cast<std::ptrdiff_t>(i) * stride];
+        const auto available = std::min(half_bandwidth, n - i - 1);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            value -= factors[static_cast<std::size_t>(distance) * width
+                             + static_cast<std::size_t>(i)]
+                * values[static_cast<std::ptrdiff_t>(i + distance) * stride];
+        }
+        values[static_cast<std::ptrdiff_t>(i) * stride] = value;
+    }
+}
+
+[[nodiscard]] double estimate_inverse_one_norm(
+    const std::vector<double> &factors, std::int32_t n,
+    std::int32_t half_bandwidth) {
+    const auto size = static_cast<std::size_t>(n);
+    std::vector<double> x(size, 1.0 / static_cast<double>(n));
+    std::vector<double> y(size);
+    std::vector<double> z(size);
+    double estimate = 0.0;
+    std::size_t previous_index = size;
+
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        y = x;
+        solve_banded_ldlt(factors, n, half_bandwidth, y.data(), 1);
+        const double next_estimate = std::accumulate(
+            y.begin(), y.end(), 0.0,
+            [](double sum, double value) { return sum + std::abs(value); });
+        estimate = std::max(estimate, next_estimate);
+
+        std::transform(y.begin(), y.end(), z.begin(), [](double value) {
+            return value < 0.0 ? -1.0 : 1.0;
+        });
+        solve_banded_ldlt(factors, n, half_bandwidth, z.data(), 1);
+        const auto maximum = std::max_element(
+            z.begin(), z.end(), [](double left, double right) {
+                return std::abs(left) < std::abs(right);
+            });
+        const auto index = static_cast<std::size_t>(
+            std::distance(z.begin(), maximum));
+        const double dot = std::inner_product(z.begin(), z.end(), x.begin(), 0.0);
+        if (index == previous_index || std::abs(*maximum) <= dot) break;
+
+        std::fill(x.begin(), x.end(), 0.0);
+        x[index] = 1.0;
+        previous_index = index;
+    }
+    return estimate;
+}
+
+[[nodiscard]] double reciprocal_condition_estimate(
+    double matrix_norm, const std::vector<double> &factors, std::int32_t n,
+    std::int32_t half_bandwidth) {
+    const double inverse_norm = estimate_inverse_one_norm(
+        factors, n, half_bandwidth);
+    if (!(matrix_norm > 0.0) || !(inverse_norm > 0.0)
+        || !std::isfinite(matrix_norm) || !std::isfinite(inverse_norm)) {
+        return 0.0;
+    }
+    return std::clamp(1.0 / (matrix_norm * inverse_norm), 0.0, 1.0);
+}
+
 [[nodiscard]] AxisPlan build_axis_plan_impl(
     const AxisRequest &request, const CustomKernel &custom_kernel) {
     const auto support = filter_support(request);
@@ -679,9 +863,30 @@ void factor_banded_ldlt(
         matrix, request.source_size, request.destination_size);
     const auto half_bandwidth = std::min(
         2 * support - 1, request.destination_size - 1);
-    auto factors = form_normal_bands(
+    auto normal_bands = form_normal_bands(
         transpose, request.destination_size, half_bandwidth);
+    auto factors = normal_bands;
     factor_banded_ldlt(factors, request.destination_size, half_bandwidth);
+
+    constexpr double float64_rcond_threshold = 1.0e-4;
+    std::vector<double> condition_workspace;
+    const auto condition_bounds = symmetric_band_condition_bounds(
+        normal_bands, request.destination_size, half_bandwidth,
+        condition_workspace);
+    double normal_rcond = condition_bounds.diagonal_dominance_rcond;
+    if (normal_rcond < float64_rcond_threshold) {
+        normal_rcond = reciprocal_condition_lower_bound(
+            condition_bounds.one_norm, factors, request.destination_size,
+            half_bandwidth, condition_workspace);
+        if (normal_rcond < float64_rcond_threshold) {
+            normal_rcond = reciprocal_condition_estimate(
+                condition_bounds.one_norm, factors,
+                request.destination_size, half_bandwidth);
+        }
+    }
+    const bool requires_float64 = request.f64_mode == F64Mode::float64_only
+        || (request.f64_mode == F64Mode::automatic
+            && normal_rcond < float64_rcond_threshold);
 
     AxisPlan plan;
     plan.source_size = request.source_size;
@@ -690,6 +895,7 @@ void factor_banded_ldlt(
     plan.half_bandwidth = half_bandwidth;
     plan.active_length = request.active_length;
     plan.shift = request.shift;
+    plan.normal_rcond = normal_rcond;
     plan.transpose_offsets = std::move(transpose.offsets);
     plan.transpose_indices = std::move(transpose.indices);
     plan.transpose_weights.resize(transpose.weights.size());
@@ -697,6 +903,17 @@ void factor_banded_ldlt(
         transpose.weights.begin(), transpose.weights.end(),
         plan.transpose_weights.begin(),
         [](double weight) { return static_cast<float>(weight); });
+    if (requires_float64) {
+        plan.transpose_weights_f64 = transpose.weights;
+        plan.ldlt_bands_f64 = factors;
+        plan.inverse_diagonal_f64.resize(
+            static_cast<std::size_t>(request.destination_size));
+        constexpr double epsilon = std::numeric_limits<double>::epsilon();
+        for (std::int32_t i = 0; i < request.destination_size; ++i) {
+            plan.inverse_diagonal_f64[static_cast<std::size_t>(i)] =
+                1.0 / (factors[static_cast<std::size_t>(i)] + epsilon);
+        }
+    }
 
     const auto width = static_cast<std::size_t>(request.destination_size);
     const auto factor_count = static_cast<std::size_t>(half_bandwidth) * width;
@@ -778,11 +995,117 @@ void inverse_axis_impl(
 
 } // namespace
 
+namespace detail {
+
+std::int32_t padding_index(
+    std::int64_t index, std::int32_t size, BorderMode mode) {
+    if (size <= 0) throw std::invalid_argument("padding size must be positive");
+    switch (mode) {
+    case BorderMode::zero:
+    case BorderMode::repeat:
+    case BorderMode::reflect101:
+    case BorderMode::symmetric:
+    case BorderMode::mirror: break;
+    default: throw std::invalid_argument("padding mode is invalid");
+    }
+    const auto extent = static_cast<std::int64_t>(size);
+    if (index >= 0 && index < extent) {
+        return static_cast<std::int32_t>(index);
+    }
+
+    switch (mode) {
+    case BorderMode::zero:
+        return -1;
+    case BorderMode::repeat:
+        return index < 0 ? 0 : size - 1;
+    case BorderMode::reflect101: {
+        if (size == 1) return 0;
+        const auto period = 2 * (extent - 1);
+        auto mapped = index % period;
+        if (mapped < 0) mapped += period;
+        return static_cast<std::int32_t>(
+            mapped < extent ? mapped : period - mapped);
+    }
+    case BorderMode::symmetric: {
+        const auto period = 2 * extent;
+        auto mapped = index % period;
+        if (mapped < 0) mapped += period;
+        return static_cast<std::int32_t>(
+            mapped < extent ? mapped : period - 1 - mapped);
+    }
+    case BorderMode::mirror:
+        if (index < -extent || index >= 2 * extent) return -1;
+        return static_cast<std::int32_t>(
+            index < 0 ? -index - 1 : 2 * extent - index - 1);
+    }
+    throw std::invalid_argument("padding mode is invalid");
+}
+
+void inverse_axis_f64(
+    const AxisPlan &plan,
+    const double *input, std::ptrdiff_t input_stride,
+    double *output, std::ptrdiff_t output_stride) noexcept {
+    const auto n = plan.destination_size;
+    const auto width = static_cast<std::size_t>(n);
+    if (plan.requires_float64()) {
+        for (std::int32_t i = 0; i < n; ++i) {
+            double sum = 0.0;
+            for (auto offset = plan.transpose_offsets[static_cast<std::size_t>(i)];
+                 offset < plan.transpose_offsets[static_cast<std::size_t>(i) + 1U];
+                 ++offset) {
+                sum += plan.transpose_weights_f64[offset]
+                    * input[static_cast<std::ptrdiff_t>(
+                        plan.transpose_indices[offset]) * input_stride];
+            }
+            output[static_cast<std::ptrdiff_t>(i) * output_stride] = sum;
+        }
+        solve_banded_ldlt(
+            plan.ldlt_bands_f64, n, plan.half_bandwidth,
+            output, output_stride);
+        return;
+    }
+
+    for (std::int32_t i = 0; i < n; ++i) {
+        double sum = 0.0;
+        for (auto offset = plan.transpose_offsets[static_cast<std::size_t>(i)];
+             offset < plan.transpose_offsets[static_cast<std::size_t>(i) + 1U];
+             ++offset) {
+            sum += static_cast<double>(plan.transpose_weights[offset])
+                * input[static_cast<std::ptrdiff_t>(
+                    plan.transpose_indices[offset]) * input_stride];
+        }
+        const auto available = std::min(plan.half_bandwidth, i);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            sum -= static_cast<double>(plan.lower_ld[
+                       static_cast<std::size_t>(distance - 1) * width
+                       + static_cast<std::size_t>(i)])
+                * output[static_cast<std::ptrdiff_t>(i - distance) * output_stride];
+        }
+        output[static_cast<std::ptrdiff_t>(i) * output_stride] = sum
+            * static_cast<double>(
+                plan.inverse_diagonal[static_cast<std::size_t>(i)]);
+    }
+    for (std::int32_t i = n - 2; i >= 0; --i) {
+        double sum = 0.0;
+        const auto available = std::min(plan.half_bandwidth, n - i - 1);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            sum += static_cast<double>(plan.upper_l[
+                       static_cast<std::size_t>(distance - 1) * width
+                       + static_cast<std::size_t>(i)])
+                * output[static_cast<std::ptrdiff_t>(i + distance) * output_stride];
+        }
+        output[static_cast<std::ptrdiff_t>(i) * output_stride] -= sum;
+    }
+}
+
+} // namespace detail
+
 bool AxisPlan::valid() const noexcept {
     if (source_size <= 0 || destination_size <= 0 || support <= 0
         || half_bandwidth < 0 || half_bandwidth >= destination_size
         || !(active_length > 0.0) || !std::isfinite(active_length)
-        || !std::isfinite(shift)) {
+        || !std::isfinite(shift) || !std::isfinite(normal_rcond)
+        || normal_rcond < 0.0 || normal_rcond > 1.0) {
         return false;
     }
     const auto destination = static_cast<std::size_t>(destination_size);
@@ -793,6 +1116,20 @@ bool AxisPlan::valid() const noexcept {
         || transpose_offsets.back() != transpose_indices.size()
         || lower_ld.size() != factors || upper_l.size() != factors
         || inverse_diagonal.size() != destination) {
+        return false;
+    }
+
+    const bool has_float64 = !ldlt_bands_f64.empty();
+    if (has_float64 != !transpose_weights_f64.empty()
+        || has_float64 != !inverse_diagonal_f64.empty()) {
+        return false;
+    }
+    if (has_float64
+        && (transpose_weights_f64.size() != transpose_weights.size()
+            || ldlt_bands_f64.size()
+                != (static_cast<std::size_t>(half_bandwidth) + 1U)
+                    * destination
+            || inverse_diagonal_f64.size() != destination)) {
         return false;
     }
 
@@ -813,7 +1150,8 @@ bool AxisPlan::valid() const noexcept {
         }
     }
 
-    return std::all_of(lower_ld.begin(), lower_ld.end(), [](float value) {
+    const bool float32_valid =
+        std::all_of(lower_ld.begin(), lower_ld.end(), [](float value) {
                return std::isfinite(value);
            })
         && std::all_of(upper_l.begin(), upper_l.end(), [](float value) {
@@ -823,6 +1161,20 @@ bool AxisPlan::valid() const noexcept {
             inverse_diagonal.begin(), inverse_diagonal.end(), [](float value) {
                 return std::isfinite(value);
             });
+    if (!float32_valid || !has_float64) return float32_valid;
+    return std::all_of(
+               transpose_weights_f64.begin(), transpose_weights_f64.end(),
+               [](double value) { return std::isfinite(value); })
+        && std::all_of(
+               ldlt_bands_f64.begin(), ldlt_bands_f64.end(),
+               [](double value) { return std::isfinite(value); })
+        && std::all_of(
+               inverse_diagonal_f64.begin(), inverse_diagonal_f64.end(),
+               [](double value) { return std::isfinite(value); });
+}
+
+bool AxisPlan::requires_float64() const noexcept {
+    return !ldlt_bands_f64.empty();
 }
 
 std::size_t AxisPlan::storage_bytes() const noexcept {
@@ -832,7 +1184,10 @@ std::size_t AxisPlan::storage_bytes() const noexcept {
         + transpose_weights.capacity() * sizeof(float)
         + lower_ld.capacity() * sizeof(float)
         + upper_l.capacity() * sizeof(float)
-        + inverse_diagonal.capacity() * sizeof(float);
+        + inverse_diagonal.capacity() * sizeof(float)
+        + transpose_weights_f64.capacity() * sizeof(double)
+        + ldlt_bands_f64.capacity() * sizeof(double)
+        + inverse_diagonal_f64.capacity() * sizeof(double);
 }
 
 AxisPlan build_axis_plan(
@@ -889,6 +1244,22 @@ void inverse_axis_f32(
     if (!plan.valid() || input == nullptr || output == nullptr
         || input_stride == 0 || output_stride == 0) {
         throw std::invalid_argument("invalid inverse axis arguments");
+    }
+    if (plan.requires_float64()) {
+        std::vector<double> source(static_cast<std::size_t>(plan.source_size));
+        std::vector<double> destination(
+            static_cast<std::size_t>(plan.destination_size));
+        for (std::int32_t i = 0; i < plan.source_size; ++i) {
+            source[static_cast<std::size_t>(i)] = static_cast<double>(
+                input[static_cast<std::ptrdiff_t>(i) * input_stride]);
+        }
+        detail::inverse_axis_f64(
+            plan, source.data(), 1, destination.data(), 1);
+        for (std::int32_t i = 0; i < plan.destination_size; ++i) {
+            output[static_cast<std::ptrdiff_t>(i) * output_stride] =
+                static_cast<float>(destination[static_cast<std::size_t>(i)]);
+        }
+        return;
     }
     if (plan.half_bandwidth == 1) {
         inverse_axis_impl<1>(plan, input, input_stride, output, output_stride);

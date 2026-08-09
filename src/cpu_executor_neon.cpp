@@ -1,5 +1,6 @@
 #include <dsmvc/engine.hpp>
 
+#include "axis_plan_internal.hpp"
 #include "cpu_packed.hpp"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace dsmvc {
@@ -28,6 +30,326 @@ struct NeonPair {
     float32x4_t first;
     float32x4_t second;
 };
+
+DSMVC_FORCE_INLINE void transpose4(
+    float32x4_t &row0, float32x4_t &row1,
+    float32x4_t &row2, float32x4_t &row3) noexcept;
+
+struct alignas(16) F64Quad {
+    float64x2_t low;
+    float64x2_t high;
+};
+
+struct F64Workspace {
+    std::vector<F64Quad> source;
+    std::vector<F64Quad> values;
+    std::vector<double> scalar_source;
+    std::vector<double> scalar_destination;
+};
+
+[[nodiscard]] F64Workspace &f64_workspace() {
+    thread_local F64Workspace workspace;
+    return workspace;
+}
+
+[[nodiscard]] DSMVC_FORCE_INLINE F64Quad f64_quad_zero() noexcept {
+    return {vdupq_n_f64(0.0), vdupq_n_f64(0.0)};
+}
+
+[[nodiscard]] DSMVC_FORCE_INLINE F64Quad f64_quad_fma(
+    F64Quad value, double coefficient, F64Quad source) noexcept {
+    const auto weight = vdupq_n_f64(coefficient);
+    value.low = vfmaq_f64(value.low, source.low, weight);
+    value.high = vfmaq_f64(value.high, source.high, weight);
+    return value;
+}
+
+[[nodiscard]] DSMVC_FORCE_INLINE F64Quad f64_quad_fms(
+    F64Quad value, double coefficient, F64Quad source) noexcept {
+    const auto weight = vdupq_n_f64(coefficient);
+    value.low = vfmsq_f64(value.low, source.low, weight);
+    value.high = vfmsq_f64(value.high, source.high, weight);
+    return value;
+}
+
+[[nodiscard]] DSMVC_FORCE_INLINE F64Quad f64_quad_multiply(
+    F64Quad value, double coefficient) noexcept {
+    const auto weight = vdupq_n_f64(coefficient);
+    return {
+        vmulq_f64(value.low, weight),
+        vmulq_f64(value.high, weight),
+    };
+}
+
+template <bool RetainedFloat64, class Loader>
+void solve_axis_f64_quad(
+    const AxisPlan &plan, Loader &&load_source,
+    std::vector<F64Quad> &values) {
+    const auto n = plan.destination_size;
+    const auto width = static_cast<std::size_t>(n);
+    values.resize(width);
+
+    for (std::int32_t i = 0; i < n; ++i) {
+        auto value = f64_quad_zero();
+        for (auto offset = plan.transpose_offsets[static_cast<std::size_t>(i)];
+             offset < plan.transpose_offsets[static_cast<std::size_t>(i) + 1U];
+             ++offset) {
+            const double weight = RetainedFloat64
+                ? plan.transpose_weights_f64[offset]
+                : static_cast<double>(plan.transpose_weights[offset]);
+            value = f64_quad_fma(
+                value, weight, load_source(plan.transpose_indices[offset]));
+        }
+
+        const auto available = std::min(plan.half_bandwidth, i);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            const double factor = RetainedFloat64
+                ? plan.ldlt_bands_f64[
+                      static_cast<std::size_t>(distance) * width
+                      + static_cast<std::size_t>(i - distance)]
+                : static_cast<double>(plan.lower_ld[
+                      static_cast<std::size_t>(distance - 1) * width
+                      + static_cast<std::size_t>(i)]);
+            value = f64_quad_fms(
+                value, factor,
+                values[static_cast<std::size_t>(i - distance)]);
+        }
+        if constexpr (RetainedFloat64) {
+            values[static_cast<std::size_t>(i)] = value;
+        } else {
+            values[static_cast<std::size_t>(i)] = f64_quad_multiply(
+                value, static_cast<double>(
+                    plan.inverse_diagonal[static_cast<std::size_t>(i)]));
+        }
+    }
+
+    if constexpr (RetainedFloat64) {
+        for (std::int32_t i = 0; i < n; ++i) {
+            values[static_cast<std::size_t>(i)] = f64_quad_multiply(
+                values[static_cast<std::size_t>(i)],
+                plan.inverse_diagonal_f64[static_cast<std::size_t>(i)]);
+        }
+    }
+
+    for (std::int32_t i = n - 2; i >= 0; --i) {
+        auto value = values[static_cast<std::size_t>(i)];
+        const auto available = std::min(plan.half_bandwidth, n - i - 1);
+        for (std::int32_t distance = available; distance >= 1; --distance) {
+            const double factor = RetainedFloat64
+                ? plan.ldlt_bands_f64[
+                      static_cast<std::size_t>(distance) * width
+                      + static_cast<std::size_t>(i)]
+                : static_cast<double>(plan.upper_l[
+                      static_cast<std::size_t>(distance - 1) * width
+                      + static_cast<std::size_t>(i)]);
+            value = f64_quad_fms(
+                value, factor,
+                values[static_cast<std::size_t>(i + distance)]);
+        }
+        values[static_cast<std::size_t>(i)] = value;
+    }
+}
+
+template <class Loader>
+void solve_axis_f64_quad_dispatch(
+    const AxisPlan &plan, Loader &&load_source,
+    std::vector<F64Quad> &values) {
+    if (plan.requires_float64()) {
+        solve_axis_f64_quad<true>(
+            plan, std::forward<Loader>(load_source), values);
+    } else {
+        solve_axis_f64_quad<false>(
+            plan, std::forward<Loader>(load_source), values);
+    }
+}
+
+void load_rows_f32_quad(
+    const AxisPlan &plan, const float *input, std::ptrdiff_t input_stride,
+    std::vector<F64Quad> &source) {
+    source.resize(static_cast<std::size_t>(plan.source_size));
+    for (std::int32_t column = 0; column < plan.source_size; ++column) {
+        auto values = vdupq_n_f32(input[column]);
+        values = vsetq_lane_f32(input[input_stride + column], values, 1);
+        values = vsetq_lane_f32(input[2 * input_stride + column], values, 2);
+        values = vsetq_lane_f32(input[3 * input_stride + column], values, 3);
+        source[static_cast<std::size_t>(column)] = {
+            vcvt_f64_f32(vget_low_f32(values)),
+            vcvt_f64_f32(vget_high_f32(values)),
+        };
+    }
+}
+
+void store_rows_f32_quad(
+    const AxisPlan &plan, const std::vector<F64Quad> &values,
+    float *output, std::ptrdiff_t output_stride) noexcept {
+    std::int32_t column = 0;
+    for (; column + 4 <= plan.destination_size; column += 4) {
+        auto x0 = vcombine_f32(
+            vcvt_f32_f64(values[static_cast<std::size_t>(column)].low),
+            vcvt_f32_f64(values[static_cast<std::size_t>(column)].high));
+        auto x1 = vcombine_f32(
+            vcvt_f32_f64(values[static_cast<std::size_t>(column + 1)].low),
+            vcvt_f32_f64(values[static_cast<std::size_t>(column + 1)].high));
+        auto x2 = vcombine_f32(
+            vcvt_f32_f64(values[static_cast<std::size_t>(column + 2)].low),
+            vcvt_f32_f64(values[static_cast<std::size_t>(column + 2)].high));
+        auto x3 = vcombine_f32(
+            vcvt_f32_f64(values[static_cast<std::size_t>(column + 3)].low),
+            vcvt_f32_f64(values[static_cast<std::size_t>(column + 3)].high));
+        transpose4(x0, x1, x2, x3);
+        vst1q_f32(output + column, x0);
+        vst1q_f32(output + output_stride + column, x1);
+        vst1q_f32(output + 2 * output_stride + column, x2);
+        vst1q_f32(output + 3 * output_stride + column, x3);
+    }
+    for (; column < plan.destination_size; ++column) {
+        const auto &value = values[static_cast<std::size_t>(column)];
+        output[column] = static_cast<float>(vgetq_lane_f64(value.low, 0));
+        output[output_stride + column] =
+            static_cast<float>(vgetq_lane_f64(value.low, 1));
+        output[2 * output_stride + column] =
+            static_cast<float>(vgetq_lane_f64(value.high, 0));
+        output[3 * output_stride + column] =
+            static_cast<float>(vgetq_lane_f64(value.high, 1));
+    }
+}
+
+void store_rows_f64_quad(
+    const AxisPlan &plan, const std::vector<F64Quad> &values,
+    double *output, std::ptrdiff_t output_stride) noexcept {
+    std::int32_t column = 0;
+    for (; column + 2 <= plan.destination_size; column += 2) {
+        const auto low0 = values[static_cast<std::size_t>(column)].low;
+        const auto low1 = values[static_cast<std::size_t>(column + 1)].low;
+        const auto high0 = values[static_cast<std::size_t>(column)].high;
+        const auto high1 = values[static_cast<std::size_t>(column + 1)].high;
+        vst1q_f64(output + column, vtrn1q_f64(low0, low1));
+        vst1q_f64(
+            output + output_stride + column, vtrn2q_f64(low0, low1));
+        vst1q_f64(
+            output + 2 * output_stride + column, vtrn1q_f64(high0, high1));
+        vst1q_f64(
+            output + 3 * output_stride + column, vtrn2q_f64(high0, high1));
+    }
+    if (column < plan.destination_size) {
+        const auto &value = values[static_cast<std::size_t>(column)];
+        output[column] = vgetq_lane_f64(value.low, 0);
+        output[output_stride + column] = vgetq_lane_f64(value.low, 1);
+        output[2 * output_stride + column] = vgetq_lane_f64(value.high, 0);
+        output[3 * output_stride + column] = vgetq_lane_f64(value.high, 1);
+    }
+}
+
+template <class Output>
+void inverse_rows_f64_neon_impl(
+    const AxisPlan &plan,
+    const float *input, std::ptrdiff_t input_row_stride,
+    Output *output, std::ptrdiff_t output_row_stride,
+    std::int32_t row_count) {
+    auto &workspace = f64_workspace();
+    std::int32_t row = 0;
+    for (; row + 4 <= row_count; row += 4) {
+        const auto *source = input
+            + static_cast<std::ptrdiff_t>(row) * input_row_stride;
+        load_rows_f32_quad(plan, source, input_row_stride, workspace.source);
+        solve_axis_f64_quad_dispatch(
+            plan,
+            [&](std::int32_t index) noexcept {
+                return workspace.source[static_cast<std::size_t>(index)];
+            },
+            workspace.values);
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(row) * output_row_stride;
+        if constexpr (std::is_same_v<Output, float>) {
+            store_rows_f32_quad(
+                plan, workspace.values, destination, output_row_stride);
+        } else {
+            store_rows_f64_quad(
+                plan, workspace.values, destination, output_row_stride);
+        }
+    }
+
+    workspace.scalar_source.resize(static_cast<std::size_t>(plan.source_size));
+    workspace.scalar_destination.resize(
+        static_cast<std::size_t>(plan.destination_size));
+    for (; row < row_count; ++row) {
+        const auto *source = input
+            + static_cast<std::ptrdiff_t>(row) * input_row_stride;
+        for (std::int32_t column = 0; column < plan.source_size; ++column) {
+            workspace.scalar_source[static_cast<std::size_t>(column)] =
+                static_cast<double>(source[column]);
+        }
+        detail::inverse_axis_f64(
+            plan, workspace.scalar_source.data(), 1,
+            workspace.scalar_destination.data(), 1);
+        auto *destination = output
+            + static_cast<std::ptrdiff_t>(row) * output_row_stride;
+        for (std::int32_t column = 0; column < plan.destination_size; ++column) {
+            destination[column] = static_cast<Output>(
+                workspace.scalar_destination[static_cast<std::size_t>(column)]);
+        }
+    }
+}
+
+template <class Input>
+void inverse_columns_f64_neon_impl(
+    const AxisPlan &plan,
+    const Input *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t column_count) {
+    auto &workspace = f64_workspace();
+    std::int32_t column = 0;
+    for (; column + 4 <= column_count; column += 4) {
+        solve_axis_f64_quad_dispatch(
+            plan,
+            [&](std::int32_t index) noexcept {
+                const auto *source = input
+                    + static_cast<std::ptrdiff_t>(index) * input_row_stride
+                    + column;
+                if constexpr (std::is_same_v<Input, float>) {
+                    const auto values = vld1q_f32(source);
+                    return F64Quad{
+                        vcvt_f64_f32(vget_low_f32(values)),
+                        vcvt_f64_f32(vget_high_f32(values)),
+                    };
+                } else {
+                    return F64Quad{
+                        vld1q_f64(source),
+                        vld1q_f64(source + 2),
+                    };
+                }
+            },
+            workspace.values);
+        for (std::int32_t row = 0; row < plan.destination_size; ++row) {
+            const auto &value = workspace.values[static_cast<std::size_t>(row)];
+            vst1q_f32(
+                output + static_cast<std::ptrdiff_t>(row) * output_row_stride
+                    + column,
+                vcombine_f32(
+                    vcvt_f32_f64(value.low), vcvt_f32_f64(value.high)));
+        }
+    }
+
+    workspace.scalar_source.resize(static_cast<std::size_t>(plan.source_size));
+    workspace.scalar_destination.resize(
+        static_cast<std::size_t>(plan.destination_size));
+    for (; column < column_count; ++column) {
+        for (std::int32_t row = 0; row < plan.source_size; ++row) {
+            workspace.scalar_source[static_cast<std::size_t>(row)] =
+                static_cast<double>(input[
+                    static_cast<std::ptrdiff_t>(row) * input_row_stride
+                    + column]);
+        }
+        detail::inverse_axis_f64(
+            plan, workspace.scalar_source.data(), 1,
+            workspace.scalar_destination.data(), 1);
+        for (std::int32_t row = 0; row < plan.destination_size; ++row) {
+            output[static_cast<std::ptrdiff_t>(row) * output_row_stride
+                   + column] = static_cast<float>(
+                workspace.scalar_destination[static_cast<std::size_t>(row)]);
+        }
+    }
+}
 
 DSMVC_FORCE_INLINE void transpose4(float32x4_t &row0, float32x4_t &row1,
                                    float32x4_t &row2,
@@ -1706,6 +2028,46 @@ void inverse_2d_integer_neon(
 }
 
 } // namespace
+
+void inverse_rows_f64_neon(
+    const AxisPlan &plan,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t row_count) {
+    inverse_rows_f64_neon_impl(
+        plan, input, input_row_stride,
+        output, output_row_stride, row_count);
+}
+
+void inverse_rows_to_f64_neon(
+    const AxisPlan &plan,
+    const float *input, std::ptrdiff_t input_row_stride,
+    double *output, std::ptrdiff_t output_row_stride,
+    std::int32_t row_count) {
+    inverse_rows_f64_neon_impl(
+        plan, input, input_row_stride,
+        output, output_row_stride, row_count);
+}
+
+void inverse_columns_f64_neon(
+    const AxisPlan &plan,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t column_count) {
+    inverse_columns_f64_neon_impl(
+        plan, input, input_row_stride,
+        output, output_row_stride, column_count);
+}
+
+void inverse_columns_from_f64_neon(
+    const AxisPlan &plan,
+    const double *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t column_count) {
+    inverse_columns_f64_neon_impl(
+        plan, input, input_row_stride,
+        output, output_row_stride, column_count);
+}
 
 void inverse_rows_neon(const AxisPlan &plan,
                        const detail::PackedCpuPlan &packed,

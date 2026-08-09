@@ -41,6 +41,7 @@ using dsmvc::BorderMode;
 using dsmvc::CpuPath;
 using dsmvc::CustomKernel;
 using dsmvc::Executor;
+using dsmvc::F64Mode;
 using dsmvc::IntegerConversion;
 using dsmvc::KernelKind;
 using dsmvc::KernelSpec;
@@ -63,8 +64,12 @@ struct ParsedArguments {
     double src_top = 0.0;
     double src_width = 0.0;
     double src_height = 0.0;
-    BorderMode border = BorderMode::mirror;
-    int border_value = 0;
+    BorderMode border = BorderMode::symmetric;
+    std::int64_t border_value = 0;
+    int padding_value = 3;
+    bool legacy_border_argument = false;
+    F64Mode f64_mode = F64Mode::automatic;
+    int f64mode_value = 0;
     int force = 0;
     int force_h = 0;
     int force_v = 0;
@@ -269,6 +274,14 @@ int get_int(const VSMap *map, const char *key, int fallback, const VSAPI *vsapi)
     return error ? fallback : vsh::int64ToIntS(value);
 }
 
+std::optional<std::int64_t> get_optional_int(
+    const VSMap *map, const char *key, const VSAPI *vsapi) {
+    int error = 0;
+    const auto value = vsapi->mapGetInt(map, key, 0, &error);
+    return error ? std::nullopt
+                 : std::optional<std::int64_t>{value};
+}
+
 double get_float(const VSMap *map, const char *key, double fallback,
                  const VSAPI *vsapi) {
     int error = 0;
@@ -342,10 +355,31 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     parsed.src_top = get_float(in, "src_top", 0.0, vsapi);
     parsed.src_width = get_float(in, "src_width", static_cast<double>(parsed.width), vsapi);
     parsed.src_height = get_float(in, "src_height", static_cast<double>(parsed.height), vsapi);
-    parsed.border_value = get_int(in, "border_handling", 0, vsapi);
-    parsed.border = parsed.border_value == 1 ? BorderMode::zero
-        : parsed.border_value == 2 ? BorderMode::repeat
-                                   : BorderMode::mirror;
+    const auto padding = get_optional_int(in, "padding", vsapi);
+    const auto legacy_border = get_optional_int(in, "border_handling", vsapi);
+    if (padding && legacy_border) {
+        throw std::invalid_argument(
+            "specify either padding or border_handling, not both");
+    }
+    if (padding) {
+        if (*padding < 0 || *padding > 3) {
+            throw std::invalid_argument("padding must be 0, 1, 2, or 3");
+        }
+        parsed.padding_value = static_cast<int>(*padding);
+        parsed.border = static_cast<BorderMode>(parsed.padding_value);
+    } else if (legacy_border) {
+        parsed.legacy_border_argument = true;
+        parsed.border_value = *legacy_border;
+        parsed.border = *legacy_border == 1 ? BorderMode::zero
+            : *legacy_border == 2 ? BorderMode::repeat
+                                  : BorderMode::mirror;
+    }
+    const auto f64mode = get_optional_int(in, "f64mode", vsapi).value_or(0);
+    if (f64mode < 0 || f64mode > 2) {
+        throw std::invalid_argument("f64mode must be 0, 1, or 2");
+    }
+    parsed.f64mode_value = static_cast<int>(f64mode);
+    parsed.f64_mode = static_cast<F64Mode>(parsed.f64mode_value);
     parsed.force = get_int(in, "force", 0, vsapi);
     parsed.force_h = get_int(in, "force_h", parsed.force, vsapi);
     parsed.force_v = get_int(in, "force_v", parsed.force, vsapi);
@@ -458,7 +492,13 @@ void copy_common_arguments(VSMap *map, const ParsedArguments &parsed,
     vsapi->mapSetFloat(map, "src_top", parsed.src_top, maReplace);
     vsapi->mapSetFloat(map, "src_width", parsed.src_width, maReplace);
     vsapi->mapSetFloat(map, "src_height", parsed.src_height, maReplace);
-    vsapi->mapSetInt(map, "border_handling", parsed.border_value, maReplace);
+    if (parsed.legacy_border_argument) {
+        vsapi->mapSetInt(
+            map, "border_handling", parsed.border_value, maReplace);
+    } else {
+        vsapi->mapSetInt(map, "padding", parsed.padding_value, maReplace);
+    }
+    vsapi->mapSetInt(map, "f64mode", parsed.f64mode_value, maReplace);
     vsapi->mapSetInt(map, "force", parsed.force, maReplace);
     vsapi->mapSetInt(map, "force_h", parsed.force_h, maReplace);
     vsapi->mapSetInt(map, "force_v", parsed.force_v, maReplace);
@@ -573,6 +613,7 @@ void prepare_filter_requests(FilterData &data, const ParsedArguments &parsed) {
     AxisRequest request;
     request.kernel = parsed.kernel;
     request.border = parsed.border;
+    request.f64_mode = parsed.f64_mode;
 
     if (data.process_horizontal) {
         request.source_size = data.source_width;
@@ -1050,8 +1091,17 @@ const VSFrame *VS_CC filter_get_frame(
         // frames use destination-ordered RHS generation to reduce traffic.
         const bool first_2d_frame = adaptive_2d
             && (!track_overlapping_frames || active_frame.first());
+        const auto requires_float64 = [](const auto &plan) {
+            return plan && plan->requires_float64();
+        };
+        const bool float64_2d = adaptive_2d
+            && (requires_float64(data->horizontal[0])
+                || requires_float64(data->horizontal[1])
+                || requires_float64(data->vertical[0])
+                || requires_float64(data->vertical[1]));
         const bool buffered_float_2d =
-            !uses_gpu && !data->fused_integer && first_2d_frame;
+            !uses_gpu && !data->fused_integer && first_2d_frame
+            && !float64_2d;
 #if defined(DSMVC_HAS_METAL)
         const auto ensure_intermediate = [&] {
             if (intermediate) return;
@@ -1401,7 +1451,10 @@ constexpr const char *common_tail =
     "force_v:int:opt;"
     "opt:int:opt;";
 
-constexpr const char *backend_tail = "backend:data:opt;";
+constexpr const char *backend_tail =
+    "backend:data:opt;"
+    "padding:int:opt;"
+    "f64mode:int:opt;";
 constexpr const char *clip_return = "clip:vnode;";
 
 } // namespace
