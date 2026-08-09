@@ -239,12 +239,15 @@ void test_malformed_retained_metadata() {
     rejects(std::move(malformed), "normal norm on an F32 plan");
 }
 
-void test_native_tail_controls() {
-    const auto fixtures = dsmvc::numerical::axis_fixtures();
-    const dsmvc::CpuExecutor native(dsmvc::CpuPath::automatic);
-    constexpr std::int32_t rows = 5;
-    for (std::size_t case_index = 0; case_index < 4U; ++case_index) {
-        const auto &fixture = fixtures[case_index];
+void check_native_tail_case(
+    std::span<const AxisFixture> fixtures,
+    const dsmvc::CpuExecutor &native,
+    std::int32_t rows,
+    bool expect_simd_storage,
+    std::string_view scenario) {
+    constexpr float untouched = -23.0F;
+    const float expected_tail = expect_simd_storage ? 0.0F : untouched;
+    for (const AxisFixture &fixture : fixtures) {
         const auto plan = dsmvc::build_axis_plan(fixture.request);
         const auto padded_source = (plan.source_size + 7) & ~7;
         const auto padded_destination = (plan.destination_size + 7) & ~7;
@@ -257,8 +260,8 @@ void test_native_tail_controls() {
         std::vector<float> expected(
             static_cast<std::size_t>(rows)
                 * static_cast<std::size_t>(output_stride),
-            -23.0F);
-        std::vector<float> output(expected.size(), -23.0F);
+            untouched);
+        std::vector<float> output(expected.size(), untouched);
         for (std::int32_t row = 0; row < rows; ++row) {
             const auto row_input = dsmvc::numerical::make_normal_input(
                 static_cast<std::size_t>(plan.source_size),
@@ -297,21 +300,18 @@ void test_native_tail_controls() {
                 const float tail = output[static_cast<std::size_t>(row)
                                           * static_cast<std::size_t>(output_stride)
                                       + static_cast<std::size_t>(column)];
-                if (native.path() == dsmvc::CpuPath::scalar) {
-                    require(tail == -23.0F,
-                            std::string(fixture.name)
-                                + " scalar path overwrote SIMD tail storage");
-                } else {
-                    require(tail == 0.0F,
-                            std::string(fixture.name)
-                                + " native SIMD tail storage was not zero");
-                }
+                require(tail == expected_tail,
+                        std::string(fixture.name) + " "
+                            + std::string(scenario)
+                            + (expect_simd_storage
+                                   ? " SIMD tail storage was not zero"
+                                   : " scalar fallback overwrote tail storage"));
             }
             for (std::int32_t column = padded_destination;
                  column < output_stride; ++column) {
                 require(output[static_cast<std::size_t>(row)
                                    * static_cast<std::size_t>(output_stride)
-                               + static_cast<std::size_t>(column)] == -23.0F,
+                               + static_cast<std::size_t>(column)] == untouched,
                         std::string(fixture.name)
                             + " native path overwrote the output guard");
             }
@@ -319,9 +319,34 @@ void test_native_tail_controls() {
         require(maximum <= 3.0e-5,
                 std::string(fixture.name)
                     + " native compatibility path escaped the prework bound");
-        std::cout << fixture.name << " native=" << native.name()
+        std::cout << fixture.name << " scenario=" << scenario
+                  << " rows=" << rows << " native=" << native.name()
                   << " max_abs_vs_ordered=" << maximum << '\n';
     }
+}
+
+void test_native_tail_controls() {
+    const auto fixtures = dsmvc::numerical::axis_fixtures();
+    const auto controls = std::span<const AxisFixture>(fixtures).first(4U);
+    const dsmvc::CpuExecutor native(dsmvc::CpuPath::automatic);
+
+    std::int32_t simd_width = 0;
+    if (dsmvc::cpu_avx2_available()) {
+        simd_width = 8;
+    } else if (dsmvc::cpu_neon_available()) {
+        simd_width = 4;
+    }
+
+    if (simd_width == 0) {
+        check_native_tail_case(
+            controls, native, 3, false, "scalar-control");
+        return;
+    }
+
+    check_native_tail_case(
+        controls, native, simd_width - 1, false, "short-row-fallback");
+    check_native_tail_case(
+        controls, native, simd_width + 1, true, "simd-row-tail");
 }
 
 struct MixedResult {
