@@ -1,0 +1,4 @@
+ELF file    1: dsmvc_cuda.sm_75.cubin
+ELF file    2: dsmvc_cuda.sm_86.cubin
+ELF file    3: dsmvc_cuda.sm_89.cubin
+ELF file    4: dsmvc_cuda.sm_120.cubin

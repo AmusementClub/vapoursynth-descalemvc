@@ -1,0 +1,284 @@
+
+Fatbin ptx code:
+================
+arch = sm_75
+code version = [9,3]
+host = linux
+compile_size = 64bit
+compressed
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+ptxasOptions =  --generate-line-info 
+
+Fatbin elf code:
+================
+arch = sm_75
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+Resource usage:
+ Common:
+  GLOBAL:0
+ Function dsmvc_cuda_convert_f64_u16:
+  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_u8:
+  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_f32:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical_f64:
+  REG:60 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_f64:
+  REG:59 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical_f64:
+  REG:33 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:424 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_f64:
+  REG:33 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:424 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical_f64:
+  REG:33 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:456 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_f64:
+  REG:33 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:456 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_promote_f32_f64:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16_f64:
+  REG:28 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8_f64:
+  REG:26 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32_f64:
+  REG:28 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u16:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u8:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical:
+  REG:36 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_column_major:
+  REG:36 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal:
+  REG:56 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical:
+  REG:43 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_column_major:
+  REG:43 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal:
+  REG:47 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical:
+  REG:64 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_column_major:
+  REG:64 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal:
+  REG:64 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16:
+  REG:22 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8:
+  REG:22 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32:
+  REG:24 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+
+Fatbin elf code:
+================
+arch = sm_86
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+Resource usage:
+ Common:
+  GLOBAL:0
+ Function dsmvc_cuda_convert_f64_u16:
+  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_u8:
+  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_f32:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical_f64:
+  REG:44 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_f64:
+  REG:38 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical_f64:
+  REG:32 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:424 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_f64:
+  REG:32 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:424 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical_f64:
+  REG:35 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:456 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_f64:
+  REG:33 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:456 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_promote_f32_f64:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16_f64:
+  REG:28 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8_f64:
+  REG:26 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32_f64:
+  REG:28 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u16:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u8:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical:
+  REG:34 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_column_major:
+  REG:34 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_column_major:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_column_major:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16:
+  REG:20 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8:
+  REG:20 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32:
+  REG:24 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+
+Fatbin elf code:
+================
+arch = sm_89
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+Resource usage:
+ Common:
+  GLOBAL:0
+ Function dsmvc_cuda_convert_f64_u16:
+  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_u8:
+  REG:12 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_f32:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical_f64:
+  REG:44 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_f64:
+  REG:38 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical_f64:
+  REG:32 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:424 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_f64:
+  REG:32 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:424 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical_f64:
+  REG:35 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:456 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_f64:
+  REG:33 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:456 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_promote_f32_f64:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16_f64:
+  REG:28 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8_f64:
+  REG:26 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32_f64:
+  REG:28 STACK:0 SHARED:8448 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u16:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u8:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical:
+  REG:34 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_column_major:
+  REG:34 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_column_major:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:432 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_column_major:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:408 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16:
+  REG:20 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8:
+  REG:20 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32:
+  REG:24 STACK:0 SHARED:4224 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+
+Fatbin ptx code:
+================
+arch = sm_120
+code version = [9,3]
+host = linux
+compile_size = 64bit
+compressed
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+ptxasOptions =  --generate-line-info 
+
+Fatbin elf code:
+================
+arch = sm_120
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = /home/owen/dev/dsmvc-wt-cuda/src/cuda/dsmvc_cuda.cu
+
+Resource usage:
+ Common:
+  GLOBAL:0
+ Function dsmvc_cuda_convert_f64_u16:
+  REG:16 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:936 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_u8:
+  REG:12 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:936 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_f64_f32:
+  REG:10 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:920 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical_f64:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:960 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_f64:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:960 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical_f64:
+  REG:39 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:968 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_f64:
+  REG:39 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:968 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical_f64:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:1000 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_f64:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:1000 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_promote_f32_f64:
+  REG:10 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:920 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16_f64:
+  REG:29 STACK:0 SHARED:9472 LOCAL:0 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8_f64:
+  REG:29 STACK:0 SHARED:9472 LOCAL:0 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32_f64:
+  REG:29 STACK:0 SHARED:9472 LOCAL:0 CONSTANT[0]:920 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u16:
+  REG:12 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:936 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_convert_u8:
+  REG:10 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:936 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_vertical:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[2]:32 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal_column_major:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[2]:32 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_solve_horizontal:
+  REG:44 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[2]:32 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_vertical:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[2]:32 CONSTANT[0]:976 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal_column_major:
+  REG:40 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[2]:32 CONSTANT[0]:976 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_inverse_horizontal:
+  REG:44 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[2]:32 CONSTANT[0]:976 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_vertical:
+  REG:38 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:952 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal_column_major:
+  REG:38 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:952 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_rhs_horizontal:
+  REG:38 STACK:0 SHARED:1024 LOCAL:0 CONSTANT[0]:952 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u16:
+  REG:28 STACK:0 SHARED:5248 LOCAL:0 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_u8:
+  REG:28 STACK:0 SHARED:5248 LOCAL:0 CONSTANT[0]:944 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function dsmvc_cuda_transpose_f32:
+  REG:30 STACK:0 SHARED:5248 LOCAL:0 CONSTANT[0]:920 TEXTURE:0 SURFACE:0 SAMPLER:0
