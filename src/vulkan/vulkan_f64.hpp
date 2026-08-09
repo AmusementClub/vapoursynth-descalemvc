@@ -13,14 +13,15 @@ struct VulkanFloat64Capabilities {
     bool shader_float64 = false;
     bool rounding_mode_rte_float64 = false;
     bool signed_zero_inf_nan_preserve_float64 = false;
+    // Probe-only: Float64 subnormal intermediates may flush to zero when false.
+    // Values whose intermediates remain in the normal range are unaffected.
     bool denorm_preserve_float64 = false;
     std::uint64_t min_storage_buffer_offset_alignment = 0U;
     std::uint64_t max_storage_buffer_range = 0U;
 
     [[nodiscard]] bool strict_supported() const noexcept {
         return shader_float64 && rounding_mode_rte_float64
-            && signed_zero_inf_nan_preserve_float64
-            && denorm_preserve_float64;
+            && signed_zero_inf_nan_preserve_float64;
     }
 
     [[nodiscard]] std::string missing_requirements() const {
@@ -36,7 +37,6 @@ struct VulkanFloat64Capabilities {
         if (!signed_zero_inf_nan_preserve_float64) {
             add("shaderSignedZeroInfNanPreserveFloat64");
         }
-        if (!denorm_preserve_float64) add("shaderDenormPreserveFloat64");
         return result;
     }
 

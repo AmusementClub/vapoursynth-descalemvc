@@ -22,13 +22,12 @@ int main() {
     assert(missing.requirement_error()
            == "Vulkan Float64 capability contract failed: missing shaderFloat64, "
               "shaderRoundingModeRTEFloat64, "
-              "shaderSignedZeroInfNanPreserveFloat64, "
-              "shaderDenormPreserveFloat64");
+              "shaderSignedZeroInfNanPreserveFloat64");
     missing = supported;
     missing.denorm_preserve_float64 = false;
-    assert(missing.requirement_error()
-           == "Vulkan Float64 capability contract failed: missing "
-              "shaderDenormPreserveFloat64");
+    assert(missing.strict_supported());
+    assert(missing.missing_requirements().empty());
+    assert(missing.requirement_error().empty());
 
     const auto check_single_missing = [&](auto clear, const char *name) {
         auto capabilities = supported;
@@ -49,10 +48,6 @@ int main() {
             value.signed_zero_inf_nan_preserve_float64 = false;
         },
         "shaderSignedZeroInfNanPreserveFloat64");
-    check_single_missing(
-        [](auto &value) { value.denorm_preserve_float64 = false; },
-        "shaderDenormPreserveFloat64");
-
     VulkanF64WordLayout layout;
     assert(layout.add_words(3U, "offsets") == 0U);
     assert(layout.add_doubles(2U, "weights") == 4U);

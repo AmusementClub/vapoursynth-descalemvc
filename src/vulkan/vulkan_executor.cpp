@@ -461,6 +461,9 @@ struct DeviceInfo {
             << capabilities.signed_zero_inf_nan_preserve_float64
             << " shaderDenormPreserveFloat64="
             << capabilities.denorm_preserve_float64
+            << " denormFloat64Policy=probe-only"
+            << " denormFloat64Boundary=\"subnormal intermediates may "
+               "flush to zero; normal-range values unaffected\""
             << " minStorageBufferOffsetAlignment="
             << capabilities.min_storage_buffer_offset_alignment
             << " maxStorageBufferRange="
