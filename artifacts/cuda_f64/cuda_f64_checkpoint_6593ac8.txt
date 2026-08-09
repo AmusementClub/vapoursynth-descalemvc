@@ -2,13 +2,13 @@ CUDA F64 backend checkpoint
 timestamp=2026-08-09T20:18:40+08:00
 base_sha=af1d982cb400393d9ee1fbb48cb433f53814469b
 production_source_sha=6593ac8b59458177c8c42c7488aa338bf80d854a
-evidence_commit_parent=3a8d3e69cbba35e3228ab0263918dcb346f4525f
+conformance_source_sha=9f06f1f4c019c94fba2463504f2c7086bce1ca0e
 binary=build-cuda-f64/dsmvc.so
 binary_sha256=0b2b61a879f4b09e6e1afa335fb8555a300b8de5f7e8635f71876e16736fadfc
 cuda_object=build-cuda-f64/CMakeFiles/dsmvc_engine.dir/src/cuda/dsmvc_cuda.cu.o
 cuda_object_sha256=ebef12627b1ed811ff027e2e29389d419aca6e8ac9c78a242519dc5e610b74c0
 conformance_binary=build-cuda-f64/dsmvc_cuda_f64_conformance_tests
-conformance_binary_sha256=b8a4668ebf44adb468ca8e568e716e3145b6a4f7d6734b3df9652ce088debc1e
+conformance_binary_sha256=72d5b9ea5cb24f9ced9deedd066e88f680cc82c52ba3500ea3da8c0dba5ffc7e
 compiler_cxx=GNU 15.2.0
 compiler_cuda=NVIDIA CUDA 13.3 V13.3.73
 kernel=Linux 7.0.0-29-generic x86_64
@@ -35,7 +35,7 @@ result=passed
 Backend-local conformance run command:
 ./build-cuda-f64/dsmvc_cuda_f64_conformance_tests
 result=skipped; output="cuda_f64 conformance skipped: no CUDA device is available"
-unrun_cases=F64 rows/columns, safe-risk/risk-safe/risk-risk 2D, U8/U10 bit exact, concurrent prepare
+unrun_cases=F64 rows/columns, forced B1/B3/B5/B7, generic custom B9, safe-risk/risk-safe/risk-risk 2D, U8/U10/U16 bit exact, concurrent prepare
 
 Artifact inventory command:
 src/cuda/cuda_f64_artifact_inventory.sh build-cuda-f64/dsmvc.so /usr/local/cuda/bin/cuobjdump artifacts/cuda_f64/6593ac8b59458177c8c42c7488aa338bf80d854a /usr/local/cuda/bin/nvcc 6593ac8b59458177c8c42c7488aa338bf80d854a
