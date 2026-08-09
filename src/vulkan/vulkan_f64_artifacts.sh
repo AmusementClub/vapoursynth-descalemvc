@@ -61,12 +61,20 @@ compile_module() {
             return 1
         fi
     done
+    local generated_header="$output/vulkan_${name}_spv.hpp"
+    local source_header="$root/src/vulkan/vulkan_${name}_spv.hpp"
+    "${CMAKE_COMMAND:-cmake}" \
+        "-DINPUT=$binary" \
+        "-DOUTPUT=$generated_header" \
+        "-DSYMBOL=vulkan_${name}_spv" \
+        -P "$root/cmake/embed_spirv.cmake"
     if [[ "$embed" == 1 ]]; then
-        "${CMAKE_COMMAND:-cmake}" \
-            "-DINPUT=$binary" \
-            "-DOUTPUT=$root/src/vulkan/vulkan_${name}_spv.hpp" \
-            "-DSYMBOL=vulkan_${name}_spv" \
-            -P "$root/cmake/embed_spirv.cmake"
+        "${CMAKE_COMMAND:-cmake}" -E copy_if_different \
+            "$generated_header" "$source_header"
+    fi
+    if ! cmp -s "$generated_header" "$source_header"; then
+        echo "$name embedded header does not match the validated SPIR-V" >&2
+        return 1
     fi
 }
 
@@ -107,7 +115,12 @@ fi
         "$output/rhs_f64.spv" \
         "$output/inverse_f64.spv" \
         "$output/solve_f64.spv" \
-        "$output/convert_f64.spv"
+        "$output/convert_f64.spv" \
+        "$root/src/vulkan/vulkan_transpose_f64_spv.hpp" \
+        "$root/src/vulkan/vulkan_rhs_f64_spv.hpp" \
+        "$root/src/vulkan/vulkan_inverse_f64_spv.hpp" \
+        "$root/src/vulkan/vulkan_solve_f64_spv.hpp" \
+        "$root/src/vulkan/vulkan_convert_f64_spv.hpp"
 } > "$output/inventory.txt"
 
 echo "Vulkan Float64 artifacts validated in $output"
