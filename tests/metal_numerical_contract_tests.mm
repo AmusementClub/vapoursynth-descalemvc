@@ -1,6 +1,8 @@
 #include "metal_float_executor_apple.hpp"
 #include "numerical_conformance.hpp"
 
+#import <Metal/Metal.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -141,8 +143,15 @@ void check_float64_rejection(
 
 int main() {
     try {
-        require(dsmvc::experimental::apple_m_series_metal_available(),
-                "Metal numerical contract test requires Apple unified memory");
+        // Gate on what the executor itself requires (any unified-memory
+        // Metal device), not on the "Apple M" device-name prefix: CI
+        // runners expose a virtualized unified-memory device whose name
+        // does not carry that prefix.
+        @autoreleasepool {
+            id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+            require(device != nil && device.hasUnifiedMemory,
+                    "Metal numerical contract test requires Apple unified memory");
+        }
         const auto identity = make_identity_plan();
         const auto fixtures = dsmvc::numerical::axis_fixtures();
         for (std::size_t index = 0; index < 4U; ++index) {
