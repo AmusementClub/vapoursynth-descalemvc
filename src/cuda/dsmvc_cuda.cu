@@ -1022,6 +1022,16 @@ extern "C" __global__ void dsmvc_cuda_promote_f32_f64(
     }
 }
 
+extern "C" __global__ void dsmvc_cuda_check_finite_f64(
+    const double *__restrict__ source,
+    std::uint32_t element_count,
+    std::uint32_t *__restrict__ nonfinite) {
+    const std::uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < element_count && !isfinite(source[index])) {
+        atomicExch(nonfinite, 1U);
+    }
+}
+
 extern "C" __global__ void dsmvc_cuda_inverse_horizontal_f64(
     const double *__restrict__ source,
     std::uint32_t vector_count,
@@ -1245,6 +1255,15 @@ cudaError_t promote_f64(
     dsmvc_cuda_promote_f32_f64<<<
         divide_up(element_count, conversion_threads), conversion_threads,
         0U, stream>>>(source, element_count, destination);
+    return launch_status();
+}
+
+cudaError_t check_finite_f64(
+    const double *source, std::uint32_t element_count,
+    std::uint32_t *nonfinite, cudaStream_t stream) {
+    dsmvc_cuda_check_finite_f64<<<
+        divide_up(element_count, conversion_threads), conversion_threads,
+        0U, stream>>>(source, element_count, nonfinite);
     return launch_status();
 }
 

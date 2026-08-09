@@ -40,6 +40,12 @@ struct RuntimeApi {
             destination, source, bytes, cudaMemcpyDeviceToHost, stream);
     }
 
+    [[nodiscard]] cudaError_t mem_zero_async(
+        DevicePointer destination, std::size_t bytes,
+        cudaStream_t stream) const noexcept {
+        return cudaMemsetAsync(destination, 0, bytes, stream);
+    }
+
     [[nodiscard]] cudaError_t memcpy_2d_htod_async(
         DevicePointer destination, std::size_t destination_pitch,
         const void *source, std::size_t source_pitch,

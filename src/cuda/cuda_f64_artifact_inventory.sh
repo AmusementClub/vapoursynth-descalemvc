@@ -29,6 +29,7 @@ f64_functions=(
     dsmvc_cuda_transpose_u8_f64
     dsmvc_cuda_transpose_u16_f64
     dsmvc_cuda_promote_f32_f64
+    dsmvc_cuda_check_finite_f64
     dsmvc_cuda_inverse_horizontal_f64
     dsmvc_cuda_inverse_vertical_f64
     dsmvc_cuda_rhs_horizontal_f64

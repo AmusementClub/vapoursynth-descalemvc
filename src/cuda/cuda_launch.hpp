@@ -34,6 +34,9 @@ namespace dsmvc::cuda_detail::cuda_launch {
 [[nodiscard]] cudaError_t promote_f64(
     const float *source, std::uint32_t element_count,
     double *destination, cudaStream_t stream);
+[[nodiscard]] cudaError_t check_finite_f64(
+    const double *source, std::uint32_t element_count,
+    std::uint32_t *nonfinite, cudaStream_t stream);
 
 [[nodiscard]] cudaError_t inverse_horizontal(
     const float *source, std::uint32_t vector_count,

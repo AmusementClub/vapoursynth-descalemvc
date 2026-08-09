@@ -1089,6 +1089,7 @@ struct ExecutionSlot {
     DeviceBuffer intermediate;
     DeviceBuffer destination;
     DeviceBuffer integer_output;
+    DeviceBuffer f64_status;
 };
 
 class Runtime {
@@ -1836,6 +1837,28 @@ void launch_promote_f64(
         "CUDA Float64 promotion kernel launch");
 }
 
+void schedule_f64_finite_check(
+    Runtime &runtime, ExecutionSlot &slot, DevicePointer source,
+    std::uint32_t element_count, std::uint32_t &host_nonfinite) {
+    cuda_check(
+        *runtime.api,
+        runtime.api->mem_zero_async(
+            slot.f64_status.pointer(), sizeof(std::uint32_t), slot.stream),
+        "cudaMemsetAsync(Float64 finite status)");
+    cuda_check(
+        *runtime.api,
+        cuda_launch::check_finite_f64(
+            device_as<const double>(source), element_count,
+            device_as<std::uint32_t>(slot.f64_status.pointer()), slot.stream),
+        "CUDA Float64 finite-check kernel launch");
+    cuda_check(
+        *runtime.api,
+        runtime.api->memcpy_dtoh_async(
+            &host_nonfinite, slot.f64_status.pointer(),
+            sizeof(host_nonfinite), slot.stream),
+        "cudaMemcpyAsync(Float64 finite status download)");
+}
+
 void launch_horizontal(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
     std::uint32_t vector_count, DevicePointer output,
@@ -2327,6 +2350,11 @@ struct CudaExecutor::Impl {
                 slot.integer_output.reserve(
                     runtime->api, runtime->device_ordinal, result_bytes);
             }
+            if (use_float64) {
+                slot.f64_status.reserve(
+                    runtime->api, runtime->device_ordinal,
+                    sizeof(std::uint32_t));
+            }
         }
 
         cuda_kernel::IntegerConversionDescriptor converted{};
@@ -2466,6 +2494,14 @@ struct CudaExecutor::Impl {
                     slot.destination.pointer());
             }
         }
+        std::uint32_t f64_nonfinite = 0U;
+        if (use_float64) {
+            schedule_f64_finite_check(
+                *runtime, slot, slot.destination.pointer(),
+                checked_u32(
+                    destination_elements, "CUDA destination element count"),
+                f64_nonfinite);
+        }
         DevicePointer result = slot.destination.pointer();
         if (use_float64) {
             NvtxRange trace{
@@ -2508,6 +2544,10 @@ struct CudaExecutor::Impl {
             release.release_completed();
         } else {
             release.mark_completed();
+        }
+        if (f64_nonfinite != 0U) {
+            throw std::runtime_error(
+                "CUDA Float64 2D execution produced a nonfinite value");
         }
         if (!direct_transfer) {
             NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
@@ -2632,6 +2672,9 @@ void CudaExecutor::inverse_rows(
             slot.integer_output.reserve(
                 impl_->runtime->api, impl_->runtime->device_ordinal,
                 result_bytes);
+            slot.f64_status.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                sizeof(std::uint32_t));
         }
     }
 
@@ -2736,6 +2779,13 @@ void CudaExecutor::inverse_rows(
             height, destination_width, nullptr,
             slot.source.pointer(), slot.destination.pointer());
     }
+    std::uint32_t f64_nonfinite = 0U;
+    if (use_float64) {
+        schedule_f64_finite_check(
+            *impl_->runtime, slot, slot.destination.pointer(),
+            checked_u32(output_elements, "CUDA row destination element count"),
+            f64_nonfinite);
+    }
     DevicePointer result = slot.destination.pointer();
     if (use_float64) {
         NvtxRange trace{NvtxLabel::output_conversion, output_elements};
@@ -2763,6 +2813,10 @@ void CudaExecutor::inverse_rows(
     }
     packed->mark_upload_complete();
     release.mark_completed();
+    if (f64_nonfinite != 0U) {
+        throw std::runtime_error(
+            "CUDA Float64 row execution produced a nonfinite value");
+    }
     {
         NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
         unpack_host_rows(
@@ -2849,6 +2903,9 @@ void CudaExecutor::inverse_columns(
             slot.integer_output.reserve(
                 impl_->runtime->api, impl_->runtime->device_ordinal,
                 result_bytes);
+            slot.f64_status.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                sizeof(std::uint32_t));
         }
         slot.host_source.reserve(
             impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
@@ -2943,6 +3000,14 @@ void CudaExecutor::inverse_columns(
                 slot.destination.pointer());
         }
     }
+    std::uint32_t f64_nonfinite = 0U;
+    if (use_float64) {
+        schedule_f64_finite_check(
+            *impl_->runtime, slot, slot.destination.pointer(),
+            checked_u32(
+                output_elements, "CUDA column destination element count"),
+            f64_nonfinite);
+    }
     DevicePointer result = slot.destination.pointer();
     if (use_float64) {
         NvtxRange trace{NvtxLabel::output_conversion, output_elements};
@@ -2971,6 +3036,10 @@ void CudaExecutor::inverse_columns(
     }
     packed->mark_upload_complete();
     release.mark_completed();
+    if (f64_nonfinite != 0U) {
+        throw std::runtime_error(
+            "CUDA Float64 column execution produced a nonfinite value");
+    }
     {
         NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
         unpack_host_rows(
