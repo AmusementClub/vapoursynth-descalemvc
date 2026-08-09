@@ -456,6 +456,22 @@ if(DSMVC_BUILD_BENCHMARKS)
         target_compile_options(dsmvc_numerical_contract_benchmark PRIVATE
             -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
     endif()
+
+    add_executable(dsmvc_cpu_f64_avx2_benchmark
+        benchmarks/cpu_f64_avx2_benchmark.cpp)
+    target_compile_features(
+        dsmvc_cpu_f64_avx2_benchmark PRIVATE cxx_std_23)
+    target_link_libraries(
+        dsmvc_cpu_f64_avx2_benchmark PRIVATE dsmvc_engine)
+    if(MSVC)
+        target_compile_options(dsmvc_cpu_f64_avx2_benchmark PRIVATE
+            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_definitions(dsmvc_cpu_f64_avx2_benchmark PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(dsmvc_cpu_f64_avx2_benchmark PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
+    endif()
 endif()
 
 if(DSMVC_ENABLE_METAL)
