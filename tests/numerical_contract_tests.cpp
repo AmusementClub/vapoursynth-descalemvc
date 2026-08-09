@@ -239,114 +239,288 @@ void test_malformed_retained_metadata() {
     rejects(std::move(malformed), "normal norm on an F32 plan");
 }
 
-void check_native_tail_case(
-    std::span<const AxisFixture> fixtures,
-    const dsmvc::CpuExecutor &native,
-    std::int32_t rows,
-    bool expect_simd_storage,
-    std::string_view scenario) {
-    constexpr float untouched = -23.0F;
-    const float expected_tail = expect_simd_storage ? 0.0F : untouched;
-    for (const AxisFixture &fixture : fixtures) {
-        const auto plan = dsmvc::build_axis_plan(fixture.request);
-        const auto padded_source = (plan.source_size + 7) & ~7;
-        const auto padded_destination = (plan.destination_size + 7) & ~7;
-        const auto input_stride = padded_source + 3;
-        const auto output_stride = padded_destination + 3;
-        std::vector<float> input(
-            static_cast<std::size_t>(rows)
-                * static_cast<std::size_t>(input_stride),
-            0.0F);
-        std::vector<float> expected(
-            static_cast<std::size_t>(rows)
-                * static_cast<std::size_t>(output_stride),
-            untouched);
-        std::vector<float> output(expected.size(), untouched);
-        for (std::int32_t row = 0; row < rows; ++row) {
-            const auto row_input = dsmvc::numerical::make_normal_input(
-                static_cast<std::size_t>(plan.source_size),
-                fixture.input_seed + static_cast<std::uint32_t>(row));
-            std::copy(row_input.begin(), row_input.end(),
-                      input.begin() + static_cast<std::ptrdiff_t>(row)
-                          * input_stride);
-            dsmvc::detail::inverse_axis_f32_ordered(
-                plan,
-                input.data() + static_cast<std::ptrdiff_t>(row) * input_stride,
-                1,
-                expected.data()
-                    + static_cast<std::ptrdiff_t>(row) * output_stride,
-                1);
-        }
-        native.inverse_rows(
-            plan, input.data(), input_stride, output.data(), output_stride, rows);
-
-        double maximum = 0.0;
-        for (std::int32_t row = 0; row < rows; ++row) {
-            for (std::int32_t column = 0; column < plan.destination_size;
-                 ++column) {
-                const auto index = static_cast<std::size_t>(row)
-                        * static_cast<std::size_t>(output_stride)
-                    + static_cast<std::size_t>(column);
-                require(std::isfinite(output[index]),
-                        std::string(fixture.name)
-                            + " native tail produced a nonfinite value");
-                maximum = std::max(
-                    maximum,
-                    std::abs(static_cast<double>(output[index])
-                             - static_cast<double>(expected[index])));
-            }
-            for (std::int32_t column = plan.destination_size;
-                 column < padded_destination; ++column) {
-                const float tail = output[static_cast<std::size_t>(row)
-                                          * static_cast<std::size_t>(output_stride)
-                                      + static_cast<std::size_t>(column)];
-                require(tail == expected_tail,
-                        std::string(fixture.name) + " "
-                            + std::string(scenario)
-                            + (expect_simd_storage
-                                   ? " SIMD tail storage was not zero"
-                                   : " scalar fallback overwrote tail storage"));
-            }
-            for (std::int32_t column = padded_destination;
-                 column < output_stride; ++column) {
-                require(output[static_cast<std::size_t>(row)
-                                   * static_cast<std::size_t>(output_stride)
-                               + static_cast<std::size_t>(column)] == untouched,
-                        std::string(fixture.name)
-                            + " native path overwrote the output guard");
-            }
-        }
-        require(maximum <= 3.0e-5,
-                std::string(fixture.name)
-                    + " native compatibility path escaped the prework bound");
-        std::cout << fixture.name << " scenario=" << scenario
-                  << " rows=" << rows << " native=" << native.name()
-                  << " max_abs_vs_ordered=" << maximum << '\n';
+void check_native_tail_control(
+    const AxisFixture &fixture, const dsmvc::CpuExecutor &native,
+    std::int32_t rows, bool expect_simd_tail) {
+    const auto plan = dsmvc::build_axis_plan(fixture.request);
+    const auto padded_source = (plan.source_size + 7) & ~7;
+    const auto padded_destination = (plan.destination_size + 7) & ~7;
+    const auto input_stride = padded_source + 3;
+    const auto output_stride = padded_destination + 3;
+    std::vector<float> input(
+        static_cast<std::size_t>(rows)
+            * static_cast<std::size_t>(input_stride),
+        0.0F);
+    std::vector<float> expected(
+        static_cast<std::size_t>(rows)
+            * static_cast<std::size_t>(output_stride),
+        -23.0F);
+    std::vector<float> output(expected.size(), -23.0F);
+    for (std::int32_t row = 0; row < rows; ++row) {
+        const auto row_input = dsmvc::numerical::make_normal_input(
+            static_cast<std::size_t>(plan.source_size),
+            fixture.input_seed + static_cast<std::uint32_t>(row));
+        std::copy(row_input.begin(), row_input.end(),
+                  input.begin() + static_cast<std::ptrdiff_t>(row)
+                      * input_stride);
+        dsmvc::detail::inverse_axis_f32_ordered(
+            plan,
+            input.data() + static_cast<std::ptrdiff_t>(row) * input_stride,
+            1,
+            expected.data() + static_cast<std::ptrdiff_t>(row) * output_stride,
+            1);
     }
+    native.inverse_rows(
+        plan, input.data(), input_stride, output.data(), output_stride, rows);
+
+    double maximum = 0.0;
+    std::uint32_t maximum_ulp = 0U;
+    for (std::int32_t row = 0; row < rows; ++row) {
+        for (std::int32_t column = 0; column < plan.destination_size;
+             ++column) {
+            const auto index = static_cast<std::size_t>(row)
+                    * static_cast<std::size_t>(output_stride)
+                + static_cast<std::size_t>(column);
+            require(std::isfinite(output[index]),
+                    std::string(fixture.name)
+                        + " native tail produced a nonfinite value");
+            maximum = std::max(
+                maximum,
+                std::abs(static_cast<double>(output[index])
+                         - static_cast<double>(expected[index])));
+            maximum_ulp = std::max(
+                maximum_ulp,
+                dsmvc::numerical::float_ulp_distance(
+                    output[index], expected[index]));
+        }
+        for (std::int32_t column = plan.destination_size;
+             column < padded_destination; ++column) {
+            const float tail = output[static_cast<std::size_t>(row)
+                                      * static_cast<std::size_t>(output_stride)
+                                  + static_cast<std::size_t>(column)];
+            require(tail == (expect_simd_tail ? 0.0F : -23.0F),
+                    std::string(fixture.name)
+                        + (expect_simd_tail
+                               ? " native SIMD tail storage was not zero"
+                               : " scalar fallback overwrote SIMD tail storage"));
+        }
+        for (std::int32_t column = padded_destination;
+             column < output_stride; ++column) {
+            require(output[static_cast<std::size_t>(row)
+                               * static_cast<std::size_t>(output_stride)
+                           + static_cast<std::size_t>(column)] == -23.0F,
+                    std::string(fixture.name)
+                        + " native path overwrote the output guard");
+        }
+    }
+    require(maximum <= 3.0e-5,
+            std::string(fixture.name)
+                + " native compatibility path escaped the prework bound");
+    if (native.path() == dsmvc::CpuPath::neon) {
+        require(maximum_ulp == 0U,
+                std::string(fixture.name)
+                    + " NEON row path differs from ordered F32");
+    }
+    std::cout << fixture.name << " native=" << native.name()
+              << " rows=" << rows
+              << " max_abs_vs_ordered=" << maximum
+              << " max_ulp_vs_ordered=" << maximum_ulp << '\n';
 }
 
 void test_native_tail_controls() {
     const auto fixtures = dsmvc::numerical::axis_fixtures();
-    const auto controls = std::span<const AxisFixture>(fixtures).first(4U);
     const dsmvc::CpuExecutor native(dsmvc::CpuPath::automatic);
-
-    std::int32_t simd_width = 0;
+    // Probe the hardware capability rather than inferring the executed path
+    // from CpuExecutor::path(): below the SIMD width every call falls back to
+    // scalar, and only rows beyond a full group prove SIMD tail storage.
+    std::int32_t lanes = 0;
     if (dsmvc::cpu_avx2_available()) {
-        simd_width = 8;
+        lanes = 8;
     } else if (dsmvc::cpu_neon_available()) {
-        simd_width = 4;
+        lanes = 4;
+    }
+    for (std::size_t case_index = 0; case_index < 4U; ++case_index) {
+        const auto &fixture = fixtures[case_index];
+        if (lanes == 0) {
+            check_native_tail_control(fixture, native, 5, false);
+            continue;
+        }
+        check_native_tail_control(fixture, native, lanes - 1, false);
+        check_native_tail_control(fixture, native, lanes, true);
+        check_native_tail_control(fixture, native, lanes + 1, true);
+        check_native_tail_control(fixture, native, lanes * 2, true);
+    }
+}
+
+void check_native_f32_columns(
+    const AxisFixture &fixture, const dsmvc::CpuExecutor &native,
+    std::int32_t columns, std::int32_t stride) {
+    const auto plan = dsmvc::build_axis_plan(fixture.request);
+    std::vector<float> input(
+        static_cast<std::size_t>(plan.source_size)
+            * static_cast<std::size_t>(stride),
+        0.0F);
+    std::vector<float> expected(
+        static_cast<std::size_t>(plan.destination_size)
+            * static_cast<std::size_t>(stride),
+        -23.0F);
+    std::vector<float> output(expected.size(), -23.0F);
+    for (std::int32_t column = 0; column < columns; ++column) {
+        const auto column_input = dsmvc::numerical::make_normal_input(
+            static_cast<std::size_t>(plan.source_size),
+            fixture.input_seed + static_cast<std::uint32_t>(column));
+        for (std::int32_t row = 0; row < plan.source_size; ++row) {
+            input[static_cast<std::size_t>(row)
+                      * static_cast<std::size_t>(stride)
+                  + static_cast<std::size_t>(column)] =
+                column_input[static_cast<std::size_t>(row)];
+        }
+        dsmvc::detail::inverse_axis_f32_ordered(
+            plan, input.data() + column, stride,
+            expected.data() + column, stride);
+    }
+    native.inverse_columns(
+        plan, input.data(), stride, output.data(), stride, columns);
+
+    double maximum = 0.0;
+    std::uint32_t maximum_ulp = 0U;
+    for (std::int32_t row = 0; row < plan.destination_size; ++row) {
+        for (std::int32_t column = 0; column < columns; ++column) {
+            const auto index = static_cast<std::size_t>(row)
+                    * static_cast<std::size_t>(stride)
+                + static_cast<std::size_t>(column);
+            maximum = std::max(
+                maximum,
+                std::abs(static_cast<double>(output[index])
+                         - static_cast<double>(expected[index])));
+            maximum_ulp = std::max(
+                maximum_ulp,
+                dsmvc::numerical::float_ulp_distance(
+                    output[index], expected[index]));
+        }
+    }
+    if (native.path() == dsmvc::CpuPath::neon) {
+        require(maximum_ulp == 0U,
+                std::string(fixture.name)
+                    + " NEON column path differs from ordered F32");
+    }
+    std::cout << fixture.name << " native=" << native.name()
+              << " columns=" << columns
+              << " max_abs_vs_ordered=" << maximum
+              << " max_ulp_vs_ordered=" << maximum_ulp << '\n';
+}
+
+void test_native_column_controls() {
+    const auto fixtures = dsmvc::numerical::axis_fixtures();
+    const dsmvc::CpuExecutor native(dsmvc::CpuPath::automatic);
+    for (std::size_t case_index = 0; case_index < 4U; ++case_index) {
+        check_native_f32_columns(fixtures[case_index], native, 3, 3);
+        check_native_f32_columns(fixtures[case_index], native, 5, 8);
+    }
+}
+
+void check_native_f64_axes(
+    const AxisFixture &fixture, const dsmvc::CpuExecutor &native) {
+    constexpr std::int32_t vectors = 5;
+    const auto plan = dsmvc::build_axis_plan(fixture.request);
+    require(plan.requires_float64(),
+            std::string(fixture.name) + " F64 axis fixture lost precision mode");
+
+    const auto row_input_stride = plan.source_size + 3;
+    const auto row_output_stride = plan.destination_size + 3;
+    std::vector<float> row_input(
+        static_cast<std::size_t>(vectors)
+            * static_cast<std::size_t>(row_input_stride),
+        0.0F);
+    std::vector<float> row_expected(
+        static_cast<std::size_t>(vectors)
+            * static_cast<std::size_t>(row_output_stride),
+        -23.0F);
+    std::vector<float> row_output(row_expected.size(), -23.0F);
+
+    const auto column_stride = vectors + 3;
+    std::vector<float> column_input(
+        static_cast<std::size_t>(plan.source_size)
+            * static_cast<std::size_t>(column_stride),
+        0.0F);
+    std::vector<float> column_expected(
+        static_cast<std::size_t>(plan.destination_size)
+            * static_cast<std::size_t>(column_stride),
+        -23.0F);
+    std::vector<float> column_output(column_expected.size(), -23.0F);
+
+    std::vector<double> source(static_cast<std::size_t>(plan.source_size));
+    std::vector<double> destination(
+        static_cast<std::size_t>(plan.destination_size));
+    for (std::int32_t vector = 0; vector < vectors; ++vector) {
+        const auto vector_input = dsmvc::numerical::make_normal_input(
+            static_cast<std::size_t>(plan.source_size),
+            fixture.input_seed + static_cast<std::uint32_t>(vector));
+        for (std::int32_t index = 0; index < plan.source_size; ++index) {
+            const float value = vector_input[static_cast<std::size_t>(index)];
+            row_input[static_cast<std::size_t>(vector)
+                          * static_cast<std::size_t>(row_input_stride)
+                      + static_cast<std::size_t>(index)] = value;
+            column_input[static_cast<std::size_t>(index)
+                             * static_cast<std::size_t>(column_stride)
+                         + static_cast<std::size_t>(vector)] = value;
+            source[static_cast<std::size_t>(index)] = static_cast<double>(value);
+        }
+        dsmvc::detail::inverse_axis_f64_ordered(
+            plan, source.data(), 1, destination.data(), 1);
+        for (std::int32_t index = 0; index < plan.destination_size; ++index) {
+            const float value = static_cast<float>(
+                destination[static_cast<std::size_t>(index)]);
+            row_expected[static_cast<std::size_t>(vector)
+                             * static_cast<std::size_t>(row_output_stride)
+                         + static_cast<std::size_t>(index)] = value;
+            column_expected[static_cast<std::size_t>(index)
+                                * static_cast<std::size_t>(column_stride)
+                            + static_cast<std::size_t>(vector)] = value;
+        }
     }
 
-    if (simd_width == 0) {
-        check_native_tail_case(
-            controls, native, 3, false, "scalar-control");
-        return;
-    }
+    native.inverse_rows(
+        plan, row_input.data(), row_input_stride,
+        row_output.data(), row_output_stride, vectors);
+    native.inverse_columns(
+        plan, column_input.data(), column_stride,
+        column_output.data(), column_stride, vectors);
 
-    check_native_tail_case(
-        controls, native, simd_width - 1, false, "short-row-fallback");
-    check_native_tail_case(
-        controls, native, simd_width + 1, true, "simd-row-tail");
+    std::uint32_t row_ulp = 0U;
+    std::uint32_t column_ulp = 0U;
+    for (std::int32_t vector = 0; vector < vectors; ++vector) {
+        for (std::int32_t index = 0; index < plan.destination_size; ++index) {
+            const auto row_index = static_cast<std::size_t>(vector)
+                    * static_cast<std::size_t>(row_output_stride)
+                + static_cast<std::size_t>(index);
+            const auto column_index = static_cast<std::size_t>(index)
+                    * static_cast<std::size_t>(column_stride)
+                + static_cast<std::size_t>(vector);
+            row_ulp = std::max(
+                row_ulp, dsmvc::numerical::float_ulp_distance(
+                             row_output[row_index], row_expected[row_index]));
+            column_ulp = std::max(
+                column_ulp, dsmvc::numerical::float_ulp_distance(
+                                column_output[column_index],
+                                column_expected[column_index]));
+        }
+    }
+    if (native.path() == dsmvc::CpuPath::neon) {
+        require(row_ulp == 0U && column_ulp == 0U,
+                std::string(fixture.name)
+                    + " NEON F64 path differs from ordered Double");
+    }
+    std::cout << fixture.name << " native=" << native.name()
+              << " f64_rows_max_ulp=" << row_ulp
+              << " f64_columns_max_ulp=" << column_ulp << '\n';
+}
+
+void test_native_f64_axes() {
+    const auto fixtures = dsmvc::numerical::axis_fixtures();
+    const dsmvc::CpuExecutor native(dsmvc::CpuPath::automatic);
+    check_native_f64_axes(fixtures[5], native);
+    check_native_f64_axes(fixtures[6], native);
 }
 
 struct MixedResult {
@@ -356,21 +530,15 @@ struct MixedResult {
     std::uint32_t maximum_ulp = 0U;
 };
 
-[[nodiscard]] MixedResult evaluate_mixed_axis() {
-    const auto horizontal = dsmvc::build_axis_plan(
-        dsmvc::numerical::mixed_horizontal_request());
-    const auto vertical = dsmvc::build_axis_plan(
-        dsmvc::numerical::conditioned_lanczos2_request(
-            dsmvc::F64Mode::automatic));
-    require(!horizontal.requires_float64() && vertical.requires_float64(),
-            "mixed-axis fixture selected the wrong precision routes");
-
+[[nodiscard]] MixedResult evaluate_f64_2d(
+    const dsmvc::AxisPlan &horizontal, const dsmvc::AxisPlan &vertical,
+    std::uint32_t input_seed, const dsmvc::CpuExecutor &executor) {
     const auto input_stride = horizontal.source_size + 2;
     const auto output_stride = horizontal.destination_size + 3;
     const auto packed_input = dsmvc::numerical::make_normal_input(
         static_cast<std::size_t>(vertical.source_size)
             * static_cast<std::size_t>(horizontal.source_size),
-        dsmvc::numerical::mixed_input_seed);
+        input_seed);
     std::vector<float> input(
         static_cast<std::size_t>(vertical.source_size)
             * static_cast<std::size_t>(input_stride),
@@ -425,8 +593,7 @@ struct MixedResult {
         static_cast<std::size_t>(vertical.destination_size)
             * static_cast<std::size_t>(output_stride),
         -31.0F);
-    const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
-    scalar.inverse_2d(
+    executor.inverse_2d(
         horizontal, vertical, input.data(), input_stride,
         production.data(), output_stride);
     std::vector<float> packed_production;
@@ -464,7 +631,16 @@ struct MixedResult {
 }
 
 void test_mixed_axis(bool emit_goldens) {
-    const auto result = evaluate_mixed_axis();
+    const auto safe = dsmvc::build_axis_plan(
+        dsmvc::numerical::mixed_horizontal_request());
+    const auto risky = dsmvc::build_axis_plan(
+        dsmvc::numerical::conditioned_lanczos2_request(
+            dsmvc::F64Mode::automatic));
+    require(!safe.requires_float64() && risky.requires_float64(),
+            "mixed-axis fixture selected the wrong precision routes");
+    const dsmvc::CpuExecutor native(dsmvc::CpuPath::automatic);
+    const auto result = evaluate_f64_2d(
+        safe, risky, dsmvc::numerical::mixed_input_seed, native);
     if (emit_goldens) {
         std::cout << "mixed-safe-risk-2d ordered=" << result.ordered_hash
                   << " production=" << result.production_hash
@@ -477,11 +653,33 @@ void test_mixed_axis(bool emit_goldens) {
                     + result.ordered_hash);
         require(result.production_hash
                     == dsmvc::numerical::mixed_production_output_hash,
-                "mixed-axis scalar production hash drifted: "
+                "mixed-axis production hash drifted: "
                     + result.production_hash);
     }
     require(result.maximum_ulp <= 1U,
-            "mixed-axis scalar result differs by more than one output ULP");
+            "mixed-axis result differs by more than one output ULP");
+
+    const auto reversed = evaluate_f64_2d(
+        risky, safe, dsmvc::numerical::mixed_input_seed ^ 0x5a17c3e9U,
+        native);
+    const auto fixtures = dsmvc::numerical::axis_fixtures();
+    const auto forced = dsmvc::build_axis_plan(fixtures[5].request);
+    const auto both_f64 = evaluate_f64_2d(
+        forced, forced, dsmvc::numerical::mixed_input_seed ^ 0xc64f2d01U,
+        native);
+    std::cout << "mixed-risk-safe-2d native=" << native.name()
+              << " max_abs=" << reversed.maximum_absolute
+              << " max_ulp=" << reversed.maximum_ulp << '\n'
+              << "forced-f64-f64-2d native=" << native.name()
+              << " max_abs=" << both_f64.maximum_absolute
+              << " max_ulp=" << both_f64.maximum_ulp << '\n';
+    if (native.path() == dsmvc::CpuPath::neon) {
+        require(reversed.maximum_ulp == 0U && both_f64.maximum_ulp == 0U,
+                "NEON F64 2D path differs from ordered Double");
+    } else {
+        require(reversed.maximum_ulp <= 1U && both_f64.maximum_ulp <= 1U,
+                "F64 2D path differs by more than one output ULP");
+    }
 }
 
 void test_ordered_f64_qr_anchor() {
@@ -531,6 +729,8 @@ int main(int argc, char **argv) {
         test_cache_accounting();
         test_malformed_retained_metadata();
         test_native_tail_controls();
+        test_native_column_controls();
+        test_native_f64_axes();
         test_mixed_axis(emit_goldens);
         test_ordered_f64_qr_anchor();
         std::cout << "dsmvc numerical contract tests passed\n";

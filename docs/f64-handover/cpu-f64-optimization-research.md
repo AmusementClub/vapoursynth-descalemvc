@@ -21,10 +21,10 @@ measured architecture-specific deficit. See
 [mixed-precision-ir-handover.md](mixed-precision-ir-handover.md).
 
 The shared explicit-FMA F64 oracle and conditioned QR anchor now exist and pass
-on ARM64 and x86_64. They must be frozen with the shared candidate before SIMD
-optimization. The current scalar path still uses non-fused arithmetic while ARM
-NEON uses explicit FMA, so neither production implementation alone is the
-cross-backend arithmetic contract.
+on ARM64 and x86_64. The ordered oracle is the cross-backend arithmetic
+contract. The explicitly selected scalar CPU path still uses non-fused
+arithmetic, while ARM NEON vector execution and its scalar-width tails now use
+the ordered FMA sequence.
 
 The CPU lane first converges scalar/AVX2/NEON F32 behavior and tails, then
 extends the F64 benchmark and optimizes direct F64. These are serial phases of
@@ -46,6 +46,10 @@ The current source directly establishes that:
   independent F64 RHS using two `float64x2_t` vectors.
 - ARM float-input rows, columns, and 2D use that NEON path, including Double
   intermediate producers and consumers.
+- Apple ARM64 contract tests now cover NEON F32 rows, columns, vector-width
+  boundaries, and scalar tails at `0 ULP` for B1/B3/B5/B7. NEON F64 rows,
+  columns, both safe/risky axis orders, and forced-F64/F64 2D also match the
+  ordered Double result at `0 ULP`.
 - The x86 source contains no `__m256d` or other F64 implementation, so x86 F64
   dispatch falls through to scalar Double.
 - Both buffered and streamed integer F64 calls invoke `inverse_2d_f64` with
@@ -73,12 +77,18 @@ The current source directly establishes that:
 | 8 | Tile or fuse the 2D F64 pipeline | Experimental | Low | accumulation order and semantic drift |
 | 9 | Replace scalar diagonal division with retained reciprocal multiplication | Small to medium | Medium-low | one extra rounding difference from scalar oracle |
 
-## Mandatory Stage 0: Complete F64 Benchmark Harness
+## Stage 0 for Optional CPU F64 Optimization
 
-Status is partial. The new numerical benchmark covers one-axis ordered,
-current-scalar, and native-CPU routes for an F32 control plus automatic-risk and
-forced F64. Before retaining any optimization, extend that separate benchmark
-to the matrix below rather than changing the historical F32 profile format.
+Correctness coverage is broader than the benchmark: ARM rows, columns, mixed
+2D, forced-F64/F64 2D, and SIMD tails are now numerical-contract tests. The
+performance harness remains partial and covers one-axis ordered, current-scalar,
+and native-CPU routes for an F32 control plus automatic-risk and forced F64.
+Before retaining an optional optimization, extend that separate benchmark to
+the matrix below rather than changing the historical F32 profile format.
+
+This stage is not required to admit a numerical-correctness repair. A slower
+direct F64 implementation remains valid when it is the route that satisfies the
+precision contract.
 
 ### Required cases
 

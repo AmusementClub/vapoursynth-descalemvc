@@ -129,6 +129,10 @@ struct MetalFloatExecutor::Impl {
         if (!horizontal || !vertical || !horizontal->valid() || !vertical->valid()) {
             throw std::invalid_argument("experimental GRAYS Metal plan is invalid");
         }
+        if (horizontal->requires_float64() || vertical->requires_float64()) {
+            throw std::invalid_argument(
+                "experimental GRAYS Metal executor supports F32 plans only");
+        }
         if (maximum_batch_size == 0U || maximum_batch_size > 64U
             || threads_per_threadgroup == 0U
             || threads_per_threadgroup > 1024U) {

@@ -66,24 +66,24 @@ static inline float apply_lower_window(
     float lag1, float lag2, float lag3, float lag4,
     float lag5, float lag6, float lag7) {
     if (HalfBandwidth >= 7u && i >= 7u) {
-        sum -= lower_ld[6u * destination_size + i] * lag7;
+        sum = fma(-lower_ld[6u * destination_size + i], lag7, sum);
     }
     if (HalfBandwidth >= 6u && i >= 6u) {
-        sum -= lower_ld[5u * destination_size + i] * lag6;
+        sum = fma(-lower_ld[5u * destination_size + i], lag6, sum);
     }
     if (HalfBandwidth >= 5u && i >= 5u) {
-        sum -= lower_ld[4u * destination_size + i] * lag5;
+        sum = fma(-lower_ld[4u * destination_size + i], lag5, sum);
     }
     if (HalfBandwidth >= 4u && i >= 4u) {
-        sum -= lower_ld[3u * destination_size + i] * lag4;
+        sum = fma(-lower_ld[3u * destination_size + i], lag4, sum);
     }
     if (HalfBandwidth >= 3u && i >= 3u) {
-        sum -= lower_ld[2u * destination_size + i] * lag3;
+        sum = fma(-lower_ld[2u * destination_size + i], lag3, sum);
     }
     if (HalfBandwidth >= 2u && i >= 2u) {
-        sum -= lower_ld[destination_size + i] * lag2;
+        sum = fma(-lower_ld[destination_size + i], lag2, sum);
     }
-    if (i >= 1u) sum -= lower_ld[i] * lag1;
+    if (i >= 1u) sum = fma(-lower_ld[i], lag1, sum);
     return sum;
 }
 
@@ -93,24 +93,24 @@ static inline float apply_upper_window(
     uint available, float lag1, float lag2, float lag3, float lag4,
     float lag5, float lag6, float lag7) {
     if (HalfBandwidth >= 7u && available >= 7u) {
-        sum += upper_l[6u * destination_size + i] * lag7;
+        sum = fma(-upper_l[6u * destination_size + i], lag7, sum);
     }
     if (HalfBandwidth >= 6u && available >= 6u) {
-        sum += upper_l[5u * destination_size + i] * lag6;
+        sum = fma(-upper_l[5u * destination_size + i], lag6, sum);
     }
     if (HalfBandwidth >= 5u && available >= 5u) {
-        sum += upper_l[4u * destination_size + i] * lag5;
+        sum = fma(-upper_l[4u * destination_size + i], lag5, sum);
     }
     if (HalfBandwidth >= 4u && available >= 4u) {
-        sum += upper_l[3u * destination_size + i] * lag4;
+        sum = fma(-upper_l[3u * destination_size + i], lag4, sum);
     }
     if (HalfBandwidth >= 3u && available >= 3u) {
-        sum += upper_l[2u * destination_size + i] * lag3;
+        sum = fma(-upper_l[2u * destination_size + i], lag3, sum);
     }
     if (HalfBandwidth >= 2u && available >= 2u) {
-        sum += upper_l[destination_size + i] * lag2;
+        sum = fma(-upper_l[destination_size + i], lag2, sum);
     }
-    if (available >= 1u) sum += upper_l[i] * lag1;
+    if (available >= 1u) sum = fma(-upper_l[i], lag1, sum);
     return sum;
 }
 
@@ -165,9 +165,11 @@ static inline void inverse_axis_fixed_wide_impl(
         const uint end = transpose_offsets[i + 1u];
         for (uint entry = begin; entry < end; ++entry) {
             const uint source_axis = uint(transpose_indices[entry]);
-            sum += transpose_weights[entry]
-                * source[image_index(job.direction, vector, source_axis,
-                                     job.input_stride, job.reserved)];
+            sum = fma(
+                transpose_weights[entry],
+                source[image_index(job.direction, vector, source_axis,
+                                   job.input_stride, job.reserved)],
+                sum);
         }
         sum = apply_lower_window<HalfBandwidth>(
             sum, lower_ld, job.destination_size, i,
@@ -180,14 +182,13 @@ static inline void inverse_axis_fixed_wide_impl(
 
     if (job.destination_size < 2u) return;
     for (uint i = job.destination_size - 1u; i-- > 0u;) {
-        float sum = 0.0f;
+        const uint index = output_base + i * output_step;
+        float value = output[index];
         const uint available = min(
             HalfBandwidth, job.destination_size - i - 1u);
-        sum = apply_upper_window<HalfBandwidth>(
-            sum, upper_l, job.destination_size, i, available,
+        value = apply_upper_window<HalfBandwidth>(
+            value, upper_l, job.destination_size, i, available,
             lag1, lag2, lag3, lag4, lag5, lag6, lag7);
-        const uint index = output_base + i * output_step;
-        const float value = output[index] - sum;
         output[index] = value;
         push_window<HalfBandwidth>(
             value, lag1, lag2, lag3, lag4, lag5, lag6, lag7);
@@ -494,7 +495,7 @@ static inline void inverse_axis_integer_input_fixed_wide_impl(
                             job.input_stride, job.reserved)]);
             const float normalized =
                 (sample - conversion.input_offset) * conversion.input_scale;
-            sum += transpose_weights[entry] * normalized;
+            sum = fma(transpose_weights[entry], normalized, sum);
         }
         sum = apply_lower_window<HalfBandwidth>(
             sum, lower_ld, job.destination_size, i,
@@ -507,14 +508,13 @@ static inline void inverse_axis_integer_input_fixed_wide_impl(
 
     if (job.destination_size < 2u) return;
     for (uint i = job.destination_size - 1u; i-- > 0u;) {
-        float sum = 0.0f;
+        const uint index = output_base + i * output_step;
+        float value = output[index];
         const uint available = min(
             HalfBandwidth, job.destination_size - i - 1u);
-        sum = apply_upper_window<HalfBandwidth>(
-            sum, upper_l, job.destination_size, i, available,
+        value = apply_upper_window<HalfBandwidth>(
+            value, upper_l, job.destination_size, i, available,
             lag1, lag2, lag3, lag4, lag5, lag6, lag7);
-        const uint index = output_base + i * output_step;
-        const float value = output[index] - sum;
         output[index] = value;
         push_window<HalfBandwidth>(
             value, lag1, lag2, lag3, lag4, lag5, lag6, lag7);

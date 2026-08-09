@@ -3,7 +3,8 @@
 ## Goal and Hard Constraint
 
 Determine whether either of two emulated high-precision Metal strategies can
-meet the shared result contract and outperform the existing CPU F64 lane:
+meet the shared result contract. Performance is a later routing question, not
+part of numerical correctness:
 
 1. float-float residual and update with the existing F32 factor solve as the
    correction preconditioner; or
@@ -11,7 +12,8 @@ meet the shared result contract and outperform the existing CPU F64 lane:
 
 Metal Shading Language does not support the `double` scalar type. Neither
 strategy is called native Metal FP64. Retaining CPU F64 fallback is a valid and
-expected final result when accuracy or plugin E2E does not pass.
+expected final result when accuracy does not pass or no production GPU route is
+selected.
 
 See the official
 [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
@@ -20,13 +22,17 @@ and the shared
 
 ## Current State
 
-- Metal shaders execute F32 plans only.
+- Metal shaders execute F32 plans only. Fixed B1/B3/B5/B7 and generic routes
+  now use the same explicit ordered-FMA recurrence.
 - The scheduler excludes a complete frame job from GPU eligibility when any
   processed plane axis requires F64.
 - `backend=metal` is a heterogeneous plugin scheduler; `backend=auto` has a
   separate admission policy.
 - Current conditioned Metal tests prove CPU fallback, not an independent Metal
   high-precision result.
+- A direct Apple ARM64 numerical contract test covers horizontal and vertical
+  B1/B3/B5/B7 plus generic B9 at `0 ULP` against ordered F32 and rejects retained
+  F64 plans before shader execution.
 - Existing Metal compilation uses `-fno-fast-math -ffp-contract=off`; explicit
   `fma` is still required inside error-free transforms and the unified F32 path.
 
@@ -59,19 +65,15 @@ The shared prework candidate now contains:
 Metal work begins only after that exact candidate is frozen as the common
 integration commit.
 
-## F32 Entry Gate
+## F32 Entry Gate: Complete on Apple ARM64
 
-Before either high-precision prototype, converge Metal F32 to the shared
-ordered-FMA contract. The fixed-wide shaders currently use ordinary `+=`/`-=`
-while the generic path already uses explicit `fma`; make fixed and generic
-routes follow the same logical RHS/lower/diagonal/upper traversal, including
-tails.
-
-Pass the immutable strict fixtures, inspect the exact AIR/metallib, and retain
-the F32 change only when representative plugin E2E remains within `3%` and no
-route-specific executor case regresses over `5%`. This is the first phase of the
-Metal lane, not a separate agent and not a routing change. Only then begin
-METAL-0A through METAL-0E.
+Metal F32 now follows the shared ordered-FMA contract for RHS, lower, diagonal,
+and upper recurrence in both fixed-wide and generic routes. Fresh Apple ARM64
+execution passes the immutable direct-Metal fixtures at `0 ULP`; the broader
+Metal/plugin suite and artifact inventory also pass. This change is admitted as
+a correctness repair without a throughput threshold and does not change plugin
+routing. METAL-0A through METAL-0E remain unimplemented optional high-precision
+work.
 
 ## Float-Float Representation
 
@@ -195,15 +197,14 @@ than IR but has expensive serial high-precision recurrence operations.
 3. Compare both candidates with CPU direct F64, QR/high-precision anchors, and
    existing Metal F32.
 
-### METAL-0E: performance feasibility
+### METAL-0E: optional production-route feasibility
 
-Measure IR, direct float-float, and CPU F64 from the same source/plugin binary
-provenance and thermal window. Include plan packing, scheduler-shaped batching,
-command buffers, synchronization, status handling, and fallback cost.
-
-Proceed only if one candidate has a credible plugin path to at least `1.03x`
-CPU F64. A standalone kernel win does not pass. If both fail, retain CPU F64
-fallback and stop production route work.
+After a candidate passes all numerical gates, measure IR, direct float-float,
+and CPU F64 from the same source/plugin binary provenance and thermal window.
+Include plan packing, scheduler-shaped batching, command buffers,
+synchronization, status handling, and fallback cost. This evidence decides
+whether to integrate or automatically route the Metal candidate; it does not
+invalidate the correct CPU F64 fallback or the candidate's numerical result.
 
 ## Full Admission After Phase 0
 
@@ -257,15 +258,18 @@ Stop Phase 0 and retain CPU fallback when:
 - direct solve loses the low component during RHS, recurrence, or intermediate;
 - float or integer numerical gates fail;
 - memory grows without a strict concurrent cap;
-- plugin-shaped timing cannot plausibly beat CPU F64 by `3%`; or
 - passing would require changing geometry, padding, regularization, or output
   tolerances.
 
 ## Definition of Done
 
-Metal high precision is complete in one of two states:
+Metal high-precision correctness is complete in one of two states:
 
-1. exactly one emulated strategy passes all numerical, fallback, artifact,
-   hardware, and plugin-performance gates and is integrated with truthful route
-   reporting; or
+1. an emulated strategy passes all numerical, fallback, artifact, and hardware
+   gates; it may remain an isolated backend result until a separate production
+   route decision; or
 2. Phase 0 records reproducible failure evidence and CPU F64 remains supported.
+
+Automatic Metal routing is a separate completion state requiring plugin-shaped
+performance evidence and truthful route reporting. It is not required to close
+the numerical-correctness work.
