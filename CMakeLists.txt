@@ -381,6 +381,29 @@ if(BUILD_TESTING)
         dsmvc_add_vulkan_runtime_test(
             cache_eviction
             "DSMVC_VULKAN_PLAN_CACHE_MB=1;DSMVC_VULKAN_INPUT_CACHE_MB=1;DSMVC_TEST_VULKAN_CACHE_EVICTION=1")
+
+        foreach(_f64_test IN ITEMS
+                vulkan_f64_runtime_tests
+                vulkan_f64_policy_tests)
+            add_executable(dsmvc_${_f64_test}
+                "src/vulkan/${_f64_test}.cpp")
+            target_compile_features(dsmvc_${_f64_test} PRIVATE cxx_std_23)
+            target_include_directories(dsmvc_${_f64_test} PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan"
+                "${_dsmvc_vulkan_generated_dir}")
+            target_link_libraries(dsmvc_${_f64_test} PRIVATE
+                dsmvc_engine Vulkan::Vulkan)
+            if(MSVC)
+                target_compile_options(dsmvc_${_f64_test} PRIVATE
+                    /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+                target_compile_definitions(dsmvc_${_f64_test} PRIVATE
+                    _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+            else()
+                target_compile_options(dsmvc_${_f64_test} PRIVATE
+                    -Wall -Wextra -Wpedantic -ffp-contract=off)
+            endif()
+            add_test(NAME dsmvc_${_f64_test} COMMAND dsmvc_${_f64_test})
+        endforeach()
     endif()
 
     if(NOT DSMVC_VS_PYTHON AND EXISTS "D:/okegui/OKEGui/tools/vapoursynth/python.exe")
@@ -515,6 +538,34 @@ if(DSMVC_BUILD_BENCHMARKS)
             target_compile_options(dsmvc_cuda_f64_executor_benchmark PRIVATE
                 -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
         endif()
+    endif()
+
+    if(DSMVC_ENABLE_VULKAN)
+        foreach(_suffix IN ITEMS f64 f32)
+            set(_vulkan_bench_target "dsmvc_vulkan_${_suffix}_benchmark")
+            add_executable(${_vulkan_bench_target}
+                src/vulkan/vulkan_f64_benchmark.cpp)
+            target_compile_features(
+                ${_vulkan_bench_target} PRIVATE cxx_std_23)
+            target_include_directories(${_vulkan_bench_target} PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan"
+                "${_dsmvc_vulkan_generated_dir}")
+            target_link_libraries(${_vulkan_bench_target} PRIVATE
+                dsmvc_engine Vulkan::Vulkan)
+            if(_suffix STREQUAL "f32")
+                target_compile_definitions(${_vulkan_bench_target} PRIVATE
+                    DSMVC_VULKAN_F64_BENCHMARK_F32_ONLY=1)
+            endif()
+            if(MSVC)
+                target_compile_options(${_vulkan_bench_target} PRIVATE
+                    /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+                target_compile_definitions(${_vulkan_bench_target} PRIVATE
+                    _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+            else()
+                target_compile_options(${_vulkan_bench_target} PRIVATE
+                    -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
+            endif()
+        endforeach()
     endif()
 endif()
 
