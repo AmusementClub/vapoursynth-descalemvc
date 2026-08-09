@@ -1,0 +1,13 @@
+source_sha=6593ac8b59458177c8c42c7488aa338bf80d854a
+binary_sha256=0b2b61a879f4b09e6e1afa335fb8555a300b8de5f7e8635f71876e16736fadfc
+f32_sass_sha256=0ee631864e779e3b8859750ac5cab2054af8aceb6e6ec0c0145872d99391d888
+native_cubin_count=4
+ptx_image_count=2
+command=src/cuda/cuda_f64_artifact_inventory.sh build-cuda-f64/dsmvc.so /usr/local/cuda/bin/cuobjdump artifacts/cuda_f64/6593ac8b59458177c8c42c7488aa338bf80d854a /usr/local/cuda/bin/nvcc 6593ac8b59458177c8c42c7488aa338bf80d854a
+uname=Linux owen-MS-7C35 7.0.0-29-generic #29-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:52:35 UTC 2026 x86_64 GNU/Linux
+nvcc=nvcc: NVIDIA (R) Cuda compiler driver
+nvcc=Copyright (c) 2005-2026 NVIDIA Corporation
+nvcc=Built on Tue_Jun_09_02:43:40_PM_PDT_2026
+nvcc=Cuda compilation tools, release 13.3, V13.3.73
+nvcc=Build cuda_13.3.r13.3/compiler.38244171_0
+gpu=unavailable
