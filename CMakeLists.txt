@@ -334,6 +334,28 @@ if(BUILD_TESTING)
                 "-DNATIVE_ARCHITECTURES=${DSMVC_CUDA_ARCHITECTURES}"
                 "-DPTX_ARCHITECTURES=${DSMVC_CUDA_PTX_ARCHITECTURES}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_cuda_fatbin.cmake")
+
+        add_executable(dsmvc_cuda_f64_conformance_tests
+            tests/cuda_f64_conformance_tests.cpp)
+        target_compile_features(
+            dsmvc_cuda_f64_conformance_tests PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_cuda_f64_conformance_tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+        target_link_libraries(dsmvc_cuda_f64_conformance_tests PRIVATE
+            dsmvc_engine CUDA::cudart_static)
+        if(MSVC)
+            target_compile_options(dsmvc_cuda_f64_conformance_tests PRIVATE
+                /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+            target_compile_definitions(
+                dsmvc_cuda_f64_conformance_tests PRIVATE
+                _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+        else()
+            target_compile_options(dsmvc_cuda_f64_conformance_tests PRIVATE
+                -Wall -Wextra -Wpedantic -ffp-contract=off)
+        endif()
+        add_test(NAME dsmvc_cuda_f64_conformance
+            COMMAND dsmvc_cuda_f64_conformance_tests)
     endif()
 
     if(DSMVC_ENABLE_VULKAN)
@@ -471,6 +493,28 @@ if(DSMVC_BUILD_BENCHMARKS)
     else()
         target_compile_options(dsmvc_cpu_f64_avx2_benchmark PRIVATE
             -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
+    endif()
+
+    if(DSMVC_ENABLE_CUDA)
+        add_executable(dsmvc_cuda_f64_executor_benchmark
+            benchmarks/cuda_f64_executor_benchmark.cpp)
+        target_compile_features(
+            dsmvc_cuda_f64_executor_benchmark PRIVATE cxx_std_23)
+        target_include_directories(
+            dsmvc_cuda_f64_executor_benchmark PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(dsmvc_cuda_f64_executor_benchmark PRIVATE
+            dsmvc_engine CUDA::cudart_static)
+        if(MSVC)
+            target_compile_options(dsmvc_cuda_f64_executor_benchmark PRIVATE
+                /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+            target_compile_definitions(
+                dsmvc_cuda_f64_executor_benchmark PRIVATE
+                _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+        else()
+            target_compile_options(dsmvc_cuda_f64_executor_benchmark PRIVATE
+                -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
+        endif()
     endif()
 endif()
 
