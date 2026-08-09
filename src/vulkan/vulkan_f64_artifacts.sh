@@ -31,13 +31,11 @@ compile_module() {
     fi
     awk -v entry="$entry" '
         !capabilities && (index($0, "OpExtInstImport") != 0 || $1 == "OpMemoryModel") {
-            print "               OpCapability DenormPreserve"
             print "               OpCapability SignedZeroInfNanPreserve"
             print "               OpCapability RoundingModeRTE"
             capabilities = 1
         }
         !modes && $1 == "OpExecutionMode" {
-            print "               OpExecutionMode " entry " DenormPreserve 64"
             print "               OpExecutionMode " entry " SignedZeroInfNanPreserve 64"
             print "               OpExecutionMode " entry " RoundingModeRTE 64"
             modes = 1
@@ -49,10 +47,8 @@ compile_module() {
     "$spirv_dis" "$binary" -o "$output/$name.dis"
     for expected in \
         'OpCapability Float64' \
-        'OpCapability DenormPreserve' \
         'OpCapability SignedZeroInfNanPreserve' \
         'OpCapability RoundingModeRTE' \
-        'OpExecutionMode .* DenormPreserve 64' \
         'OpExecutionMode .* SignedZeroInfNanPreserve 64' \
         'OpExecutionMode .* RoundingModeRTE 64' \
         'OpTypeFloat 64'; do
@@ -61,6 +57,12 @@ compile_module() {
             return 1
         fi
     done
+    # Denorm preservation is probe-only. On devices reporting false, Float64
+    # subnormal intermediates may flush to zero; normal-range values are unaffected.
+    if grep -q 'DenormPreserve' "$output/$name.dis"; then
+        echo "$name unexpectedly requires SPIR-V DenormPreserve" >&2
+        return 1
+    fi
     local generated_header="$output/vulkan_${name}_spv.hpp"
     local source_header="$root/src/vulkan/vulkan_${name}_spv.hpp"
     "${CMAKE_COMMAND:-cmake}" \
@@ -104,6 +106,9 @@ fi
     else
         echo "source_state=dirty"
     fi
+    echo "float64_denorm_preserve_policy=probe-only"
+    echo "float64_denorm_preserve_spirv=not-requested"
+    echo "float64_denorm_boundary=subnormal intermediates may flush to zero; normal-range values unaffected"
     "$glslc" --version
     "$spirv_val" --version
     sha256sum \
