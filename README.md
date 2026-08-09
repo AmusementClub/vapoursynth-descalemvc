@@ -1,12 +1,18 @@
 # dsmvc
 
+[![CI](https://github.com/MysteryDove/vapoursynth-descalemvc/actions/workflows/build.yml/badge.svg)](https://github.com/MysteryDove/vapoursynth-descalemvc/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-lightgrey)
+![VapourSynth API4](https://img.shields.io/badge/VapourSynth-API4-green)
+
+`dsmvc` is a VapourSynth API4 plugin compatible with the public filter API of
+Irrational-Encoding-Wizardry/descale, with native CPU (scalar/AVX2/NEON),
+CUDA, Vulkan, and Apple Metal execution routes.
+
 > **Release performance:** `dsmvc` reaches **13.13x** the original descale
 > throughput on the full `getfnative` scan at R1T1, and remains **6.45x faster**
 > at R32T32. See the [full release benchmark](docs/release-benchmark.md) for
 > E2E, fixed-kernel, BlankClip, and output-compatibility results.
-
-`dsmvc` is a VapourSynth API4 plugin compatible with the public filter API of
-Irrational-Encoding-Wizardry/descale. It registers only the `dsmvc` namespace:
 
 ```python
 core.std.LoadPlugin(path=r"C:\path\to\dsmvc.dll")
@@ -22,6 +28,45 @@ vulkan_output = core.dsmvc.Debicubic(
 The plugin identifier is `com.dsmvc.descale`. It intentionally exports the
 API4 `VapourSynthPluginInit2` entry point only; API3 hosts are not supported.
 It does not register a `core.descale` alias.
+
+## Backend support
+
+| Backend | Float32 | Float64 | Integer output | Routing |
+|---|---|---|---|---|
+| CPU scalar | ✅ | ✅ | bit-exact | `auto` / explicit |
+| CPU AVX2 (x86-64) | ✅ | ✅ | bit-exact | `auto` / explicit |
+| CPU NEON (AArch64) | ✅ | ✅ | bit-exact | `auto` / explicit |
+| CUDA | ✅ | ✅ | bit-exact | explicit only |
+| Vulkan 1.2 | ✅ | ✅¹ | bit-exact | explicit only |
+| Metal (Apple ARM64) | ✅ | routed to CPU² | — | mixed plugin-level |
+
+¹ Vulkan Float64 requires a strict device capability contract:
+`shaderFloat64`, RTE Float64 rounding, and NaN/Inf/signed-zero preservation.
+Devices that do not meet it are rejected with an explicit error, never a
+silent fallback. Denorm preservation is probed and recorded; devices without
+it (including NVIDIA) run with a documented flush-to-zero boundary for
+subnormal intermediates.
+
+² The plugin-level Metal scheduler keeps its heterogeneous contract and
+routes Float64 plans to its CPU fallback; the direct Metal executor rejects
+Float64 plans explicitly.
+
+Float64 output matches the CPU scalar Float64 reference within 1 output ULP
+on every backend; integer output (U8/U10/U16) is bit-exact. Automatic routing
+never selects a Float64 plan on a GPU backend — that admission requires
+paired plugin-level evidence against the optimized CPU Float64 path, which
+has not yet been collected.
+
+```mermaid
+flowchart LR
+    REQ[AxisRequest<br/>kernel · geometry · f64mode] --> PLN[Inverse-only planner<br/>Float64 CSR + banded LDLT<br/>immutable F32 coefficients<br/>retained F64 factors]
+    PLN --> EX[Executor]
+    EX -->|auto| CPU[CPU<br/>scalar · AVX2 · NEON]
+    EX -->|explicit| CUDA[CUDA<br/>native F32/F64 SASS]
+    EX -->|explicit| VK[Vulkan<br/>embedded SPIR-V F32/F64]
+    PLG[VapourSynth plugin scheduler] --> MET[Metal<br/>fixed-recipe GRAYS/YUV<br/>Apple ARM64]
+    PLG --> EX
+```
 
 ## Filters
 
@@ -42,10 +87,12 @@ preserved: `custom` wins over `custom_kernel`, and `taps` wins over `support`.
 
 `padding` selects the explicit edge extension and defaults to `3`:
 
-- `0`: zero padding
-- `1`: repeat the nearest edge sample
-- `2`: periodic reflect101 (`... 2 1 | 0 1 2 ...`), without duplicating the edge
-- `3`: periodic symmetric (`... 1 0 | 0 1 2 ...`), with a duplicated edge
+| Value | Behavior |
+|---|---|
+| `0` | zero padding |
+| `1` | repeat the nearest edge sample |
+| `2` | periodic reflect101 (`... 2 1 \| 0 1 2 ...`), without duplicating the edge |
+| `3` | periodic symmetric (`... 1 0 \| 0 1 2 ...`), with a duplicated edge |
 
 The legacy `border_handling` argument remains available, but cannot be combined
 with `padding`. Its `1` and `2` values retain zero and repeat behavior. Value `0`
@@ -57,12 +104,12 @@ first image-width only, not a periodic extension. Original descale commit
 support; dsmvc safely discards a tap that remains out of range after the legacy
 mapping.
 
-`f64mode` controls CPU solve precision: `0` (default) automatically retains and
+`f64mode` controls solve precision: `0` (default) automatically retains and
 uses Float64 factors when the normal matrix has estimated `rcond < 1e-4`, `1`
 forces the Float32 path, and `2` forces the Float64 path. The condition estimate
-is retained in all three modes. CUDA and Vulkan reject a Float64 plan; the
-plugin-level Metal scheduler keeps its heterogeneous contract and routes such a
-plan to its CPU fallback.
+is retained in all three modes. Explicit CUDA and Vulkan execute Float64 plans
+natively or raise an error; they never fall back to CPU. The plugin-level Metal
+scheduler routes a Float64 plan to its CPU fallback.
 
 `backend` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. A normal build
 uses CPU for `auto`. Enabled builds accept `cuda` or `vulkan` on a compatible
@@ -93,6 +140,24 @@ plans are shared by filters that share a canonical Float32 plan.
 The Python wrapper is [dsmvc.py](dsmvc.py). It preserves the
 baseline RGB, YUV, GRAY, bit-depth, subsampling, `yuv444`, `gray`, and chroma
 conversion behavior while dispatching to `core.dsmvc`.
+
+## Performance snapshot
+
+Executor-only paired medians, Ryzen 9 5950X / RTX 5080, Release builds. GPU
+Float64 figures are measured against the CPU **scalar** Float64 reference; the
+AVX2 Float64 path narrows that gap, and plugin-level paired evidence against
+it is the open admission gate for automatic GPU routing.
+
+| Measurement | Result | Evidence |
+|---|---|---|
+| E2E `getfnative` scan vs original descale | **13.13x** (R1T1) / **6.45x** (R32T32) | [release benchmark](docs/release-benchmark.md) |
+| CPU Float64 AVX2 vs scalar (aggregate) | **5.07x**, up to 10.4x per case | `benchmarks/artifacts/cpu-f64-avx2/` |
+| CUDA Float64 vs CPU scalar Float64 | **1.18x–4.68x** across rows/columns/2D | `artifacts/cuda_f64/` |
+| Vulkan Float64 vs CPU scalar Float64 | **5.12x** suite median | `artifacts/vulkan_f64/` |
+| GPU Float32 regression after Float64 work | ≤ 0.6% (CUDA, executor) / 0.4% (Vulkan, plugin E2E) | same artifacts |
+
+All GPU timings were serialized under a benchmark lock with raw paired
+samples, binary SHA-256, and full command lines recorded per artifact.
 
 ## Build
 
@@ -133,6 +198,8 @@ The Release DLL is written to `build/Release/dsmvc.dll`. The build uses the
 static MSVC runtime so that an older runtime DLL bundled with a host cannot
 change the STL synchronization ABI.
 
+### CUDA
+
 The CUDA backend is optional and currently supports Windows and Linux with a
 CUDA Toolkit containing the CUDA compiler and static Runtime library.
 CUDA-enabled test builds also require `cuobjdump`:
@@ -151,45 +218,33 @@ without a native image use driver JIT compilation and may incur a first-run
 delay. The plugin statically links the official CUDA Runtime and therefore does
 not require a CUDA Runtime DLL or shared library beside it. CUDA Runtime device
 code, streams, and allocations use the device's primary context so they can
-coexist with other CUDA filters in the host process. At runtime,
-`DSMVC_CUDA_STREAMS` may be set to a
-value from 1 through 16. When unset, the runtime uses up to eight concurrent
-slots for reused-input 2D plans with half-bandwidth seven or greater, while
-narrower 2D and one-axis work remain limited to four. Float32 2D frames use a
-separate bounded pinned-staging pool: unique inputs admit two GPU executions
-and four host staging phases at once, while input-cache hits can expand to the
-full slot count. This keeps host packing and unpacking outside the lifetime of
-a GPU execution slot. Integer and one-axis paths retain slot-local staging.
-An explicit stream value applies uniformly and disables adaptive slot limits.
-Set `DSMVC_CUDA_HOST_TRANSFER=staging` to restore slot-local Float32 staging
-for comparison. The `pageable` and `registered` values select diagnostic
-direct-copy paths; per-frame driver staging or host registration made both
-slower than pinned staging on the reference system.
-`DSMVC_CUDA_INPUT_CACHE_MB` bounds the shared immutable-input cache and defaults
-to 64 MiB; set it to `0` to disable source upload and first-transpose reuse.
-Keep the cache enabled for repeated-source workloads such as GetNative scans;
-disable it for long unique-frame runs when reuse is not expected.
-`DSMVC_CUDA_PLAN_CACHE_MB` bounds the device-resident packed-plan LRU and
-defaults to 16 MiB. This deliberately small default is appropriate for
-GetNative-style height scans, where most plans are used once; increase it for a
-long-lived workload that repeatedly reuses many distinct plans.
-Use an explicit low stream count only when reducing peak device memory is more
-important than adaptive mixed-workload throughput.
-For a GetNative graph containing tens of thousands of candidate frames, also
-set a finite VapourSynth cache before constructing the graph, for example
-`core.max_cache_size = 512`. VapourSynth's default can otherwise retain several
-GiB of host frames independently of the CUDA cache limits.
-For half-bandwidth three and above, RHS evaluation is split from the recursive
-solve adaptively by default: the first execution of a packed plan stays fused,
-and later executions use the higher-throughput RHS kernel. Set
-`DSMVC_CUDA_SPLIT_RHS=0` to disable it or `force` to use it from the first
-execution. `DSMVC_CUDA_SPLIT_HORIZONTAL_THREADS` and
-`DSMVC_CUDA_SPLIT_VERTICAL_THREADS` accept power-of-two values from 16 through
-256 and default to 32. `DSMVC_CUDA_HORIZONTAL_GLOBAL_TRANSPOSE` defaults to
-`1`; the row-major `0` mode is available for experiments but is not the tested
-default.
-CUDA uses hardware fused multiply-add, so Float32 output is numerically checked
-against the scalar backend but is not promised to be bit-identical.
+coexist with other CUDA filters in the host process.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DSMVC_CUDA_STREAMS` | adaptive | Explicit slot count `1`–`16`. Unset: up to 8 concurrent slots for reused-input 2D plans with half-bandwidth ≥ 7, narrower 2D and one-axis work limited to 4. An explicit value disables adaptive limits. |
+| `DSMVC_CUDA_HOST_TRANSFER` | pinned staging pool | `staging` restores slot-local Float32 staging; `pageable`/`registered` select diagnostic direct-copy paths (both slower on the reference system). |
+| `DSMVC_CUDA_INPUT_CACHE_MB` | `64` | Bounds the shared immutable-input cache; `0` disables source upload and first-transpose reuse. Keep enabled for repeated-source workloads (GetNative scans); disable for long unique-frame runs. |
+| `DSMVC_CUDA_PLAN_CACHE_MB` | `16` | Bounds the device-resident packed-plan LRU. Deliberately small for use-once height scans; increase for long-lived many-plan workloads. |
+| `DSMVC_CUDA_SPLIT_RHS` | adaptive | Half-bandwidth ≥ 3: first execution of a packed plan stays fused, later ones use the higher-throughput split RHS kernel. `0` disables, `force` splits from the first execution. |
+| `DSMVC_CUDA_SPLIT_HORIZONTAL_THREADS` / `DSMVC_CUDA_SPLIT_VERTICAL_THREADS` | `32` | Power-of-two values `16`–`256`. |
+| `DSMVC_CUDA_HORIZONTAL_GLOBAL_TRANSPOSE` | `1` | The row-major `0` mode is available for experiments but is not the tested default. |
+
+Float32 2D frames use a separate bounded pinned-staging pool: unique inputs
+admit two GPU executions and four host staging phases at once, while
+input-cache hits can expand to the full slot count. This keeps host packing
+and unpacking outside the lifetime of a GPU execution slot. Integer and
+one-axis paths retain slot-local staging. Use an explicit low stream count
+only when reducing peak device memory is more important than adaptive
+mixed-workload throughput. For a GetNative graph containing tens of thousands
+of candidate frames, also set a finite VapourSynth cache before constructing
+the graph, for example `core.max_cache_size = 512`; VapourSynth's default can
+otherwise retain several GiB of host frames independently of the CUDA cache
+limits. CUDA uses hardware fused multiply-add, so Float32 output is
+numerically checked against the scalar backend but is not promised to be
+bit-identical.
+
+### Vulkan
 
 The Vulkan 1.2 backend is optional on Windows and Linux. A build requires the
 Vulkan SDK headers, loader, and `glslc`; test builds also require `spirv-val`:
@@ -204,22 +259,23 @@ cmake --build build-vulkan --config Release --parallel
 GLSL is compiled with `--target-env=vulkan1.2 -O`, validated in test builds,
 and embedded in the plugin. Installed packages need only the system Vulkan
 loader and a Vulkan 1.2 driver; they do not load shader sidecars or a runtime
-compiler. Devices need a compute queue and the Vulkan core compute limits. No
-FP16/FP64, subgroup, narrow storage, descriptor indexing, or synchronization2
-feature is required.
+compiler. For Float32 work, devices need only a compute queue and the Vulkan
+core compute limits — no FP16, subgroup, narrow storage, descriptor indexing,
+or synchronization2 feature is required. Explicit Float64 additionally
+requires the strict capability contract described in the support matrix, and
+F32-only devices continue to build and run normally.
 
-By default device selection scores discrete, integrated, virtual, and CPU
-devices in that order and prefers a compute-only queue. Set
-`DSMVC_VULKAN_DEVICE` to a Vulkan enumeration index or hexadecimal
-`vendor_id:device_id`; an invalid or ineligible explicit selection reports all
-detected devices and does not fall back. `DSMVC_VULKAN_SLOTS=1..16` overrides
-the adaptive four-slot default and eight-slot heavy-plan expansion.
-`DSMVC_VULKAN_PLAN_CACHE_MB` and `DSMVC_VULKAN_INPUT_CACHE_MB` default to 16
-and 64 MiB. `DSMVC_VULKAN_SPLIT_RHS=0|adaptive|force` controls fused versus
-split RHS execution. `DSMVC_VULKAN_VALIDATION=1` enables the Khronos validation
-layer when installed. `DSMVC_VULKAN_WORKGROUP=128` forces the core-limit
-fallback variants for diagnostics. Float32 results use explicit shader `fma`
-and are numerically checked, not promised to be bit-identical to CPU or CUDA.
+| Variable | Default | Meaning |
+|---|---|---|
+| `DSMVC_VULKAN_DEVICE` | scored selection | Vulkan enumeration index or hexadecimal `vendor_id:device_id`. Default scores discrete, integrated, virtual, and CPU devices in that order and prefers a compute-only queue. An invalid or ineligible explicit selection reports all detected devices and does not fall back. |
+| `DSMVC_VULKAN_SLOTS` | adaptive | `1`–`16`; unset uses a four-slot default with eight-slot heavy-plan expansion. |
+| `DSMVC_VULKAN_PLAN_CACHE_MB` / `DSMVC_VULKAN_INPUT_CACHE_MB` | `16` / `64` | Device plan LRU and immutable-input cache bounds. |
+| `DSMVC_VULKAN_SPLIT_RHS` | adaptive | `0` / `adaptive` / `force` fused versus split RHS execution. |
+| `DSMVC_VULKAN_VALIDATION` | off | `1` enables the Khronos validation layer when installed. |
+| `DSMVC_VULKAN_WORKGROUP` | — | `128` forces the core-limit fallback variants for diagnostics. |
+
+Float32 results use explicit shader `fma` and are numerically checked, not
+promised to be bit-identical to CPU or CUDA.
 
 ## Benchmark
 
