@@ -102,7 +102,8 @@ void test_concurrent_prepare(
 void test_rows(
     dsmvc::cuda_detail::CudaExecutor &cuda,
     const dsmvc::CpuExecutor &scalar,
-    const dsmvc::AxisPlan &plan) {
+    const dsmvc::AxisPlan &plan,
+    std::string_view label = "cuda-f64-rows-tail") {
     constexpr std::int32_t rows = 5;
     constexpr float padding = -29.0F;
     const auto input_stride = plan.source_size + 3;
@@ -122,7 +123,7 @@ void test_rows(
         actual.data(), output_stride, rows, {});
     require_float_agreement(
         expected, actual, rows, plan.destination_size, output_stride,
-        padding, "cuda-f64-rows-tail");
+        padding, label);
 }
 
 void test_columns(
@@ -247,6 +248,39 @@ void test_device_conformance() {
     test_concurrent_prepare(cuda, risky);
     test_rows(cuda, scalar, *risky);
     test_columns(cuda, scalar, *forced);
+
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        auto request = fixtures[index].request;
+        request.f64_mode = dsmvc::F64Mode::float64_only;
+        const auto plan = dsmvc::build_axis_plan(request);
+        require(
+            plan.requires_float64()
+                && plan.half_bandwidth
+                    == fixtures[index].expected_half_bandwidth,
+            std::string(fixtures[index].name)
+                + " forced-F64 bandwidth changed");
+        test_rows(
+            cuda, scalar, plan,
+            "cuda-f64-rows-b" + std::to_string(plan.half_bandwidth));
+    }
+
+    dsmvc::AxisRequest generic_request;
+    generic_request.source_size = 43;
+    generic_request.destination_size = 31;
+    generic_request.active_length = 30.75;
+    generic_request.shift = 0.125;
+    generic_request.kernel.kind = dsmvc::KernelKind::custom;
+    generic_request.kernel.taps = 5;
+    generic_request.border = dsmvc::BorderMode::symmetric;
+    generic_request.f64_mode = dsmvc::F64Mode::float64_only;
+    const auto generic = dsmvc::build_axis_plan(
+        generic_request, [](double x) {
+            return std::exp(-0.25 * x * x);
+        });
+    require(
+        generic.requires_float64() && generic.half_bandwidth == 9,
+        "custom forced-F64 plan did not select generic B9");
+    test_rows(cuda, scalar, generic, "cuda-f64-rows-generic-b9");
     test_2d_float(
         cuda, scalar, *safe, *risky,
         "cuda-f64-2d-safe-risk", 0xc0da6411U);
@@ -261,10 +295,14 @@ void test_device_conformance() {
         16.0F, 1.0F / 219.0F, 219.0F, 16.0F, 255U};
     const dsmvc::IntegerConversion u10_conversion{
         64.0F, 1.0F / 876.0F, 876.0F, 64.0F, 1023U};
+    const dsmvc::IntegerConversion u16_conversion{
+        0.0F, 1.0F / 65535.0F, 65535.0F, 0.0F, 65535U};
     test_2d_integer<std::uint8_t>(
         cuda, scalar, *safe, *risky, u8_conversion, "cuda-f64-u8");
     test_2d_integer<std::uint16_t>(
         cuda, scalar, *risky, *safe, u10_conversion, "cuda-f64-u10");
+    test_2d_integer<std::uint16_t>(
+        cuda, scalar, *risky, *forced, u16_conversion, "cuda-f64-u16");
 }
 
 } // namespace
