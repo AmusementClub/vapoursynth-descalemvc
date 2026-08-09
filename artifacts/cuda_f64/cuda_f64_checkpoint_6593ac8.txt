@@ -1,0 +1,68 @@
+CUDA F64 backend checkpoint
+timestamp=2026-08-09T20:18:40+08:00
+base_sha=af1d982cb400393d9ee1fbb48cb433f53814469b
+production_source_sha=6593ac8b59458177c8c42c7488aa338bf80d854a
+evidence_commit_parent=3a8d3e69cbba35e3228ab0263918dcb346f4525f
+binary=build-cuda-f64/dsmvc.so
+binary_sha256=0b2b61a879f4b09e6e1afa335fb8555a300b8de5f7e8635f71876e16736fadfc
+cuda_object=build-cuda-f64/CMakeFiles/dsmvc_engine.dir/src/cuda/dsmvc_cuda.cu.o
+cuda_object_sha256=ebef12627b1ed811ff027e2e29389d419aca6e8ac9c78a242519dc5e610b74c0
+conformance_binary=build-cuda-f64/dsmvc_cuda_f64_conformance_tests
+conformance_binary_sha256=b8a4668ebf44adb468ca8e568e716e3145b6a4f7d6734b3df9652ce088debc1e
+compiler_cxx=GNU 15.2.0
+compiler_cuda=NVIDIA CUDA 13.3 V13.3.73
+kernel=Linux 7.0.0-29-generic x86_64
+driver=unavailable in execution sandbox
+gpu=unavailable in execution sandbox
+reported_host_gpu=NVIDIA GeForce RTX 5080 16GB (user-provided, not hardware evidence)
+
+Configure command:
+cmake -S . -B build-cuda-f64 -G Ninja -DDSMVC_ENABLE_CUDA=ON -DDSMVC_ENABLE_VULKAN=OFF -DDSMVC_ENABLE_METAL=OFF -DDSMVC_VAPOURSYNTH_SDK=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+result=passed
+
+Build command:
+cmake --build build-cuda-f64 -j8
+result=passed; native SM 75/86/89/120 and PTX SM 75/120
+
+Shared test command:
+ctest --test-dir build-cuda-f64 --output-on-failure -j8
+result=3/3 passed: dsmvc_engine_tests, dsmvc_numerical_contract_tests, dsmvc_cuda_artifact_inventory
+
+Backend-local conformance compile command:
+g++ -std=c++23 -O3 -DNDEBUG -Wall -Wextra -Wpedantic -ffp-contract=off -Iinclude -Isrc -Itests tests/cuda_f64_conformance_tests.cpp -o build-cuda-f64/dsmvc_cuda_f64_conformance_tests -L/usr/local/cuda/targets/x86_64-linux/lib/stubs -L/usr/local/cuda/targets/x86_64-linux/lib build-cuda-f64/libdsmvc_engine.a /usr/local/cuda-13.3/targets/x86_64-linux/lib/libcudart_static.a /usr/lib/x86_64-linux-gnu/librt.a -ldl -lcudadevrt -lcudart_static -lrt -lpthread
+result=passed
+
+Backend-local conformance run command:
+./build-cuda-f64/dsmvc_cuda_f64_conformance_tests
+result=skipped; output="cuda_f64 conformance skipped: no CUDA device is available"
+unrun_cases=F64 rows/columns, safe-risk/risk-safe/risk-risk 2D, U8/U10 bit exact, concurrent prepare
+
+Artifact inventory command:
+src/cuda/cuda_f64_artifact_inventory.sh build-cuda-f64/dsmvc.so /usr/local/cuda/bin/cuobjdump artifacts/cuda_f64/6593ac8b59458177c8c42c7488aa338bf80d854a /usr/local/cuda/bin/nvcc 6593ac8b59458177c8c42c7488aa338bf80d854a
+result=passed
+raw_artifact_dir=artifacts/cuda_f64/6593ac8b59458177c8c42c7488aa338bf80d854a
+native_cubins=sm_75,sm_86,sm_89,sm_120
+ptx_images=sm_75,sm_120
+resource_gate=all kernels STACK:0 LOCAL:0
+f64_instruction_gate=native DFMA present and PTX div.rn.f64 present
+
+F32 control baseline command sequence:
+git archive af1d982cb400393d9ee1fbb48cb433f53814469b | tar -x -C /tmp/dsmvc-cuda-baseline.80WP7I
+cmake -S /tmp/dsmvc-cuda-baseline.80WP7I -B /tmp/dsmvc-cuda-baseline.80WP7I/build -G Ninja -DDSMVC_ENABLE_CUDA=ON -DDSMVC_ENABLE_VULKAN=OFF -DDSMVC_ENABLE_METAL=OFF -DDSMVC_VAPOURSYNTH_SDK=/home/owen/vapoursynth/lib/python3.14/site-packages/vapoursynth -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/dsmvc-cuda-baseline.80WP7I/build -j8
+/usr/local/cuda/bin/cuobjdump --dump-sass --function dsmvc_cuda_transpose_f32,dsmvc_cuda_transpose_u8,dsmvc_cuda_transpose_u16,dsmvc_cuda_rhs_horizontal,dsmvc_cuda_rhs_horizontal_column_major,dsmvc_cuda_rhs_vertical,dsmvc_cuda_inverse_horizontal,dsmvc_cuda_inverse_horizontal_column_major,dsmvc_cuda_inverse_vertical,dsmvc_cuda_solve_horizontal,dsmvc_cuda_solve_horizontal_column_major,dsmvc_cuda_solve_vertical,dsmvc_cuda_convert_u8,dsmvc_cuda_convert_u16 /tmp/dsmvc-cuda-baseline.80WP7I/build/dsmvc.so | rg 'Function :|/\* 0x[0-9a-f]{16} \*/' | sha256sum
+/usr/local/cuda/bin/cuobjdump --dump-sass --function dsmvc_cuda_transpose_f32,dsmvc_cuda_transpose_u8,dsmvc_cuda_transpose_u16,dsmvc_cuda_rhs_horizontal,dsmvc_cuda_rhs_horizontal_column_major,dsmvc_cuda_rhs_vertical,dsmvc_cuda_inverse_horizontal,dsmvc_cuda_inverse_horizontal_column_major,dsmvc_cuda_inverse_vertical,dsmvc_cuda_solve_horizontal,dsmvc_cuda_solve_horizontal_column_major,dsmvc_cuda_solve_vertical,dsmvc_cuda_convert_u8,dsmvc_cuda_convert_u16 build-cuda-f64/dsmvc.so | rg 'Function :|/\* 0x[0-9a-f]{16} \*/' | sha256sum
+baseline_f32_sass_sha256=0ee631864e779e3b8859750ac5cab2054af8aceb6e6ec0c0145872d99391d888
+candidate_f32_sass_sha256=0ee631864e779e3b8859750ac5cab2054af8aceb6e6ec0c0145872d99391d888
+result=exact match
+
+Hardware probe commands:
+nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,pstate --format=csv,noheader
+find /dev -maxdepth 2 -name 'nvidia*' -ls
+result=nvidia-smi could not communicate with driver; no NVIDIA device nodes visible
+
+Performance:
+No benchmark or GPU timing was run because the device was unavailable. There are no raw paired samples. CUDA F64 automatic routing is not admitted or requested.
+
+Integration boundary:
+src/executor.cpp still calls require_backend_float32 before every CUDA dispatch. The integrator must register tests/cuda_f64_conformance_tests.cpp and remove only CUDA's shared F64 rejection before plugin E2E correctness/performance can run. No shared file was modified in this lane.
