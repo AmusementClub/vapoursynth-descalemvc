@@ -90,6 +90,12 @@ if ! grep -q 'NoContraction' "$output/convert_f64.dis"; then
 fi
 
 {
+    echo "source_sha=$(git -C "$root" rev-parse HEAD)"
+    if git -C "$root" diff --quiet -- src/vulkan; then
+        echo "source_state=clean"
+    else
+        echo "source_state=dirty"
+    fi
     "$glslc" --version
     "$spirv_val" --version
     sha256sum \

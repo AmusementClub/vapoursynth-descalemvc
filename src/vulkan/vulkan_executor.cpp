@@ -452,6 +452,8 @@ struct DeviceInfo {
             << " device_id=0x" << device.properties.deviceID << std::dec
             << " api=" << version_string(device.properties.apiVersion)
             << " driver=" << version_string(device.properties.driverVersion)
+            << " driver_raw=0x" << std::hex
+            << device.properties.driverVersion << std::dec
             << " shaderFloat64=" << capabilities.shader_float64
             << " shaderRoundingModeRTEFloat64="
             << capabilities.rounding_mode_rte_float64
@@ -919,22 +921,19 @@ static_assert(sizeof(PushConstants) == 128U);
 
 namespace {
 
-[[nodiscard]] std::size_t packed_plan_storage_bytes(const AxisPlan &axis) {
-    std::size_t total = 0U;
-    const auto add = [&](const auto &values) {
-        using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
-        static_assert(sizeof(Value) == sizeof(std::uint32_t));
-        total = checked_add(
-            total,
-            checked_product(values.size(), sizeof(Value), "Vulkan plan field"),
-            "Vulkan packed plan");
-    };
-    add(axis.transpose_offsets);
-    add(axis.transpose_indices);
-    add(axis.transpose_weights);
-    add(axis.lower_ld);
-    add(axis.upper_l);
-    add(axis.inverse_diagonal);
+[[nodiscard]] VulkanPlanWordLayout packed_plan_layout(
+    const AxisPlan &axis, bool include_float64) {
+    return VulkanPlanWordLayout::make(
+        axis.transpose_offsets.size(), axis.transpose_indices.size(),
+        axis.transpose_weights.size(), axis.lower_ld.size(),
+        axis.inverse_diagonal.size(), axis.ldlt_bands_f64.size(),
+        axis.requires_float64(), include_float64);
+}
+
+[[nodiscard]] std::size_t packed_plan_storage_bytes(
+    const AxisPlan &axis, bool include_float64) {
+    const std::size_t total =
+        packed_plan_layout(axis, include_float64).storage_bytes();
     if (total == 0U || total > maximum_allocation_bytes) {
         throw std::length_error("Vulkan packed plan exceeds the 2 GiB guard");
     }
@@ -945,7 +944,7 @@ class PackedPlan {
 public:
     PackedPlan(std::shared_ptr<Runtime> requested_runtime,
                std::shared_ptr<const AxisPlan> requested_axis,
-               const AxisPlan *requested_identity)
+               const AxisPlan *requested_identity, bool float64)
         : runtime(std::move(requested_runtime)), axis(std::move(requested_axis)),
           identity(requested_identity ? requested_identity : axis.get()) {
         if (!axis || !axis->valid()) {
@@ -954,32 +953,74 @@ public:
         source_size = static_cast<std::uint32_t>(axis->source_size);
         destination_size = static_cast<std::uint32_t>(axis->destination_size);
         half_bandwidth = static_cast<std::uint32_t>(axis->half_bandwidth);
-        storage_bytes = packed_plan_storage_bytes(*axis);
+        retained_float64 = axis->requires_float64();
+        if (retained_float64 && !float64) {
+            throw std::logic_error(
+                "retained Float64 plan requested a Float32 Vulkan layout");
+        }
+        if (float64 && !runtime->selected.float64.strict_supported()) {
+            throw std::runtime_error(runtime->selected.float64.requirement_error());
+        }
+        const bool include_float64 = float64;
+        const auto layout = packed_plan_layout(*axis, include_float64);
+        storage_bytes = layout.storage_bytes();
         if (storage_bytes > runtime->selected.properties.limits.maxStorageBufferRange) {
             throw std::length_error(
                 "Vulkan packed plan exceeds maxStorageBufferRange");
         }
 
         std::vector<std::uint32_t> packed(storage_bytes / sizeof(std::uint32_t));
-        std::size_t cursor = 0U;
-        const auto copy = [&](const auto &values, std::uint32_t &word_offset) {
+        const auto copy_words = [&](const auto &values, std::uint32_t word_offset) {
             using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
-            word_offset = checked_u32(cursor / sizeof(std::uint32_t),
-                                      "Vulkan plan field offset");
+            static_assert(sizeof(Value) == sizeof(std::uint32_t));
             const std::size_t bytes = values.size() * sizeof(Value);
             if (bytes != 0U) {
                 std::memcpy(reinterpret_cast<std::byte *>(packed.data())
-                                + static_cast<std::ptrdiff_t>(cursor),
+                                + static_cast<std::ptrdiff_t>(word_offset * 4U),
                             values.data(), bytes);
             }
-            cursor += bytes;
         };
-        copy(axis->transpose_offsets, offsets_offset);
-        copy(axis->transpose_indices, indices_offset);
-        copy(axis->transpose_weights, weights_offset);
-        copy(axis->lower_ld, lower_offset);
-        copy(axis->upper_l, upper_offset);
-        copy(axis->inverse_diagonal, diagonal_offset);
+        const auto copy_doubles = [&](const auto &values, std::uint32_t word_offset) {
+            if ((word_offset & 1U) != 0U) {
+                throw std::logic_error("Vulkan Float64 plan field is misaligned");
+            }
+            for (std::size_t index = 0U; index < values.size(); ++index) {
+                const double value = static_cast<double>(values[index]);
+                const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
+                packed[static_cast<std::size_t>(word_offset) + index * 2U] =
+                    static_cast<std::uint32_t>(bits);
+                packed[static_cast<std::size_t>(word_offset) + index * 2U + 1U] =
+                    static_cast<std::uint32_t>(bits >> 32U);
+            }
+        };
+        offsets_offset = layout.offsets;
+        indices_offset = layout.indices;
+        weights_offset = layout.weights_f32;
+        lower_offset = layout.lower_f32;
+        upper_offset = layout.upper_f32;
+        diagonal_offset = layout.diagonal_f32;
+        copy_words(axis->transpose_offsets, offsets_offset);
+        copy_words(axis->transpose_indices, indices_offset);
+        copy_words(axis->transpose_weights, weights_offset);
+        copy_words(axis->lower_ld, lower_offset);
+        copy_words(axis->upper_l, upper_offset);
+        copy_words(axis->inverse_diagonal, diagonal_offset);
+        if (include_float64) {
+            weights_f64_offset = layout.weights_f64;
+            lower_f64_offset = layout.lower_f64;
+            upper_f64_offset = layout.upper_f64;
+            diagonal_f64_offset = layout.diagonal_f64;
+            if (retained_float64) {
+                copy_doubles(axis->transpose_weights_f64, weights_f64_offset);
+                copy_doubles(axis->ldlt_bands_f64, lower_f64_offset);
+                copy_doubles(axis->inverse_diagonal_f64, diagonal_f64_offset);
+            } else {
+                copy_doubles(axis->transpose_weights, weights_f64_offset);
+                copy_doubles(axis->lower_ld, lower_f64_offset);
+                copy_doubles(axis->upper_l, upper_f64_offset);
+                copy_doubles(axis->inverse_diagonal, diagonal_f64_offset);
+            }
+        }
 
         storage = runtime->plan_arena->allocate(storage_bytes);
         staging = Buffer(
@@ -1106,6 +1147,11 @@ public:
     std::uint32_t lower_offset = 0U;
     std::uint32_t upper_offset = 0U;
     std::uint32_t diagonal_offset = 0U;
+    std::uint32_t weights_f64_offset = 0U;
+    std::uint32_t lower_f64_offset = 0U;
+    std::uint32_t upper_f64_offset = 0U;
+    std::uint32_t diagonal_f64_offset = 0U;
+    bool retained_float64 = false;
     std::size_t storage_bytes = 0U;
     mutable std::atomic<std::uint32_t> execution_count{0U};
 
@@ -1177,29 +1223,44 @@ private:
 
 [[nodiscard]] std::shared_ptr<const PackedPlan> acquire_packed_plan(
     const std::shared_ptr<Runtime> &runtime,
-    const std::shared_ptr<const AxisPlan> &plan) {
+    const std::shared_ptr<const AxisPlan> &plan, bool float64) {
+    struct Key {
+        const AxisPlan *identity = nullptr;
+        bool float64 = false;
+
+        [[nodiscard]] bool operator==(const Key &) const noexcept = default;
+    };
+    struct KeyHash {
+        [[nodiscard]] std::size_t operator()(const Key &key) const noexcept {
+            const std::size_t pointer =
+                std::hash<const AxisPlan *>{}(key.identity);
+            return pointer ^ (key.float64
+                ? static_cast<std::size_t>(0x9e3779b97f4a7c15ULL) : 0U);
+        }
+    };
     struct Entry {
         std::shared_ptr<PackedPlanRequest> request;
-        std::list<const AxisPlan *>::iterator lru;
+        std::list<Key>::iterator lru;
         std::size_t bytes = 0U;
     };
     struct Cache {
         std::mutex mutex;
-        std::unordered_map<const AxisPlan *, Entry> entries;
-        std::list<const AxisPlan *> lru;
+        std::unordered_map<Key, Entry, KeyHash> entries;
+        std::list<Key> lru;
         std::size_t bytes = 0U;
         const std::size_t capacity = environment_megabytes(
             "DSMVC_VULKAN_PLAN_CACHE_MB", default_plan_cache_bytes);
     };
     static Cache cache;
 
-    const std::size_t bytes = packed_plan_storage_bytes(*plan);
+    const Key key{plan.get(), float64};
+    const std::size_t bytes = packed_plan_storage_bytes(*plan, float64);
     std::shared_ptr<PackedPlanRequest> request;
     std::vector<std::shared_ptr<PackedPlanRequest>> evicted;
     bool producer = false;
     {
         const std::scoped_lock lock(cache.mutex);
-        if (const auto found = cache.entries.find(plan.get());
+        if (const auto found = cache.entries.find(key);
             found != cache.entries.end()) {
             if (found->second.request->axis() == plan) {
                 cache.lru.splice(cache.lru.end(), cache.lru, found->second.lru);
@@ -1215,11 +1276,11 @@ private:
             request = std::make_shared<PackedPlanRequest>(plan);
             producer = true;
             cache.bytes = checked_add(cache.bytes, bytes, "Vulkan plan cache");
-            cache.lru.push_back(plan.get());
+            cache.lru.push_back(key);
             cache.entries.emplace(
-                plan.get(), Entry{request, std::prev(cache.lru.end()), bytes});
+                key, Entry{request, std::prev(cache.lru.end()), bytes});
             while (cache.bytes > cache.capacity && cache.entries.size() > 1U) {
-                const AxisPlan *victim_key = cache.lru.front();
+                const Key victim_key = cache.lru.front();
                 const auto victim = cache.entries.find(victim_key);
                 cache.bytes -= victim->second.bytes;
                 evicted.push_back(std::move(victim->second.request));
@@ -1231,7 +1292,7 @@ private:
     if (!producer) return request->get();
     try {
         auto packed = std::make_shared<const PackedPlan>(
-            runtime, plan, plan.get());
+            runtime, plan, plan.get(), float64);
         request->publish(packed);
         return packed;
     } catch (...) {
@@ -1240,7 +1301,7 @@ private:
         std::shared_ptr<PackedPlanRequest> removed;
         {
             const std::scoped_lock lock(cache.mutex);
-            const auto found = cache.entries.find(plan.get());
+            const auto found = cache.entries.find(key);
             if (found != cache.entries.end()
                 && found->second.request == request) {
                 cache.bytes -= found->second.bytes;
@@ -1440,6 +1501,162 @@ void record_conversion(
     const std::uint32_t words = divide_up(elements, samples_per_word);
     vkCmdDispatch(
         slot.command, divide_up(words, runtime.convert_local_size), 1U, 1U);
+}
+
+void fill_plan_push_f64(PushConstants &push, const PackedPlan &plan) noexcept {
+    push.value[0] = plan.source_size;
+    push.value[1] = plan.destination_size;
+    push.value[2] = plan.half_bandwidth;
+    push.value[9] = plan.offsets_offset;
+    push.value[10] = plan.indices_offset;
+    push.value[11] = plan.weights_f64_offset;
+    push.value[12] = plan.lower_f64_offset;
+    push.value[13] = plan.upper_f64_offset;
+    push.value[14] = plan.diagonal_f64_offset;
+    push.value[15] = plan.retained_float64 ? 1U : 0U;
+}
+
+template <class Slot>
+void record_transpose_f64(
+    Runtime &runtime, Slot &slot, const PackedPlan &descriptor_plan,
+    VkBuffer cache_buffer, VkDeviceSize cache_offset, VkDeviceSize cache_size,
+    std::uint32_t width, std::uint32_t height,
+    std::uint32_t source_offset, std::uint32_t destination_offset,
+    std::uint32_t source_buffer, std::uint32_t destination_buffer,
+    std::uint32_t sample_type, const IntegerConversion *conversion,
+    std::uint32_t status_offset) {
+    PushConstants push;
+    push.value[0] = width;
+    push.value[1] = height;
+    push.value[2] = source_offset;
+    push.value[3] = destination_offset;
+    push.value[4] = source_buffer;
+    push.value[5] = destination_buffer;
+    push.value[6] = sample_type;
+    push.value[16] = status_offset;
+    if (conversion) {
+        push.value[7] = std::bit_cast<std::uint32_t>(conversion->input_offset);
+        push.value[8] = std::bit_cast<std::uint32_t>(conversion->input_scale);
+    }
+    const VkDescriptorSet set = slot.descriptor_set(
+        descriptor_plan.buffer(), descriptor_plan.buffer_offset(),
+        descriptor_plan.buffer_size(), cache_buffer, cache_offset, cache_size);
+    bind_compute(runtime, slot, runtime.transpose_f64_pipeline, set, push);
+    vkCmdDispatch(
+        slot.command, divide_up(width, 32U), divide_up(height, 8U), 1U);
+}
+
+template <class Slot>
+void record_inverse_f64(
+    Runtime &runtime, Slot &slot, const PackedPlan &plan,
+    VkBuffer cache_buffer, VkDeviceSize cache_offset, VkDeviceSize cache_size,
+    std::uint32_t vector_count, std::uint32_t source_offset,
+    std::uint32_t output_offset, std::uint32_t source_buffer,
+    std::uint32_t source_layout, std::uint32_t output_layout,
+    bool split, std::uint32_t status_offset) {
+    PushConstants push;
+    fill_plan_push_f64(push, plan);
+    push.value[3] = vector_count;
+    push.value[4] = source_offset;
+    push.value[5] = output_offset;
+    push.value[6] = source_buffer;
+    push.value[7] = source_layout;
+    push.value[8] = output_layout;
+    push.value[16] = status_offset;
+    if (split) {
+        VkDescriptorSet rhs_set = slot.descriptor_set(
+            plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
+            cache_buffer, cache_offset, cache_size);
+        bind_compute(runtime, slot, runtime.rhs_f64_pipeline, rhs_set, push);
+        vkCmdDispatch(
+            slot.command, divide_up(vector_count, 32U),
+            divide_up(plan.destination_size, 8U), 1U);
+        command_barrier(
+            slot.command, slot.workspace.handle(),
+            static_cast<VkDeviceSize>(output_offset) * 4U,
+            static_cast<VkDeviceSize>(plan.destination_size) * vector_count * 8U,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        VkDescriptorSet solve_set = slot.descriptor_set(
+            plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
+            cache_buffer, cache_offset, cache_size);
+        bind_compute(runtime, slot, runtime.solve_f64_pipeline, solve_set, push);
+    } else {
+        VkDescriptorSet inverse_set = slot.descriptor_set(
+            plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
+            cache_buffer, cache_offset, cache_size);
+        bind_compute(
+            runtime, slot, runtime.inverse_f64_pipeline, inverse_set, push);
+    }
+    vkCmdDispatch(slot.command, divide_up(vector_count, 32U), 1U, 1U);
+}
+
+template <class Slot>
+void record_conversion_f64(
+    Runtime &runtime, Slot &slot, const PackedPlan &descriptor_plan,
+    std::uint32_t elements, std::uint32_t source_offset,
+    std::uint32_t destination_offset, std::uint32_t sample_type,
+    const IntegerConversion *conversion, std::uint32_t status_offset) {
+    PushConstants push;
+    push.value[0] = elements;
+    push.value[1] = source_offset;
+    push.value[2] = destination_offset;
+    push.value[3] = sample_type;
+    push.value[16] = status_offset;
+    if (conversion) {
+        push.value[4] = std::bit_cast<std::uint32_t>(conversion->output_scale);
+        push.value[5] = std::bit_cast<std::uint32_t>(conversion->output_offset);
+        push.value[6] = conversion->output_maximum;
+    }
+    const VkDescriptorSet set = slot.descriptor_set(
+        descriptor_plan.buffer(), descriptor_plan.buffer_offset(),
+        descriptor_plan.buffer_size(), VK_NULL_HANDLE, 0U, 0U);
+    bind_compute(runtime, slot, runtime.convert_f64_pipeline, set, push);
+    const std::uint32_t samples_per_word = sample_type == 0U ? 1U
+        : sample_type == 1U ? 4U : 2U;
+    vkCmdDispatch(
+        slot.command,
+        divide_up(divide_up(elements, samples_per_word), 256U), 1U, 1U);
+}
+
+template <class Slot>
+void clear_f64_status(Slot &slot, std::uint32_t status_offset) {
+    const VkDeviceSize byte_offset =
+        static_cast<VkDeviceSize>(status_offset) * 4U;
+    vkCmdFillBuffer(slot.command, slot.workspace.handle(), byte_offset, 4U, 0U);
+    command_barrier(
+        slot.command, slot.workspace.handle(), byte_offset, 4U,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+}
+
+template <class Slot>
+void copy_f64_status(
+    Slot &slot, std::uint32_t status_offset,
+    Buffer &staging, VkDeviceSize staging_offset) {
+    const VkDeviceSize byte_offset =
+        static_cast<VkDeviceSize>(status_offset) * 4U;
+    command_barrier(
+        slot.command, slot.workspace.handle(), byte_offset, 4U,
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT);
+    const VkBufferCopy copy{byte_offset, staging_offset, 4U};
+    vkCmdCopyBuffer(
+        slot.command, slot.workspace.handle(), staging.handle(), 1U, &copy);
+}
+
+void require_f64_status_clear(const void *address) {
+    std::uint32_t status = 0U;
+    std::memcpy(&status, address, sizeof(status));
+    if (status != 0U) {
+        throw std::runtime_error(
+            "Vulkan Float64 execution produced NaN or infinity");
+    }
 }
 
 class WorkspaceBuilder {
@@ -1682,6 +1899,8 @@ struct ExecutionSlot {
 enum class CachedInputLayout : std::uint8_t {
     row_major,
     transposed,
+    axis_f64,
+    transposed_f64,
 };
 
 enum class CachedInputSample : std::uint8_t {
@@ -2495,7 +2714,8 @@ struct VulkanExecutor::Impl {
     struct PreparedPlan {
         std::shared_ptr<const AxisPlan> axis;
         const AxisPlan *identity = nullptr;
-        std::weak_ptr<const PackedPlan> packed;
+        std::weak_ptr<const PackedPlan> packed_f32;
+        std::weak_ptr<const PackedPlan> packed_f64;
     };
 
     [[nodiscard]] auto find(const AxisPlan &plan) const {
@@ -2506,24 +2726,340 @@ struct VulkanExecutor::Impl {
     }
 
     [[nodiscard]] std::shared_ptr<const PackedPlan> get(
-        const AxisPlan &plan) const {
+        const AxisPlan &plan, bool float64 = false) const {
+        const auto get_prepared = [&](const auto &prepared) {
+            const auto &weak = float64
+                ? prepared.packed_f64 : prepared.packed_f32;
+            if (auto packed = weak.lock()) return packed;
+            return acquire_packed_plan(runtime, prepared.axis, float64);
+        };
         if (sealed.load(std::memory_order_acquire)) {
             const auto found = find(plan);
             if (found != plans.end()) {
-                if (auto packed = found->packed.lock()) return packed;
-                return acquire_packed_plan(runtime, found->axis);
+                return get_prepared(*found);
             }
         } else {
             const std::scoped_lock lock(mutex);
             const auto found = find(plan);
             if (found != plans.end()) {
-                if (auto packed = found->packed.lock()) return packed;
-                return acquire_packed_plan(runtime, found->axis);
+                return get_prepared(*found);
             }
         }
         auto owned = std::make_shared<const AxisPlan>(plan);
         return std::make_shared<const PackedPlan>(
-            runtime, std::move(owned), &plan);
+            runtime, std::move(owned), &plan, float64);
+    }
+
+    template <class Sample>
+    void execute_2d_f64(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const Sample *input, std::ptrdiff_t input_row_stride,
+        Sample *output, std::ptrdiff_t output_row_stride,
+        const IntegerConversion *conversion,
+        std::shared_ptr<const void> input_lifetime) const {
+        if (!runtime->selected.float64.strict_supported()) {
+            throw std::runtime_error(
+                runtime->selected.float64.requirement_error());
+        }
+        const auto packed_horizontal = get(horizontal, true);
+        const auto packed_vertical = get(vertical, true);
+        const auto source_width = static_cast<std::uint32_t>(
+            horizontal.source_size);
+        const auto source_height = static_cast<std::uint32_t>(
+            vertical.source_size);
+        const auto destination_width = static_cast<std::uint32_t>(
+            horizontal.destination_size);
+        const auto destination_height = static_cast<std::uint32_t>(
+            vertical.destination_size);
+        const std::size_t source_elements = checked_product(
+            source_width, source_height, "Vulkan Float64 source image");
+        const std::size_t intermediate_elements = checked_product(
+            destination_width, source_height,
+            "Vulkan Float64 intermediate image");
+        const std::size_t destination_elements = checked_product(
+            destination_width, destination_height,
+            "Vulkan Float64 destination image");
+        const std::size_t source_bytes = checked_product(
+            source_elements, sizeof(Sample), "Vulkan Float64 source image");
+        const std::size_t source_copy_bytes = align_up(
+            source_bytes, 4U, "Vulkan Float64 packed source copy");
+        const std::size_t transposed_bytes = checked_product(
+            source_elements, sizeof(double), "Vulkan Float64 transposed image");
+        const std::size_t intermediate_bytes = checked_product(
+            intermediate_elements, sizeof(double),
+            "Vulkan Float64 intermediate image");
+        const std::size_t destination_bytes = checked_product(
+            destination_elements, sizeof(double),
+            "Vulkan Float64 destination image");
+        const std::size_t result_bytes = checked_product(
+            destination_elements, sizeof(Sample), "Vulkan Float64 result image");
+        const std::size_t result_copy_bytes = align_up(
+            result_bytes, 4U, "Vulkan Float64 packed result copy");
+        const std::size_t source_row_bytes = checked_product(
+            source_width, sizeof(Sample), "Vulkan Float64 source row");
+        const std::size_t source_pitch = checked_product(
+            static_cast<std::size_t>(input_row_stride), sizeof(Sample),
+            "Vulkan Float64 source pitch");
+        const std::size_t result_row_bytes = checked_product(
+            destination_width, sizeof(Sample), "Vulkan Float64 result row");
+        const std::size_t result_pitch = checked_product(
+            static_cast<std::size_t>(output_row_stride), sizeof(Sample),
+            "Vulkan Float64 result pitch");
+
+        const bool cache_requested =
+            input_lifetime && runtime->input_cache->enabled();
+        std::shared_ptr<CachedInput> cached_input;
+        std::optional<InputCacheKey> cache_key;
+        bool cache_producer = false;
+        if (cache_requested) {
+            cache_key = make_input_cache_key(
+                input, input_row_stride, source_width, source_height,
+                CachedInputLayout::transposed_f64, conversion);
+            auto acquired = runtime->input_cache->acquire(
+                *cache_key, transposed_bytes, std::move(input_lifetime));
+            cached_input = std::move(acquired.input);
+            cache_producer = acquired.producer;
+        }
+        const bool reused_input = cached_input && !cache_producer;
+        const std::uint64_t input_wait_value = reused_input
+            ? cached_input->wait_value() : 0U;
+
+        WorkspaceBuilder builder;
+        const std::uint32_t source_offset = builder.add_bytes(
+            std::max(source_copy_bytes, intermediate_bytes));
+        const std::uint32_t transposed_offset =
+            builder.add_bytes(transposed_bytes);
+        const std::uint32_t intermediate_offset =
+            builder.add_bytes(intermediate_bytes);
+        const std::uint32_t destination_offset =
+            builder.add_bytes(destination_bytes);
+        const std::uint32_t result_offset =
+            builder.add_bytes(result_copy_bytes);
+        const std::uint32_t status_offset = builder.add_bytes(4U);
+        const std::size_t download_offset = source_copy_bytes;
+        const std::size_t status_download_offset = align_up(
+            checked_add(download_offset, result_copy_bytes,
+                        "Vulkan Float64 status download"),
+            4U, "Vulkan Float64 status download");
+        const std::size_t staging_bytes = checked_add(
+            status_download_offset, 4U, "Vulkan Float64 staging buffer");
+        if (builder.size() > maximum_allocation_bytes
+            || staging_bytes > maximum_allocation_bytes) {
+            throw std::length_error(
+                "Vulkan Float64 execution exceeds the 2 GiB guard");
+        }
+
+        const bool host_limited =
+            std::is_same_v<Sample, float> && !reused_input;
+        const bool heavy = !host_limited
+            && std::max(horizontal.half_bandwidth, vertical.half_bandwidth) >= 7;
+        std::optional<StagingPool::Allocation> decoupled_staging;
+        if constexpr (std::is_same_v<Sample, float>) {
+            decoupled_staging.emplace(
+                runtime->staging_pool->acquire(host_limited));
+            decoupled_staging->reserve(staging_bytes);
+        }
+        const std::size_t slot_index =
+            runtime->acquire_slot(heavy, host_limited);
+        SlotRelease slot_release(*runtime, slot_index, heavy);
+        ExecutionSlot &slot = *runtime->slots[slot_index];
+        slot.reserve(builder.size(), decoupled_staging ? 4U : staging_bytes);
+        Buffer &staging = decoupled_staging
+            ? decoupled_staging->buffer() : slot.staging;
+
+        if (!reused_input) {
+            std::memset(staging.mapped(), 0, source_copy_bytes);
+            pack_host_rows(
+                input, source_pitch, staging.mapped(),
+                source_row_bytes, source_height);
+            staging.flush(0U, source_copy_bytes);
+        }
+
+        bool submitted = false;
+        bool cache_published = false;
+        try {
+            slot.begin();
+            runtime->begin_label(slot.command, "dsmvc Float64 2D inverse");
+            clear_f64_status(slot, status_offset);
+            if (!reused_input) {
+                runtime->begin_label(
+                    slot.command, "Float64 input transpose");
+                const VkBufferCopy source_copy{
+                    0U,
+                    static_cast<VkDeviceSize>(source_offset) * 4U,
+                    source_copy_bytes,
+                };
+                vkCmdCopyBuffer(
+                    slot.command, staging.handle(), slot.workspace.handle(),
+                    1U, &source_copy);
+                command_barrier(
+                    slot.command, slot.workspace.handle(), source_copy.dstOffset,
+                    source_copy.size, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                const std::uint32_t sample_type =
+                    std::is_same_v<Sample, float> ? 0U
+                    : std::is_same_v<Sample, std::uint8_t> ? 1U : 2U;
+                record_transpose_f64(
+                    *runtime, slot, *packed_horizontal,
+                    cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                    cached_input ? cached_input->offset() : 0U,
+                    cached_input ? cached_input->size() : 0U,
+                    source_width, source_height, source_offset,
+                    cached_input ? 0U : transposed_offset,
+                    0U, cached_input ? 1U : 0U, sample_type, conversion,
+                    status_offset);
+                if (cached_input) {
+                    command_barrier(
+                        slot.command, cached_input->buffer(),
+                        cached_input->offset(), cached_input->size(),
+                        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                } else {
+                    command_barrier(
+                        slot.command, slot.workspace.handle(),
+                        static_cast<VkDeviceSize>(transposed_offset) * 4U,
+                        transposed_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                }
+                runtime->end_label(slot.command);
+            }
+
+            runtime->begin_label(
+                slot.command, "Float64 horizontal inverse");
+            record_inverse_f64(
+                *runtime, slot, *packed_horizontal,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                source_height, cached_input ? 0U : transposed_offset,
+                source_offset, cached_input ? 1U : 0U, 0U, 0U,
+                should_split_rhs(*runtime, *packed_horizontal), status_offset);
+            command_barrier(
+                slot.command, slot.workspace.handle(),
+                static_cast<VkDeviceSize>(source_offset) * 4U,
+                intermediate_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            runtime->end_label(slot.command);
+
+            runtime->begin_label(
+                slot.command, "Float64 intermediate transpose");
+            record_transpose_f64(
+                *runtime, slot, *packed_horizontal,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                source_height, destination_width, source_offset,
+                intermediate_offset, 0U, 0U, 3U, nullptr, status_offset);
+            command_barrier(
+                slot.command, slot.workspace.handle(),
+                static_cast<VkDeviceSize>(intermediate_offset) * 4U,
+                intermediate_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            runtime->end_label(slot.command);
+
+            runtime->begin_label(
+                slot.command, "Float64 vertical inverse");
+            record_inverse_f64(
+                *runtime, slot, *packed_vertical,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                destination_width, intermediate_offset, destination_offset,
+                0U, 0U, 0U, should_split_rhs(*runtime, *packed_vertical),
+                status_offset);
+            command_barrier(
+                slot.command, slot.workspace.handle(),
+                static_cast<VkDeviceSize>(destination_offset) * 4U,
+                destination_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            runtime->end_label(slot.command);
+
+            runtime->begin_label(
+                slot.command, "Float64 final conversion");
+            const std::uint32_t result_type =
+                std::is_same_v<Sample, float> ? 0U
+                : std::is_same_v<Sample, std::uint8_t> ? 1U : 2U;
+            record_conversion_f64(
+                *runtime, slot, *packed_vertical,
+                checked_u32(destination_elements,
+                            "Vulkan Float64 destination element count"),
+                destination_offset, result_offset, result_type, conversion,
+                status_offset);
+            command_barrier(
+                slot.command, slot.workspace.handle(),
+                static_cast<VkDeviceSize>(result_offset) * 4U,
+                result_copy_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+            const VkBufferCopy result_copy{
+                static_cast<VkDeviceSize>(result_offset) * 4U,
+                download_offset,
+                result_copy_bytes,
+            };
+            vkCmdCopyBuffer(
+                slot.command, slot.workspace.handle(), staging.handle(),
+                1U, &result_copy);
+            copy_f64_status(
+                slot, status_offset, staging, status_download_offset);
+            command_barrier(
+                slot.command, staging.handle(), download_offset,
+                staging_bytes - download_offset, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT);
+            runtime->end_label(slot.command);
+            runtime->end_label(slot.command);
+            runtime->check(vkEndCommandBuffer(slot.command),
+                           "vkEndCommandBuffer(Float64 2D inverse)");
+
+            std::uint64_t wait_value = std::max(
+                packed_horizontal->wait_value(), packed_vertical->wait_value());
+            wait_value = std::max(wait_value, input_wait_value);
+            const std::uint64_t signal_value = runtime->submit(
+                slot.command, slot.fence, wait_value,
+                cache_producer && runtime->timeline_enabled);
+            submitted = true;
+            if (cache_producer && runtime->timeline_enabled) {
+                cached_input->publish(signal_value);
+                cache_published = true;
+            }
+            runtime->wait_fence(slot.fence, "Vulkan Float64 2D execution");
+            if (cache_producer && !cache_published) {
+                cached_input->publish(0U);
+                cache_published = true;
+            }
+            packed_horizontal->mark_upload_complete();
+            packed_vertical->mark_upload_complete();
+        } catch (...) {
+            const auto error = std::current_exception();
+            if (!submitted) slot.recover_unsubmitted();
+            if (cache_producer && !cache_published) {
+                cached_input->fail(error);
+                runtime->input_cache->erase(*cache_key, cached_input);
+            }
+            std::rethrow_exception(error);
+        }
+
+        if (decoupled_staging) slot_release.release_now();
+        staging.invalidate(
+            download_offset, staging_bytes - download_offset);
+        require_f64_status_clear(
+            static_cast<const std::byte *>(staging.mapped())
+                + static_cast<std::ptrdiff_t>(status_download_offset));
+        unpack_host_rows(
+            static_cast<const std::byte *>(staging.mapped())
+                + static_cast<std::ptrdiff_t>(download_offset),
+            result_row_bytes, output, result_pitch, destination_height);
     }
 
     template <class Sample>
@@ -2533,6 +3069,13 @@ struct VulkanExecutor::Impl {
         Sample *output, std::ptrdiff_t output_row_stride,
         const IntegerConversion *conversion,
         std::shared_ptr<const void> input_lifetime) const {
+        if (horizontal.requires_float64() || vertical.requires_float64()) {
+            execute_2d_f64(
+                horizontal, vertical, input, input_row_stride,
+                output, output_row_stride, conversion,
+                std::move(input_lifetime));
+            return;
+        }
         const auto packed_horizontal = get(horizontal);
         const auto packed_vertical = get(vertical);
         const auto source_width = static_cast<std::uint32_t>(horizontal.source_size);
@@ -2810,17 +3353,236 @@ struct VulkanExecutor::Impl {
         std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
         bool rows, std::shared_ptr<const void> input_lifetime) const;
 
+    void execute_one_dimensional_f64(
+        const AxisPlan &plan, const float *input,
+        std::ptrdiff_t input_row_stride, float *output,
+        std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
+        bool rows, std::shared_ptr<const void> input_lifetime) const;
+
     std::shared_ptr<Runtime> runtime;
     mutable std::mutex mutex;
     std::vector<PreparedPlan> plans;
     std::atomic<bool> sealed{false};
 };
 
+void VulkanExecutor::Impl::execute_one_dimensional_f64(
+    const AxisPlan &plan, const float *input,
+    std::ptrdiff_t input_row_stride, float *output,
+    std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
+    bool rows, std::shared_ptr<const void> input_lifetime) const {
+    if (!runtime->selected.float64.strict_supported()) {
+        throw std::runtime_error(runtime->selected.float64.requirement_error());
+    }
+    const auto packed = get(plan, true);
+    const std::uint32_t input_width = rows
+        ? static_cast<std::uint32_t>(plan.source_size) : vector_count;
+    const std::uint32_t input_rows = rows
+        ? vector_count : static_cast<std::uint32_t>(plan.source_size);
+    const std::uint32_t output_width = rows
+        ? static_cast<std::uint32_t>(plan.destination_size) : vector_count;
+    const std::uint32_t output_rows = rows
+        ? vector_count : static_cast<std::uint32_t>(plan.destination_size);
+    const std::size_t input_elements = checked_product(
+        plan.source_size, vector_count, "Vulkan Float64 1D source");
+    const std::size_t output_elements = checked_product(
+        plan.destination_size, vector_count, "Vulkan Float64 1D output");
+    const std::size_t input_bytes = checked_product(
+        input_elements, sizeof(float), "Vulkan Float64 1D source");
+    const std::size_t source_f64_bytes = checked_product(
+        input_elements, sizeof(double), "Vulkan Float64 1D promoted source");
+    const std::size_t output_f64_bytes = checked_product(
+        output_elements, sizeof(double), "Vulkan Float64 1D output");
+    const std::size_t result_bytes = checked_product(
+        output_elements, sizeof(float), "Vulkan Float64 1D result");
+    const std::size_t input_row_bytes = checked_product(
+        input_width, sizeof(float), "Vulkan Float64 1D source row");
+    const std::size_t input_pitch = checked_product(
+        static_cast<std::size_t>(input_row_stride), sizeof(float),
+        "Vulkan Float64 1D source pitch");
+    const std::size_t output_row_bytes = checked_product(
+        output_width, sizeof(float), "Vulkan Float64 1D output row");
+    const std::size_t output_pitch = checked_product(
+        static_cast<std::size_t>(output_row_stride), sizeof(float),
+        "Vulkan Float64 1D output pitch");
+
+    const bool cache_requested = input_lifetime && runtime->input_cache->enabled();
+    std::shared_ptr<CachedInput> cached_input;
+    std::optional<InputCacheKey> cache_key;
+    bool cache_producer = false;
+    if (cache_requested) {
+        cache_key = make_input_cache_key(
+            input, input_row_stride, input_width, input_rows,
+            CachedInputLayout::axis_f64);
+        auto acquired = runtime->input_cache->acquire(
+            *cache_key, source_f64_bytes, std::move(input_lifetime));
+        cached_input = std::move(acquired.input);
+        cache_producer = acquired.producer;
+    }
+    const bool reused_input = cached_input && !cache_producer;
+    const std::uint64_t input_wait_value = reused_input
+        ? cached_input->wait_value() : 0U;
+
+    WorkspaceBuilder builder;
+    const std::uint32_t source_offset = builder.add_bytes(input_bytes);
+    const std::uint32_t source_f64_offset = builder.add_bytes(source_f64_bytes);
+    const std::uint32_t output_f64_offset = builder.add_bytes(output_f64_bytes);
+    const std::uint32_t result_offset = builder.add_bytes(result_bytes);
+    const std::uint32_t status_offset = builder.add_bytes(4U);
+    const std::size_t download_offset = input_bytes;
+    const std::size_t status_download_offset = align_up(
+        checked_add(download_offset, result_bytes,
+                    "Vulkan Float64 1D status download"),
+        4U, "Vulkan Float64 1D status download");
+    const std::size_t staging_bytes = checked_add(
+        status_download_offset, 4U, "Vulkan Float64 1D staging");
+    const std::size_t slot_index = runtime->acquire_slot(false, false);
+    SlotRelease release(*runtime, slot_index, false);
+    ExecutionSlot &slot = *runtime->slots[slot_index];
+    slot.reserve(builder.size(), staging_bytes);
+    if (!reused_input) {
+        pack_host_rows(
+            input, input_pitch, slot.staging.mapped(),
+            input_row_bytes, input_rows);
+        slot.staging.flush(0U, input_bytes);
+    }
+
+    bool submitted = false;
+    bool cache_published = false;
+    try {
+        slot.begin();
+        runtime->begin_label(slot.command, rows
+            ? "dsmvc Float64 row inverse" : "dsmvc Float64 column inverse");
+        clear_f64_status(slot, status_offset);
+        if (!reused_input) {
+            const VkBufferCopy source_copy{
+                0U,
+                static_cast<VkDeviceSize>(source_offset) * 4U,
+                input_bytes,
+            };
+            vkCmdCopyBuffer(
+                slot.command, slot.staging.handle(), slot.workspace.handle(),
+                1U, &source_copy);
+            command_barrier(
+                slot.command, slot.workspace.handle(), source_copy.dstOffset,
+                source_copy.size, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            record_transpose_f64(
+                *runtime, slot, *packed,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                input_width, input_rows, source_offset,
+                cached_input ? 0U : source_f64_offset,
+                0U, cached_input ? 1U : 0U, 0U, nullptr, status_offset);
+            if (cached_input) {
+                command_barrier(
+                    slot.command, cached_input->buffer(),
+                    cached_input->offset(), cached_input->size(),
+                    VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            } else {
+                command_barrier(
+                    slot.command, slot.workspace.handle(),
+                    static_cast<VkDeviceSize>(source_f64_offset) * 4U,
+                    source_f64_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
+        }
+
+        record_inverse_f64(
+            *runtime, slot, *packed,
+            cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+            cached_input ? cached_input->offset() : 0U,
+            cached_input ? cached_input->size() : 0U,
+            vector_count, cached_input ? 0U : source_f64_offset,
+            output_f64_offset, cached_input ? 1U : 0U,
+            rows ? 0U : 1U, rows ? 1U : 0U,
+            should_split_rhs(*runtime, *packed), status_offset);
+        command_barrier(
+            slot.command, slot.workspace.handle(),
+            static_cast<VkDeviceSize>(output_f64_offset) * 4U,
+            output_f64_bytes, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        record_conversion_f64(
+            *runtime, slot, *packed,
+            checked_u32(output_elements, "Vulkan Float64 1D output count"),
+            output_f64_offset, result_offset, 0U, nullptr, status_offset);
+        command_barrier(
+            slot.command, slot.workspace.handle(),
+            static_cast<VkDeviceSize>(result_offset) * 4U, result_bytes,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+        const VkBufferCopy result_copy{
+            static_cast<VkDeviceSize>(result_offset) * 4U,
+            download_offset,
+            result_bytes,
+        };
+        vkCmdCopyBuffer(
+            slot.command, slot.workspace.handle(), slot.staging.handle(),
+            1U, &result_copy);
+        copy_f64_status(
+            slot, status_offset, slot.staging, status_download_offset);
+        command_barrier(
+            slot.command, slot.staging.handle(), download_offset,
+            staging_bytes - download_offset, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT);
+        runtime->end_label(slot.command);
+        runtime->check(vkEndCommandBuffer(slot.command),
+                       "vkEndCommandBuffer(Float64 1D inverse)");
+        const std::uint64_t wait_value = std::max(
+            packed->wait_value(), input_wait_value);
+        const std::uint64_t signal_value = runtime->submit(
+            slot.command, slot.fence, wait_value,
+            cache_producer && runtime->timeline_enabled);
+        submitted = true;
+        if (cache_producer && runtime->timeline_enabled) {
+            cached_input->publish(signal_value);
+            cache_published = true;
+        }
+        runtime->wait_fence(slot.fence, "Vulkan Float64 1D execution");
+        if (cache_producer && !cache_published) {
+            cached_input->publish(0U);
+            cache_published = true;
+        }
+        packed->mark_upload_complete();
+    } catch (...) {
+        const auto error = std::current_exception();
+        if (!submitted) slot.recover_unsubmitted();
+        if (cache_producer && !cache_published) {
+            cached_input->fail(error);
+            runtime->input_cache->erase(*cache_key, cached_input);
+        }
+        std::rethrow_exception(error);
+    }
+    slot.staging.invalidate(download_offset, staging_bytes - download_offset);
+    require_f64_status_clear(
+        static_cast<const std::byte *>(slot.staging.mapped())
+            + static_cast<std::ptrdiff_t>(status_download_offset));
+    unpack_host_rows(
+        static_cast<const std::byte *>(slot.staging.mapped())
+            + static_cast<std::ptrdiff_t>(download_offset),
+        output_row_bytes, output, output_pitch, output_rows);
+}
+
 void VulkanExecutor::Impl::execute_one_dimensional(
     const AxisPlan &plan, const float *input,
     std::ptrdiff_t input_row_stride, float *output,
     std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
     bool rows, std::shared_ptr<const void> input_lifetime) const {
+    if (plan.requires_float64()) {
+        execute_one_dimensional_f64(
+            plan, input, input_row_stride, output, output_row_stride,
+            vector_count, rows, std::move(input_lifetime));
+        return;
+    }
     const auto packed = get(plan);
     const std::uint32_t input_width = rows
         ? static_cast<std::uint32_t>(plan.source_size) : vector_count;
@@ -3012,8 +3774,17 @@ void VulkanExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
         throw std::logic_error("cannot add an axis to a sealed Vulkan plan cache");
     }
     if (impl_->find(*plan) == impl_->plans.end()) {
-        auto packed = acquire_packed_plan(impl_->runtime, plan);
-        impl_->plans.push_back({std::move(plan), packed->identity, packed});
+        const bool float64 = plan->requires_float64();
+        auto packed = acquire_packed_plan(impl_->runtime, plan, float64);
+        VulkanExecutor::Impl::PreparedPlan prepared;
+        prepared.axis = std::move(plan);
+        prepared.identity = packed->identity;
+        if (float64) {
+            prepared.packed_f64 = packed;
+        } else {
+            prepared.packed_f32 = packed;
+        }
+        impl_->plans.push_back(std::move(prepared));
     }
 }
 

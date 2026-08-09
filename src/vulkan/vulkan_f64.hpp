@@ -107,4 +107,59 @@ private:
     std::size_t words_ = 0U;
 };
 
+struct VulkanPlanWordLayout {
+    std::uint32_t offsets = 0U;
+    std::uint32_t indices = 0U;
+    std::uint32_t weights_f32 = 0U;
+    std::uint32_t lower_f32 = 0U;
+    std::uint32_t upper_f32 = 0U;
+    std::uint32_t diagonal_f32 = 0U;
+    std::uint32_t weights_f64 = 0U;
+    std::uint32_t lower_f64 = 0U;
+    std::uint32_t upper_f64 = 0U;
+    std::uint32_t diagonal_f64 = 0U;
+    std::uint32_t storage_words = 0U;
+
+    [[nodiscard]] static VulkanPlanWordLayout make(
+        std::size_t offset_count, std::size_t index_count,
+        std::size_t weight_count, std::size_t factor_count,
+        std::size_t diagonal_count, std::size_t raw_factor_count,
+        bool retained_float64, bool include_float64) {
+        VulkanF64WordLayout builder;
+        VulkanPlanWordLayout result;
+        result.offsets = builder.add_words(offset_count, "transpose offsets");
+        result.indices = builder.add_words(index_count, "transpose indices");
+        result.weights_f32 = builder.add_words(weight_count, "Float32 weights");
+        result.lower_f32 = builder.add_words(factor_count, "Float32 lower factors");
+        result.upper_f32 = builder.add_words(factor_count, "Float32 upper factors");
+        result.diagonal_f32 = builder.add_words(
+            diagonal_count, "Float32 inverse diagonal");
+        if (include_float64) {
+            result.weights_f64 = builder.add_doubles(
+                weight_count, "Float64 weights");
+            result.lower_f64 = builder.add_doubles(
+                retained_float64 ? raw_factor_count : factor_count,
+                "Float64 lower factors");
+            if (retained_float64) {
+                result.upper_f64 = result.lower_f64;
+            } else {
+                result.upper_f64 = builder.add_doubles(
+                    factor_count, "Float64 upper factors");
+            }
+            result.diagonal_f64 = builder.add_doubles(
+                diagonal_count, "Float64 inverse diagonal");
+        }
+        if (builder.words() > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::length_error(
+                "Vulkan plan layout exceeds Vulkan shader ABI limits");
+        }
+        result.storage_words = static_cast<std::uint32_t>(builder.words());
+        return result;
+    }
+
+    [[nodiscard]] std::size_t storage_bytes() const noexcept {
+        return static_cast<std::size_t>(storage_words) * sizeof(std::uint32_t);
+    }
+};
+
 } // namespace dsmvc::vulkan_detail

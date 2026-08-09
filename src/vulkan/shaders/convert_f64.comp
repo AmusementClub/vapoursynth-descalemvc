@@ -25,13 +25,17 @@ double source_value(uint index) {
 uint converted_integer(uint index) {
     if (index >= pc.value[0]) return 0U;
     precise double sample_value = source_value(index);
-    sample_value = sample_value * double(uintBitsToFloat(pc.value[4]))
-        + double(uintBitsToFloat(pc.value[5]));
-    sample_value = clamp(sample_value, 0.0LF, double(pc.value[6]));
     if (isnan(sample_value) || isinf(sample_value)) {
         atomicOr(workspace_data[pc.value[16]], 1U);
         return 0U;
     }
+    sample_value = sample_value * double(uintBitsToFloat(pc.value[4]))
+        + double(uintBitsToFloat(pc.value[5]));
+    if (isnan(sample_value) || isinf(sample_value)) {
+        atomicOr(workspace_data[pc.value[16]], 1U);
+        return 0U;
+    }
+    sample_value = clamp(sample_value, 0.0LF, double(pc.value[6]));
     return uint(roundEven(sample_value));
 }
 
@@ -40,11 +44,12 @@ void main() {
     if (pc.value[3] == 0U) {
         if (word >= pc.value[0]) return;
         const double sample_value = source_value(word);
-        if (isnan(sample_value) || isinf(sample_value)) {
+        const float converted = float(sample_value);
+        if (isnan(sample_value) || isinf(sample_value)
+            || isnan(converted) || isinf(converted)) {
             atomicOr(workspace_data[pc.value[16]], 1U);
         }
-        workspace_data[pc.value[2] + word] =
-            floatBitsToUint(float(sample_value));
+        workspace_data[pc.value[2] + word] = floatBitsToUint(converted);
     } else if (pc.value[3] == 1U) {
         const uint base = word * 4U;
         if (base >= pc.value[0]) return;
