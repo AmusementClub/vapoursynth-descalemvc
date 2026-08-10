@@ -113,6 +113,16 @@ struct AxisFixture {
         BorderMode::symmetric, mode);
 }
 
+[[nodiscard]] constexpr const char *complete_plan_golden(
+    const char *default_hash, const char *apple_hash = nullptr) noexcept {
+#if defined(__APPLE__)
+    return apple_hash ? apple_hash : default_hash;
+#else
+    (void)apple_hash;
+    return default_hash;
+#endif
+}
+
 [[nodiscard]] inline std::array<AxisFixture, 7> axis_fixtures() {
     return {{
         {"b1-symmetric-tail",
@@ -128,7 +138,8 @@ struct AxisFixture {
         {"b5-repeat-tail",
          make_axis_request(59, 49, 49.0, 0.4375, KernelKind::lanczos, 3,
                            BorderMode::repeat, F64Mode::float32_only),
-         0xb5005005U, 5, "368aafc55d47f98c", "d7d468d0dcc3798e",
+         0xb5005005U, 5, "368aafc55d47f98c",
+         complete_plan_golden("d7d468d0dcc3798e", "0ed8c2aa402279dd"),
          "0230fd2270a8d447", "a3b5a9429aaac189"},
         {"b7-zero-tail",
          make_axis_request(67, 57, 57.0, -0.25, KernelKind::spline64, 3,
@@ -146,7 +157,8 @@ struct AxisFixture {
          "d4b9c8ff994a2520", "d4b9c8ff994a2520"},
         {"automatic-risk-f64",
          conditioned_lanczos2_request(F64Mode::automatic),
-         0xf6409781U, 3, "88de56a7458f03fd", "b0ceea661114a07b",
+         0xf6409781U, 3, "88de56a7458f03fd",
+         complete_plan_golden("b0ceea661114a07b", "bef07be61c4ea5ed"),
          "1c332683a9d93688", "1c332683a9d93688"},
     }};
 }

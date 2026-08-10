@@ -272,7 +272,7 @@ if(DSMVC_CAN_BUILD_AVX2)
     target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_AVX2_OBJECT=1)
     if(MSVC)
         set_source_files_properties(src/cpu_executor_avx2.cpp PROPERTIES
-            COMPILE_OPTIONS "/arch:AVX2;/Ob3;/fp:fast")
+            COMPILE_OPTIONS "/arch:AVX2;/Ob3;/fp:strict")
     else()
         set_source_files_properties(src/cpu_executor_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
     endif()
