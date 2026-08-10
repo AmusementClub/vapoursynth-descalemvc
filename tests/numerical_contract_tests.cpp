@@ -124,6 +124,7 @@ void check_retained_normal_matrix(
 
 void test_axis_fixture_goldens(bool emit_goldens) {
     std::size_t fixture_index = 0U;
+    std::string complete_plan_drifts;
     for (const AxisFixture &fixture : dsmvc::numerical::axis_fixtures()) {
         const auto result = evaluate_fixture(fixture);
         if (fixture_index < 4U) {
@@ -157,10 +158,17 @@ void test_axis_fixture_goldens(bool emit_goldens) {
                     std::string(fixture.name)
                         + " immutable F32 plan hash drifted: "
                         + result.f32_plan_hash);
-            require(result.complete_plan_hash == fixture.complete_plan_hash,
-                    std::string(fixture.name)
-                        + " complete plan hash drifted: "
-                        + result.complete_plan_hash);
+            if (result.complete_plan_hash != fixture.complete_plan_hash) {
+                if (complete_plan_drifts.empty()) {
+                    complete_plan_drifts = "complete plan hashes drifted:";
+                }
+                complete_plan_drifts += "\n  ";
+                complete_plan_drifts += fixture.name;
+                complete_plan_drifts += " expected=";
+                complete_plan_drifts += fixture.complete_plan_hash;
+                complete_plan_drifts += " actual=";
+                complete_plan_drifts += result.complete_plan_hash;
+            }
             require(result.ordered_hash == fixture.ordered_output_hash,
                     std::string(fixture.name) + " ordered oracle hash drifted: "
                         + result.ordered_hash);
@@ -182,6 +190,7 @@ void test_axis_fixture_goldens(bool emit_goldens) {
         }
         ++fixture_index;
     }
+    require(complete_plan_drifts.empty(), std::move(complete_plan_drifts));
 }
 
 void test_cache_accounting() {
