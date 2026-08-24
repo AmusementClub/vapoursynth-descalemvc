@@ -21,7 +21,7 @@ GPU columns measure the current plugin with an explicitly forced backend (`backe
 ## Test System and Run Configuration
 
 | Item | Configuration |
-|---|--- |
+|---|---|
 | CPU | `AMD Ryzen 9 5950X 16-Core Processor (16C/32T)` |
 | OS | `Linux-7.0.0-30-generic-x86_64-with-glibc2.43` |
 | Memory | `32 GiB` DDR4@3600Mhz |
@@ -38,7 +38,7 @@ GPU columns measure the current plugin with an explicitly forced backend (`backe
 The measured graph starts with `source -> ShufflePlanes(plane=0, GRAY) -> resize.Point(format=GRAYS)`. For each candidate it calls the reference namespace (`core.descale` — IEW or JET build) or the current namespace (`core.dsmvc`) through `Debilinear`, `Debicubic`, `Delanczos`, `Despline16`, or `Despline36`, reconstructs with the matching `core.resize.*` kernel, then applies `std.Expr`, a 5-pixel border crop, and `PlaneStats`.
 
 | Case | Scenario | Reference call shape | Measured candidate space |
-|---|---|---|--- |
+|---|---|---|---|
 | `getfnative` | Full non-vertical GetNative candidate scan | `muf.getnative(src, rescaler, src_heights=arange(700, 980, 0.1), base_height=1000)` | frame 12493; 11 scalers x 2,800 heights = 30,800 candidates |
 | `getfnative_v2` | Vertical-only GetNative candidate scan | `muf.getnative(src, rescaler, src_heights=arange(840, 880, 0.1), base_height=1000, vertical_only=True)` | frame 358; 8 scalers x 400 heights = 3,200 candidates |
 | `selectkernel` | Kernel-parameter selection at a fixed height | `muf.getnative(src, src_heights=719.8, base_height=1000, ex_thr=0.012, rescalers=...)` | frame 1111; bilinear + 10x10 Bicubic b/c grid = 101 candidates |
@@ -63,6 +63,8 @@ the Vulkan performance cells changed; CPU, CUDA, reference-plugin, correctness,
 error-sweep, and accuracy results remain from the original campaign.
 
 ## E2E Thread Scaling
+
+![E2E thread scaling](e2e-scaling.svg)
 
 The chart reports candidates per second for the complete candidate graph. It includes planner/cache work, FrameEval, reconstruction, Expr, PlaneStats, frame delivery, and VSPipe process overhead. GPU columns are explicit-backend runs (`backend=cuda` / `backend=vulkan`); automatic mode always routes to CPU, so the CPU column is what an unconfigured user gets.
 
@@ -102,7 +104,7 @@ Reading the numbers: best candidates and best MAE are identical across old, JET,
 One jet-sweep row (`lanczos3@903.9`) shows a reconstruction max abs of 0.452 with bit-identical descaled output; direct re-evaluation of that exact candidate reproduces 0.0, so it is a measurement artifact of the long shard worker, not a numerical difference.
 
 | Case | Reference | Candidates | Best reference | Best dsmvc | Changed | Max output abs | Max reconstruction abs |
-|---|---|---:|---|---|---|---:|---: |
+|---|---|---:|---|---|---|---:|---:|
 | `getfnative` | `old` | 30,800 | bilinear@979.2@979.2 (0.00053924) | bilinear@979.2@979.2 (0.00053924) | False | 0.0553046 | 8.34465e-06 |
 | `getfnative` | `jet` | 30,800 | bilinear@979.2@979.2 (0.00053924) | bilinear@979.2@979.2 (0.00053924) | False | 0.0553046 | 0.452207 |
 | `getfnative_v2` | `old` | 3,200 | bicubic_b1.0_c0.0@876.7@876.7 (0.000476052) | bicubic_b1.0_c0.0@876.7@876.7 (0.000476052) | False | 0 | 0 |
@@ -115,7 +117,7 @@ One jet-sweep row (`lanczos3@903.9`) shows a reconstruction max abs of 0.452 wit
 Each row groups all parameter variants of one algorithm family and keeps the best reference/dsmvc candidate within that family. `Delta MAE` is `dsmvc - reference`; a negative MAE is an improvement.
 
 | Case | Reference | Algorithm family | Candidates | Reference best (candidate; height / MAE) | dsmvc best (candidate; height / MAE) | Delta MAE | Delta height | Candidate changed |
-|---|---|---|---:|---|---|---:|---:|--- |
+|---|---|---|---:|---|---|---:|---:|---|
 | `getfnative` | `old` | `bicubic_b0.0_c0.5` | 2,800 | `bicubic_b0.0_c0.5@979.3`; 979.3 / 0.000544565 | `bicubic_b0.0_c0.5@979.3`; 979.3 / 0.000544565 | -1.12e-12 | +0.0 | False |
 | `getfnative` | `old` | `bicubic_b0.0_c0.8` | 2,800 | `bicubic_b0.0_c0.8@979.2`; 979.2 / 0.000560147 | `bicubic_b0.0_c0.8@979.2`; 979.2 / 0.000560147 | -1.03e-12 | +0.0 | False |
 | `getfnative` | `old` | `bicubic_b0.0_c1.0` | 2,800 | `bicubic_b0.0_c1.0@979.2`; 979.2 / 0.000575825 | `bicubic_b0.0_c1.0@979.2`; 979.2 / 0.000575825 | -1.86e-13 | +0.0 | False |
@@ -498,7 +500,7 @@ Six pathological descale geometries on frame 12493; reference is the dsmvc force
 Frame `12493` of the benchmark source; reference is dsmvc forced-F64 CPU (ordered semantics).
 
 | Case | Metric | old descale | JET descale | dsmvc F32 | dsmvc auto | auto routed F64 |
-|---|---|---:|---:|---:|---:|--- |
+|---|---|---:|---:|---:|---:|---|
 | `lanczos2-catastrophic` | mae | 535.74 | 535.74 | 535.74 | 0 | True |
 | `lanczos2-catastrophic` | max_abs | 3.27264e+06 | 3.27264e+06 | 3.27264e+06 | 0 | True |
 | `lanczos2-fractional` | mae | 1.16894e-06 | 1.16894e-06 | 1.16894e-06 | 0 | True |
