@@ -13,7 +13,7 @@ For native-resolution discovery, we recommend [GetNative-VF](https://github.com/
 as the practical `getnative` alternative. It is designed for the same
 candidate-search workflow and can use `dsmvc` as the descale implementation.
 
-> **Latest GetNative-VF benchmark:** on an RTX 5080, a complete candidate scan
+> **Use Getnative-VF for faster getnative:** on an RTX 5080, a complete candidate scan
 > reaches approximately **3,600 candidates/s** with CUDA. That is about
 > **65x the original descale plugin** and about **8x the current plugin's CPU
 > candidate-scan throughput** on the same workload. These are measurements for
@@ -33,10 +33,7 @@ or compute_120 PTX through NVIDIA driver JIT when compatible. This requires a
 sufficiently recent driver and may add a one-time startup delay. CUDA is an
 optional build feature and is selected explicitly with `backend="cuda"`.
 
-> **Release performance:** the latest GetNative-VF RTX 5080 CUDA measurement
-> reaches approximately **3,600 candidates/s**, about **65x** the original
-> descale plugin and **8x** the current plugin's CPU scan on that workload.
-> This figure belongs to GetNative-VF; dsmvc's measured results are listed in
+> **Release performance:** Measured results are listed in
 > the [full release benchmark](docs/release-benchmark.md) and [ARM benchmark](docs/arm-benchmark.md).
 
 ```python
