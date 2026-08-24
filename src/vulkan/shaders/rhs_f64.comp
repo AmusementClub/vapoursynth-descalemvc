@@ -1,0 +1,74 @@
+#version 460
+#extension GL_ARB_gpu_shader_fp64 : require
+
+layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer PlanBuffer {
+    uint plan_data[];
+};
+layout(set = 0, binding = 1, std430) buffer WorkspaceBuffer {
+    uint workspace_data[];
+};
+layout(set = 0, binding = 2, std430) buffer CacheBuffer {
+    uint cache_data[];
+};
+layout(push_constant, std430) uniform PushConstants {
+    uint value[32];
+} pc;
+
+double plan_double(uint word) {
+    return packDouble2x32(uvec2(plan_data[word], plan_data[word + 1U]));
+}
+
+double ordered_add_product(double value, double coefficient, double source) {
+    precise double product = coefficient * source;
+    precise double result = value + product;
+    return result;
+}
+
+double source_value(uint vector, uint index) {
+    uint linear;
+    if (pc.value[7] == 0U) {
+        linear = pc.value[4] + (index * pc.value[3] + vector) * 2U;
+    } else {
+        linear = pc.value[4] + (vector * pc.value[0] + index) * 2U;
+    }
+    const uvec2 bits = pc.value[6] == 0U
+        ? uvec2(workspace_data[linear], workspace_data[linear + 1U])
+        : uvec2(cache_data[linear], cache_data[linear + 1U]);
+    return packDouble2x32(bits);
+}
+
+uint output_word(uint vector, uint index) {
+    const uint linear = pc.value[8] == 0U
+        ? index * pc.value[3] + vector
+        : vector * pc.value[1] + index;
+    return pc.value[5] + linear * 2U;
+}
+
+void store_output(uint vector, uint index, double result) {
+    if (isnan(result) || isinf(result)) {
+        atomicOr(workspace_data[pc.value[16]], 1U);
+    }
+    const uint word = output_word(vector, index);
+    const uvec2 bits = unpackDouble2x32(result);
+    workspace_data[word] = bits.x;
+    workspace_data[word + 1U] = bits.y;
+}
+
+void main() {
+    const uint vector = gl_GlobalInvocationID.x;
+    const uint index = gl_GlobalInvocationID.y;
+    if (vector >= pc.value[3] || index >= pc.value[1]) return;
+
+    double sum = 0.0LF;
+    const uint begin = plan_data[pc.value[9] + index];
+    const uint end = plan_data[pc.value[9] + index + 1U];
+    for (uint position = begin; position < end; ++position) {
+        sum = ordered_add_product(
+            sum,
+            plan_double(pc.value[11] + position * 2U),
+            source_value(vector, plan_data[pc.value[10] + position]));
+    }
+    store_output(vector, index, sum);
+}

@@ -1,0 +1,253 @@
+name: Release packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example 1.2.3; the tag will be v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  VS_SDK_REF: 325756ed04588b31840fdb74479537cddcba4bf7
+
+jobs:
+  portable:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: dsmvc-linux-x64-cpu-cuda-vulkan
+            cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt", "nvtx"]'
+          - os: windows-2022
+            artifact: dsmvc-windows-x64-cpu-cuda-vulkan
+            cuda-subpackages: '["nvcc", "nvvm", "cuobjdump", "cudart", "crt", "nvtx", "visual_studio_integration"]'
+
+    steps:
+      - name: Check out dsmvc
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out VapourSynth SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vapoursynth/vapoursynth
+          ref: ${{ env.VS_SDK_REF }}
+          path: dependencies/vapoursynth
+          sparse-checkout: include
+          persist-credentials: false
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: 13.2.0
+          method: network
+          sub-packages: ${{ matrix.cuda-subpackages }}
+          log-file-suffix: ${{ matrix.os }}
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        with:
+          vulkan_version: 1.4.313.0
+          install_runtime: true
+          install_lavapipe: true
+          cache: ${{ runner.os != 'Windows' }}
+          stripdown: false
+          github_token: ${{ github.token }}
+
+      - name: Add Windows Vulkan runtime to PATH
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${VULKAN_SDK}/runtime/x64" >> "$GITHUB_PATH"
+
+      - name: Install Linux Vulkan validation layers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y vulkan-validationlayers
+
+      - name: Verify GPU build tools
+        shell: bash
+        run: |
+          command -v nvcc
+          command -v cuobjdump
+          command -v glslc
+          command -v spirv-val
+          command -v vulkaninfo
+
+      - name: Configure Release
+        shell: bash
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
+          -DDSMVC_ENABLE_NATIVE_CPU_SIMD=ON
+          -DDSMVC_ENABLE_CUDA=ON
+          -DDSMVC_ENABLE_VULKAN=ON
+          -DDSMVC_ENABLE_METAL=OFF
+          -DDSMVC_VAPOURSYNTH_SDK="${{ github.workspace }}/dependencies/vapoursynth"
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Test with Vulkan validation and software driver
+        shell: bash
+        env:
+          DSMVC_VULKAN_VALIDATION: 1
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            sdk_root="$(cygpath -u "$VULKAN_SDK")"
+            layer_manifest="$(find "$sdk_root" -iname 'VkLayer_khronos_validation.json' -print -quit)"
+            test -n "$layer_manifest"
+            export VK_LAYER_PATH="$(cygpath -w "$(dirname "$layer_manifest")")"
+          else
+            export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
+            test -n "$VK_DRIVER_FILES"
+          fi
+          vulkaninfo --summary
+          ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Stage package
+        shell: bash
+        run: |
+          cmake --install build --config Release --prefix package
+          test -f package/vapoursynth/dsmvc.so || test -f package/vapoursynth/dsmvc.dll
+          test -z "$(find package -type f -name '*.spv' -print -quit)"
+
+      - name: Archive package
+        shell: bash
+        run: tar -C package -czf "${{ matrix.artifact }}.tar.gz" .
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-metal:
+    name: dsmvc-macos-arm64-cpu-metal
+    runs-on: macos-15
+    steps:
+      - name: Check out dsmvc
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out VapourSynth SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vapoursynth/vapoursynth
+          ref: ${{ env.VS_SDK_REF }}
+          path: dependencies/vapoursynth
+          sparse-checkout: include
+          persist-credentials: false
+
+      - name: Provision VapourSynth test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install vapoursynth numpy
+          vs_python_formula="$(HOMEBREW_NO_ENV_HINTS=1 brew deps --direct --formula vapoursynth | awk '/^python@[0-9]+\.[0-9]+$/ { print; exit }')"
+          test -n "$vs_python_formula"
+          vs_python_version="${vs_python_formula#python@}"
+          vs_python="$(brew --prefix "$vs_python_formula")/bin/python$vs_python_version"
+          test -x "$vs_python"
+          "$vs_python" -c 'import platform, vapoursynth, numpy; assert platform.machine() == "arm64"; print(vapoursynth.__version__, numpy.__version__)'
+          echo "DSMVC_VS_PYTHON=$vs_python" >> "$GITHUB_ENV"
+
+      - name: Configure Metal Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 \
+            -DBUILD_TESTING=ON \
+            -DDSMVC_ENABLE_NATIVE_CPU_SIMD=ON \
+            -DDSMVC_ENABLE_CUDA=OFF \
+            -DDSMVC_ENABLE_VULKAN=OFF \
+            -DDSMVC_ENABLE_METAL=ON \
+            -DDSMVC_VAPOURSYNTH_SDK="$GITHUB_WORKSPACE/dependencies/vapoursynth" \
+            -DDSMVC_VS_PYTHON="$DSMVC_VS_PYTHON"
+
+      - name: Build and test Metal Release
+        run: |
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure --parallel 6
+
+      - name: Stage and smoke-test package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix package
+          "$DSMVC_VS_PYTHON" tests/vs_metal_integration.py \
+            --plugin package/vapoursynth/dsmvc.so --expect-metal enabled
+          "$DSMVC_VS_PYTHON" cmake/macos_release_manifest.py \
+            --repo "$GITHUB_WORKSPACE" --build-dir "$GITHUB_WORKSPACE/build" \
+            --package-dir "$GITHUB_WORKSPACE/package" \
+            --entrypoints "$GITHUB_WORKSPACE/cmake/metal_entrypoints.txt" \
+            --source-revision "$GITHUB_SHA" --vapoursynth-sdk-ref "$VS_SDK_REF" \
+            --vapoursynth-python "$DSMVC_VS_PYTHON" --deployment-target 13.3 \
+            --json-out "$GITHUB_WORKSPACE/package/share/dsmvc/BUILD-MANIFEST.json" \
+            --checksums-out "$GITHUB_WORKSPACE/package/SHA256SUMS"
+          (cd package && shasum -a 256 -c SHA256SUMS)
+          tar -C package -czf dsmvc-macos-arm64-cpu-metal.tar.gz .
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dsmvc-macos-arm64-cpu-metal
+          path: dsmvc-macos-arm64-cpu-metal.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    name: Create draft release
+    needs: [portable, macos-metal]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: README.md
+          persist-credentials: false
+
+      - name: Download package archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v7.0.0
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          version="${RELEASE_VERSION#v}"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v${RELEASE_VERSION}" release-assets/* \
+            --draft --title "dsmvc ${RELEASE_VERSION}" --generate-notes

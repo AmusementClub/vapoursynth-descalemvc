@@ -1,0 +1,80 @@
+# Build trees and generated CMake files
+/build/
+/out/
+/cmake-build-*/
+/CMakeFiles/
+/_deps/
+/Testing/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+Makefile.*
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+CMakeUserPresets.json
+
+# IDE metadata
+/.vs/
+/.vscode/
+/.idea/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+
+# Python caches and local environments
+**/__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.venv/
+/venv/
+/env/
+
+# Local OMX/OMC orchestration state and generated evidence
+.omx/
+.omc/
+
+# Local benchmark campaigns and staged packages
+/artifacts/
+/package/
+
+# All local benchmark/profile result trees and profiler data
+benchmark-results*/
+profile-results*/
+**/benchmark.json
+**/benchmark.csv
+**/benchmark.md
+**/release-benchmark.json
+**/summary.csv
+**/performance.csv
+**/errors.csv
+**/commands.txt
+*.uprof
+*.prof
+*.profdata
+*.profraw
+*.gcda
+*.gcno
+
+# Native build products and crash dumps
+*.dll
+*.exe
+*.lib
+*.a
+*.so
+*.dylib
+*.o
+*.obj
+*.pdb
+*.dmp
+
+# Logs and operating-system metadata
+*.log
+.DS_Store
+Thumbs.db

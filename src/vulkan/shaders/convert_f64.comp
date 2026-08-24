@@ -1,0 +1,66 @@
+#version 460
+#extension GL_ARB_gpu_shader_fp64 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer PlanBuffer {
+    uint plan_data[];
+};
+layout(set = 0, binding = 1, std430) buffer WorkspaceBuffer {
+    uint workspace_data[];
+};
+layout(set = 0, binding = 2, std430) buffer CacheBuffer {
+    uint cache_data[];
+};
+layout(push_constant, std430) uniform PushConstants {
+    uint value[32];
+} pc;
+
+double source_value(uint index) {
+    const uint word = pc.value[1] + index * 2U;
+    return packDouble2x32(
+        uvec2(workspace_data[word], workspace_data[word + 1U]));
+}
+
+uint converted_integer(uint index) {
+    if (index >= pc.value[0]) return 0U;
+    precise double sample_value = source_value(index);
+    if (isnan(sample_value) || isinf(sample_value)) {
+        atomicOr(workspace_data[pc.value[16]], 1U);
+        return 0U;
+    }
+    sample_value = sample_value * double(uintBitsToFloat(pc.value[4]))
+        + double(uintBitsToFloat(pc.value[5]));
+    if (isnan(sample_value) || isinf(sample_value)) {
+        atomicOr(workspace_data[pc.value[16]], 1U);
+        return 0U;
+    }
+    sample_value = clamp(sample_value, 0.0LF, double(pc.value[6]));
+    return uint(roundEven(sample_value));
+}
+
+void main() {
+    const uint word = gl_GlobalInvocationID.x;
+    if (pc.value[3] == 0U) {
+        if (word >= pc.value[0]) return;
+        const double sample_value = source_value(word);
+        const float converted = float(sample_value);
+        if (isnan(sample_value) || isinf(sample_value)
+            || isnan(converted) || isinf(converted)) {
+            atomicOr(workspace_data[pc.value[16]], 1U);
+        }
+        workspace_data[pc.value[2] + word] = floatBitsToUint(converted);
+    } else if (pc.value[3] == 1U) {
+        const uint base = word * 4U;
+        if (base >= pc.value[0]) return;
+        workspace_data[pc.value[2] + word] = converted_integer(base)
+            | (converted_integer(base + 1U) << 8U)
+            | (converted_integer(base + 2U) << 16U)
+            | (converted_integer(base + 3U) << 24U);
+    } else {
+        const uint base = word * 2U;
+        if (base >= pc.value[0]) return;
+        workspace_data[pc.value[2] + word] = converted_integer(base)
+            | (converted_integer(base + 1U) << 16U);
+    }
+}
