@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -141,7 +142,8 @@ void require_agreement(const ErrorStats &stats, std::string_view label,
 
 [[nodiscard]] dsmvc::AxisPlan make_plan(
     dsmvc::KernelKind kind, std::int32_t source_size,
-    std::int32_t destination_size, double active_length, double shift = 0.0) {
+    std::int32_t destination_size, double active_length, double shift = 0.0,
+    double blur = 1.0) {
     dsmvc::AxisRequest request;
     request.source_size = source_size;
     request.destination_size = destination_size;
@@ -149,6 +151,7 @@ void require_agreement(const ErrorStats &stats, std::string_view label,
     request.shift = shift;
     request.kernel.kind = kind;
     if (kind == dsmvc::KernelKind::lanczos) request.kernel.taps = 3;
+    request.kernel.blur = blur;
     return dsmvc::build_axis_plan(request);
 }
 
@@ -521,22 +524,34 @@ void test_accelerator_executor_agreement(
     generic_horizontal_request.destination_size = destination_width;
     generic_horizontal_request.active_length = 66.75;
     generic_horizontal_request.shift = 0.125;
-    generic_horizontal_request.kernel.kind = dsmvc::KernelKind::lanczos;
-    generic_horizontal_request.kernel.taps = 5;
+    generic_horizontal_request.kernel.kind = dsmvc::KernelKind::spline64;
+    generic_horizontal_request.kernel.blur = 1.25;
     auto generic_vertical_request = generic_horizontal_request;
     generic_vertical_request.source_size = source_height;
     generic_vertical_request.destination_size = destination_height;
     generic_vertical_request.active_length = 50.5;
     generic_vertical_request.shift = 0.25;
     pairs.push_back({
-        "generic-b9",
+        "blur-b9",
         std::make_shared<const dsmvc::AxisPlan>(
             dsmvc::build_axis_plan(generic_horizontal_request)),
         std::make_shared<const dsmvc::AxisPlan>(
             dsmvc::build_axis_plan(generic_vertical_request)),
     });
     require(pairs.back().horizontal->half_bandwidth > 7,
-            "accelerator generic fixture did not exceed the specialized bandwidths");
+            "accelerator blur fixture did not exceed the specialized bandwidths");
+    generic_horizontal_request.kernel.blur = 1.251;
+    generic_vertical_request.kernel.blur = 1.251;
+    pairs.push_back({
+        "blur-b11",
+        std::make_shared<const dsmvc::AxisPlan>(
+            dsmvc::build_axis_plan(generic_horizontal_request)),
+        std::make_shared<const dsmvc::AxisPlan>(
+            dsmvc::build_axis_plan(generic_vertical_request)),
+    });
+    require(pairs.back().horizontal->half_bandwidth == 11
+                && pairs.back().vertical->half_bandwidth == 11,
+            "accelerator blur H11 fixture did not use half-bandwidth 11");
 
     dsmvc::Executor accelerator(backend);
     require(accelerator.backend() == backend,
@@ -1411,6 +1426,34 @@ void test_f64_mode_selection_and_cache() {
     require(rejected, "invalid f64 mode was accepted");
 }
 
+void test_blur_precision_routing() {
+    dsmvc::AxisRequest request;
+    request.source_size = 1080;
+    request.destination_size = 980;
+    request.active_length = 978.1;
+    request.shift = 0.95;
+    request.kernel.kind = dsmvc::KernelKind::lanczos;
+    request.kernel.taps = 2;
+    const auto unblurred = dsmvc::build_axis_plan(request);
+
+    request.kernel.blur = 1.25;
+    const auto automatic = dsmvc::build_axis_plan(request);
+    request.f64_mode = dsmvc::F64Mode::float32_only;
+    const auto float32 = dsmvc::build_axis_plan(request);
+    request.f64_mode = dsmvc::F64Mode::float64_only;
+    const auto float64 = dsmvc::build_axis_plan(request);
+    require(automatic.normal_rcond != unblurred.normal_rcond,
+            "blur did not affect the normal-matrix condition estimate");
+    require(automatic.normal_rcond == float32.normal_rcond
+                && automatic.normal_rcond == float64.normal_rcond,
+            "f64mode changed the blur plan condition estimate");
+    require(automatic.requires_float64()
+                == (automatic.normal_rcond < 1.0e-4),
+            "automatic blur plan did not follow its rcond");
+    require(!float32.requires_float64() && float64.requires_float64(),
+            "forced precision modes changed semantics for blur plans");
+}
+
 void test_custom_plan() {
     dsmvc::AxisRequest request;
     request.source_size = 48;
@@ -1422,6 +1465,203 @@ void test_custom_plan() {
         request, [](double x) { return std::max(1.0 - x, 0.0); });
     require(plan.valid(), "custom axis plan is invalid");
     require(plan.half_bandwidth == 1, "custom plan bandwidth is incorrect");
+}
+
+void test_blur_support_and_weights() {
+    struct SupportCase {
+        dsmvc::KernelKind kind;
+        std::int32_t taps;
+        std::int32_t base_support;
+    };
+    constexpr std::array cases{
+        SupportCase{dsmvc::KernelKind::bilinear, 0, 1},
+        SupportCase{dsmvc::KernelKind::bicubic, 0, 2},
+        SupportCase{dsmvc::KernelKind::lanczos, 2, 2},
+        SupportCase{dsmvc::KernelKind::lanczos, 3, 3},
+        SupportCase{dsmvc::KernelKind::spline16, 0, 2},
+        SupportCase{dsmvc::KernelKind::spline36, 0, 3},
+        SupportCase{dsmvc::KernelKind::spline64, 0, 4},
+    };
+    constexpr std::array blurs{0.75, 1.0, 1.01, 1.25, 1.5};
+    for (const auto &test_case : cases) {
+        for (const double blur : blurs) {
+            dsmvc::AxisRequest request;
+            request.source_size = 97;
+            request.destination_size = 67;
+            request.active_length = 66.75;
+            request.shift = 0.125;
+            request.kernel.kind = test_case.kind;
+            request.kernel.taps = test_case.taps;
+            request.kernel.blur = blur;
+            request.f64_mode = dsmvc::F64Mode::float32_only;
+            const auto plan = dsmvc::build_axis_plan(request);
+            const auto expected_support = static_cast<std::int32_t>(
+                std::ceil(static_cast<double>(test_case.base_support) * blur));
+            require(plan.support == expected_support,
+                    "blur effective support differs from ceil(base * blur)");
+            require(plan.half_bandwidth
+                        == std::min(2 * expected_support - 1,
+                                    request.destination_size - 1),
+                    "blur half-bandwidth is inconsistent with support");
+        }
+    }
+
+    dsmvc::AxisRequest default_request;
+    default_request.source_size = 47;
+    default_request.destination_size = 39;
+    default_request.active_length = 39.0;
+    default_request.shift = -0.3125;
+    default_request.kernel.kind = dsmvc::KernelKind::bicubic;
+    default_request.kernel.b = 0.0;
+    default_request.kernel.c = 0.5;
+    default_request.f64_mode = dsmvc::F64Mode::float32_only;
+    const auto default_plan = dsmvc::build_axis_plan(default_request);
+    auto explicit_unity_request = default_request;
+    explicit_unity_request.kernel.blur = 1.0;
+    const auto explicit_unity_plan =
+        dsmvc::build_axis_plan(explicit_unity_request);
+    require(default_plan.transpose_offsets == explicit_unity_plan.transpose_offsets
+                && default_plan.transpose_indices
+                    == explicit_unity_plan.transpose_indices
+                && default_plan.transpose_weights
+                    == explicit_unity_plan.transpose_weights
+                && default_plan.lower_ld == explicit_unity_plan.lower_ld
+                && default_plan.upper_l == explicit_unity_plan.upper_l
+                && default_plan.inverse_diagonal
+                    == explicit_unity_plan.inverse_diagonal
+                && default_plan.normal_rcond == explicit_unity_plan.normal_rcond,
+            "default blur and explicit blur=1 produced different plans");
+
+    dsmvc::AxisRequest lanczos_request;
+    lanczos_request.source_size = 1;
+    lanczos_request.destination_size = 8;
+    lanczos_request.active_length = 8.0;
+    lanczos_request.kernel.kind = dsmvc::KernelKind::lanczos;
+    lanczos_request.kernel.taps = 2;
+    lanczos_request.kernel.blur = 1.5;
+    lanczos_request.border = dsmvc::BorderMode::zero;
+    lanczos_request.f64_mode = dsmvc::F64Mode::float32_only;
+    const auto lanczos_plan = dsmvc::build_axis_plan(lanczos_request);
+    require(lanczos_plan.support == 3 && lanczos_plan.half_bandwidth == 5,
+            "blurred Lanczos2 did not expand to support 3");
+    const auto sinc = [](double value) {
+        if (value == 0.0) return 1.0;
+        const double scaled = std::numbers::pi * value;
+        return std::sin(scaled) / scaled;
+    };
+    std::array<double, 6> expected{};
+    double total = 0.0;
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const double distance = std::abs(
+            (-2.5 + static_cast<double>(index)) / 1.5);
+        expected[index] = std::abs(distance) < 2.0
+            ? sinc(distance) * sinc(distance / 2.0) : 0.0;
+        total += expected[index];
+    }
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const std::size_t destination = index + 1U;
+        const auto begin = lanczos_plan.transpose_offsets[destination];
+        const auto end = lanczos_plan.transpose_offsets[destination + 1U];
+        if (expected[index] == 0.0) {
+            require(begin == end,
+                    "blurred Lanczos2 retained a zero window weight");
+            continue;
+        }
+        require(end == begin + 1U
+                    && lanczos_plan.transpose_indices[begin] == 0
+                    && lanczos_plan.transpose_weights[begin]
+                        == static_cast<float>(expected[index] / total),
+                "blurred Lanczos2 window did not use the original taps=2");
+    }
+
+    dsmvc::AxisRequest bilinear_request;
+    bilinear_request.source_size = 48;
+    bilinear_request.destination_size = 32;
+    bilinear_request.active_length = 31.75;
+    bilinear_request.shift = 0.125;
+    bilinear_request.kernel.kind = dsmvc::KernelKind::bilinear;
+    bilinear_request.kernel.blur = 1.5;
+    bilinear_request.f64_mode = dsmvc::F64Mode::float32_only;
+    const auto bilinear_plan = dsmvc::build_axis_plan(bilinear_request);
+    auto custom_request = bilinear_request;
+    custom_request.kernel.kind = dsmvc::KernelKind::custom;
+    custom_request.kernel.taps = 1;
+    const auto custom_plan = dsmvc::build_axis_plan(
+        custom_request,
+        [](double distance) { return std::max(1.0 - distance, 0.0); });
+    require(custom_plan.support == bilinear_plan.support
+                && custom_plan.transpose_offsets == bilinear_plan.transpose_offsets
+                && custom_plan.transpose_indices == bilinear_plan.transpose_indices
+                && custom_plan.transpose_weights == bilinear_plan.transpose_weights,
+            "custom kernel did not receive distance / blur");
+
+    for (const double blur : {
+             0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::infinity()}) {
+        auto invalid = default_request;
+        invalid.kernel.blur = blur;
+        bool rejected = false;
+        try {
+            (void)dsmvc::build_axis_plan(invalid);
+        } catch (const std::invalid_argument &error) {
+            rejected = std::string_view{error.what()}
+                == "blur must be finite and greater than zero";
+        }
+        require(rejected, "invalid blur did not produce the public error");
+    }
+    auto excessive = default_request;
+    excessive.kernel.blur = std::numeric_limits<double>::max();
+    bool excessive_rejected = false;
+    try {
+        (void)dsmvc::build_axis_plan(excessive);
+    } catch (const std::length_error &error) {
+        excessive_rejected = std::string_view{error.what()}
+            == "effective filter support is too large";
+    }
+    require(excessive_rejected,
+            "overflowing effective support did not produce a checked-size error");
+}
+
+void test_blur_cache_isolation() {
+    dsmvc::clear_planner_caches();
+    dsmvc::AxisRequest request;
+    request.source_size = 96;
+    request.destination_size = 64;
+    request.active_length = 63.75;
+    request.shift = 0.125;
+    request.kernel.kind = dsmvc::KernelKind::bicubic;
+    request.kernel.blur = 1.01;
+
+    const auto first = dsmvc::get_or_build_axis_plan(request);
+    request.kernel.blur = 1.25;
+    const auto second = dsmvc::get_or_build_axis_plan(request);
+    require(first != second && first->support == second->support,
+            "same-support blur values shared a plan-cache entry");
+    auto stats = dsmvc::planner_cache_stats();
+    require(stats.plan_builds == 2 && stats.plan_entries == 2,
+            "different blur values were not cached independently");
+    require(stats.geometry_builds == 1 && stats.geometry_hits == 1,
+            "same-support blur values did not reuse sampling geometry");
+
+    request.kernel.blur = 1.5;
+    std::vector<std::shared_ptr<const dsmvc::AxisPlan>> plans(8);
+    std::vector<JoiningThread> workers;
+    for (std::size_t index = 0; index < plans.size(); ++index) {
+        workers.emplace_back([&, index] {
+            plans[index] = dsmvc::get_or_build_axis_plan(request);
+        });
+    }
+    workers.clear();
+    for (const auto &plan : plans) {
+        require(plan == plans.front(),
+                "blur plan single-flight returned inconsistent entries");
+    }
+    stats = dsmvc::planner_cache_stats();
+    require(stats.plan_builds == 3
+                && stats.plan_hits == plans.size() - 1U
+                && stats.geometry_builds == 1
+                && stats.geometry_hits == 2,
+            "blur plan single-flight/cache accounting is inconsistent");
 }
 
 void test_inverse_only_cache() {
@@ -1607,6 +1847,11 @@ void test_b5_b7_executor_agreement() {
         dsmvc::KernelKind::lanczos, 1080, 952, 951.5, 0.25));
     auto vertical_b7 = std::make_shared<const dsmvc::AxisPlan>(make_plan(
         dsmvc::KernelKind::spline64, 1080, 952, 951.5, 0.25));
+    auto horizontal_b9 = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        dsmvc::KernelKind::spline64, 1920, 1692,
+        1691.5555555555557, 0.2222222222221717, 1.25));
+    auto vertical_b9 = std::make_shared<const dsmvc::AxisPlan>(make_plan(
+        dsmvc::KernelKind::spline64, 1080, 952, 951.5, 0.25, 1.25));
     require(horizontal_b5->half_bandwidth == 5,
             "Lanczos3 did not produce half-bandwidth 5");
     require(vertical_b5->half_bandwidth == 5,
@@ -1615,12 +1860,17 @@ void test_b5_b7_executor_agreement() {
             "Spline64 did not produce half-bandwidth 7");
     require(vertical_b7->half_bandwidth == 7,
             "vertical Spline64 did not produce half-bandwidth 7");
+    require(horizontal_b9->half_bandwidth == 9
+                && vertical_b9->half_bandwidth == 9,
+            "Spline64 blur=1.25 did not produce half-bandwidth 9");
 
     dsmvc::CpuExecutor optimized(dsmvc::CpuPath::automatic);
     optimized.prepare(horizontal_b5);
     optimized.prepare(horizontal_b7);
     optimized.prepare(vertical_b5);
     optimized.prepare(vertical_b7);
+    optimized.prepare(horizontal_b9);
+    optimized.prepare(vertical_b9);
     optimized.seal();
 
     for (const auto rows : {8, 9, 16, 17}) {
@@ -1628,6 +1878,8 @@ void test_b5_b7_executor_agreement() {
                      "Lanczos3 b5 horizontal rows=" + std::to_string(rows));
         compare_rows(optimized, *horizontal_b7, rows,
                      "Spline64 b7 horizontal rows=" + std::to_string(rows));
+        compare_rows(optimized, *horizontal_b9, rows,
+                     "Spline64 blur b9 horizontal rows=" + std::to_string(rows));
     }
 
     if (dsmvc::cpu_neon_available()) {
@@ -1639,6 +1891,9 @@ void test_b5_b7_executor_agreement() {
             compare_rows(
                 neon, *horizontal_b7, rows,
                 "NEON Spline64 b7 horizontal rows=" + std::to_string(rows));
+            compare_rows(
+                neon, *horizontal_b9, rows,
+                "NEON Spline64 blur b9 horizontal rows=" + std::to_string(rows));
         }
     }
 
@@ -1655,6 +1910,12 @@ void test_b5_b7_executor_agreement() {
     compare_columns(
         optimized, *vertical_b7, 1693, stride,
         "Spline64 b7 vertical non-vector tail");
+    compare_columns(
+        optimized, *vertical_b9, 1692, stride,
+        "Spline64 blur b9 vertical padded vectors");
+    compare_columns(
+        optimized, *vertical_b9, 1693, stride,
+        "Spline64 blur b9 vertical non-vector tail");
 
     std::vector<std::exception_ptr> errors(8U);
     std::vector<JoiningThread> callers;
@@ -1954,7 +2215,10 @@ int main() {
         test_conditioned_float64_2d_intermediate();
         test_padding_index_patterns();
         test_f64_mode_selection_and_cache();
+        test_blur_precision_routing();
         test_custom_plan();
+        test_blur_support_and_weights();
+        test_blur_cache_isolation();
         test_inverse_only_cache();
         test_large_support_compatibility();
         test_axis_plan_validation();

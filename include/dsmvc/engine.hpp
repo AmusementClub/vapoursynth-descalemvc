@@ -60,6 +60,7 @@ struct KernelSpec {
     std::int32_t taps = 3;
     double b = 0.0;
     double c = 0.5;
+    double blur = 1.0;
 };
 
 struct AxisRequest {

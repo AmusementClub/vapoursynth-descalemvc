@@ -228,6 +228,16 @@ if(DSMVC_ENABLE_VULKAN)
     dsmvc_compile_vulkan_shader(
         solve_64 src/vulkan/shaders/inverse.comp
         -DDSMVC_LOCAL_SIZE=64 -DDSMVC_SOLVE_ONLY=1)
+    foreach(_bandwidth IN ITEMS 1 3 5 7 9 11)
+        dsmvc_compile_vulkan_shader(
+            "inverse_b${_bandwidth}_32" src/vulkan/shaders/inverse.comp
+            -DDSMVC_LOCAL_SIZE=32 -DDSMVC_SOLVE_ONLY=0
+            "-DDSMVC_FIXED_BANDWIDTH=${_bandwidth}")
+        dsmvc_compile_vulkan_shader(
+            "solve_b${_bandwidth}_32" src/vulkan/shaders/inverse.comp
+            -DDSMVC_LOCAL_SIZE=32 -DDSMVC_SOLVE_ONLY=1
+            "-DDSMVC_FIXED_BANDWIDTH=${_bandwidth}")
+    endforeach()
     dsmvc_compile_vulkan_shader(
         convert_256 src/vulkan/shaders/convert.comp
         -DDSMVC_LOCAL_SIZE=256)

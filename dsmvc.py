@@ -50,79 +50,79 @@ def _plugin_args(opt, backend, padding, f64mode, border_handling):
 
 def Debilinear(src, width, height, border_handling=None, yuv444=False,
                gray=False, chromaloc=None, opt=None, backend=None,
-               padding=None, f64mode=F64Mode.AUTO):
+               padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, kernel="bilinear",
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Debicubic(src, width, height, b=0.0, c=0.5, border_handling=None,
               yuv444=False, gray=False, chromaloc=None, opt=None, backend=None,
-              padding=None, f64mode=F64Mode.AUTO):
+              padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, kernel="bicubic", b=b, c=c,
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Delanczos(src, width, height, taps=3, border_handling=None,
               yuv444=False, gray=False, chromaloc=None, opt=None, backend=None,
-              padding=None, f64mode=F64Mode.AUTO):
+              padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, kernel="lanczos", taps=taps,
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Despline16(src, width, height, border_handling=None, yuv444=False,
                gray=False, chromaloc=None, opt=None, backend=None,
-               padding=None, f64mode=F64Mode.AUTO):
+               padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, kernel="spline16",
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Despline36(src, width, height, border_handling=None, yuv444=False,
                gray=False, chromaloc=None, opt=None, backend=None,
-               padding=None, f64mode=F64Mode.AUTO):
+               padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, kernel="spline36",
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Despline64(src, width, height, border_handling=None, yuv444=False,
                gray=False, chromaloc=None, opt=None, backend=None,
-               padding=None, f64mode=F64Mode.AUTO):
+               padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, kernel="spline64",
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Decustom(src, width, height, custom_kernel, taps,
              border_handling=None, yuv444=False, gray=False,
              chromaloc=None, opt=None, backend=None,
-             padding=None, f64mode=F64Mode.AUTO):
+             padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     return Descale(src, width, height, custom_kernel=custom_kernel, taps=taps,
                    border_handling=border_handling, yuv444=yuv444,
                    gray=gray, chromaloc=chromaloc, opt=opt, backend=backend,
-                   padding=padding, f64mode=f64mode)
+                   padding=padding, f64mode=f64mode, blur=blur)
 
 
 def Descale(src, width, height, kernel=None, custom_kernel=None, taps=None,
             b=None, c=None, border_handling=None, yuv444=False, gray=False,
             chromaloc=None, opt=None, backend=None,
-            padding=None, f64mode=F64Mode.AUTO):
+            padding=None, f64mode=F64Mode.AUTO, blur=1.0):
     src_f = src.format
     src_cf = src_f.color_family
     src_st = src_f.sample_type
     src_bits = src_f.bits_per_sample
     src_sw = src_f.subsampling_w
     src_sh = src_f.subsampling_h
-    call_args = dict(kernel=kernel, taps=taps, b=b, c=c,
+    call_args = dict(kernel=kernel, taps=taps, b=b, c=c, blur=blur,
                      custom_kernel=custom_kernel)
     call_args.update(_plugin_args(
         opt, backend, padding, f64mode, border_handling))

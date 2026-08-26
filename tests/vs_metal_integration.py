@@ -31,6 +31,7 @@ CASES = {
 
 GEOMETRY_SIGNATURE = "src:vnode;width:int;height:int;"
 TAIL_SIGNATURE = (
+    "blur:float:opt;"
     "src_left:float:opt;src_top:float:opt;"
     "src_width:float:opt;src_height:float:opt;"
     "border_handling:int:opt;force:int:opt;force_h:int:opt;"
@@ -47,6 +48,7 @@ EXPECTED_SIGNATURES = {
     "Descale": (
         GEOMETRY_SIGNATURE
         + "kernel:data:opt;taps:int:opt;b:float:opt;c:float:opt;"
+        + "blur:float:opt;"
         + "src_left:float:opt;src_top:float:opt;"
         + "src_width:float:opt;src_height:float:opt;"
         + "border_handling:int:opt;force:int:opt;force_h:int:opt;"
@@ -244,6 +246,17 @@ def compare_grays(reference: vs.VideoFrame, candidate: vs.VideoFrame,
     return difference
 
 
+def require_frame_bit_exact(reference: vs.VideoFrame,
+                            candidate: vs.VideoFrame, label: str) -> None:
+    require(reference.format.id == candidate.format.id,
+            f"{label}: format differs")
+    for plane_index in range(reference.format.num_planes):
+        require(np.array_equal(
+            np.asarray(reference[plane_index]),
+            np.asarray(candidate[plane_index])),
+            f"{label}: plane {plane_index} is not bit exact")
+
+
 def test_conditioned_float64_fallback(core: vs.Core) -> None:
     source = patterned_grays_source(core, 1)
     geometry = {
@@ -383,11 +396,11 @@ def test_general_surface(core: vs.Core, threads: int) -> None:
         core.dsmvc.Descale(
             custom_source, width=112, height=96, src_left=0.125,
             src_width=111.75, custom_kernel=custom_kernel, taps=1,
-            border_handling=0, backend="cpu"),
+            blur=1.5, border_handling=0, backend="cpu"),
         core.dsmvc.Descale(
             custom_source, width=112, height=96, src_left=0.125,
             src_width=111.75, custom_kernel=custom_kernel, taps=1,
-            border_handling=0, backend="metal"),
+            blur=1.5, border_handling=0, backend="metal"),
         "general/horizontal-custom", threads)
 
     conditioned_custom = lambda x: max(1.0 - abs(x) / 5.0, 0.0)
@@ -412,6 +425,13 @@ def test_general_surface(core: vs.Core, threads: int) -> None:
         core.dsmvc.Delanczos(
             generic_source, taps=9, backend="metal", **geometry),
         "general/generic-bandwidth", threads)
+    compare_general_clips(
+        core,
+        core.dsmvc.Despline64(
+            generic_source, blur=1.25, backend="cpu", **geometry),
+        core.dsmvc.Despline64(
+            generic_source, blur=1.25, backend="metal", **geometry),
+        "general/blur-b9", threads)
 
 
 def compare_case(core: vs.Core, format_id: int, case_name: str,
@@ -447,6 +467,57 @@ def expect_error(callback, contains: str) -> None:
                 f"unexpected error: {error}")
         return
     raise AssertionError(f"expected a VapourSynth error containing {contains!r}")
+
+
+def test_blur_arguments(core: vs.Core) -> None:
+    float_source = patterned_general_source(
+        core, vs.GRAYS, length=1, width=96, height=64)
+    arguments = {"width": 80, "height": 48, "backend": "cpu", "f64mode": 1}
+    omitted = core.dsmvc.Debicubic(float_source, **arguments).get_frame(0)
+    explicit = core.dsmvc.Debicubic(
+        float_source, blur=1.0, **arguments).get_frame(0)
+    require_frame_bit_exact(omitted, explicit, "blur/default-vs-one/GRAYS")
+    core.dsmvc.Delanczos(
+        float_source, taps=2, blur=1.5, **arguments).get_frame(0)
+
+    custom_kernel = lambda x: max(1.0 - abs(x), 0.0)
+    core.dsmvc.Descale(
+        float_source, width=80, height=64, src_left=0.125,
+        src_width=79.75, custom_kernel=custom_kernel, taps=1,
+        blur=1.5, backend="cpu", f64mode=1).get_frame(0)
+
+    for format_id, geometry in (
+            (vs.GRAY16, {"width": 80, "height": 64}),
+            (vs.YUV420P10, {"width": 80, "height": 48})):
+        source = patterned_general_source(
+            core, format_id, length=1, width=96, height=64)
+        default_frame = core.dsmvc.Debicubic(
+            source, backend="cpu", f64mode=1, **geometry).get_frame(0)
+        unity_frame = core.dsmvc.Debicubic(
+            source, blur=1.0, backend="cpu", f64mode=1,
+            **geometry).get_frame(0)
+        require_frame_bit_exact(
+            default_frame, unity_frame,
+            f"blur/default-vs-one/{source.format.name}")
+        core.dsmvc.Debicubic(
+            source, blur=1.25, backend="cpu", f64mode=1,
+            **geometry).get_frame(0)
+
+    for invalid in (0.0, -1.0, float("nan"), float("inf")):
+        expect_error(
+            lambda value=invalid: core.dsmvc.Debicubic(
+                float_source, blur=value, **arguments),
+            "blur must be finite and greater than zero")
+    expect_error(
+        lambda: core.dsmvc.Debicubic(
+            float_source, blur=64.0, **arguments),
+        "blur exceeds the supported source-plane extent")
+    subsampled = patterned_general_source(
+        core, vs.YUV420P10, length=1, width=96, height=64)
+    expect_error(
+        lambda: core.dsmvc.Debicubic(
+            subsampled, width=80, height=48, blur=32.0, backend="cpu"),
+        "blur exceeds the supported source-plane extent")
 
 
 def test_precision_and_padding_arguments(
@@ -631,6 +702,7 @@ def run(options: argparse.Namespace) -> None:
     require(cpu_error <= 1.5e-6,
             f"CPU scalar/native SIMD mismatch: {cpu_error}")
     test_precision_and_padding_arguments(core, cpu_source)
+    test_blur_arguments(core)
     for backend, enabled in (
             ("vulkan", options.vulkan_enabled),
             ("cuda", options.cuda_enabled)):

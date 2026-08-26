@@ -22,6 +22,7 @@ FUNCTIONS = {
 
 GEOMETRY_SIGNATURE = "src:vnode;width:int;height:int;"
 TAIL_SIGNATURE = (
+    "blur:float:opt;"
     "src_left:float:opt;src_top:float:opt;"
     "src_width:float:opt;src_height:float:opt;"
     "border_handling:int:opt;force:int:opt;force_h:int:opt;"
@@ -38,6 +39,7 @@ EXPECTED_SIGNATURES = {
     "Descale": (
         GEOMETRY_SIGNATURE
         + "kernel:data:opt;taps:int:opt;b:float:opt;c:float:opt;"
+        + "blur:float:opt;"
         + "src_left:float:opt;src_top:float:opt;"
         + "src_width:float:opt;src_height:float:opt;"
         + "border_handling:int:opt;force:int:opt;force_h:int:opt;"
@@ -124,7 +126,8 @@ def baseline_call(namespace, name: str, source, **overrides):
 def patterned_integer_clip(core, format_id, property_name: str,
                            range_value: int, *, width: int = 96,
                            height: int = 64):
-    blank = core.std.BlankClip(width=width, height=height, format=format_id)
+    blank = core.std.BlankClip(
+        width=width, height=height, length=1, format=format_id)
 
     def fill(n, f):
         del n
@@ -300,6 +303,27 @@ def run(options) -> None:
         core.dsmvc, "Debicubic", float_source,
         f64mode=2, backend="cpu", **geometry)
     compare_clips(automatic_precision, forced_float64, "f64mode/forced-f64")
+
+    default_blur = direct_call(
+        core.dsmvc, "Debicubic", float_source, backend="cpu", **geometry)
+    explicit_unity_blur = direct_call(
+        core.dsmvc, "Debicubic", float_source,
+        blur=1.0, backend="cpu", **geometry)
+    compare_clips(default_blur, explicit_unity_blur, "blur/default-vs-one")
+    direct_call(
+        core.dsmvc, "Delanczos", float_source,
+        taps=2, blur=1.5, f64mode=2, backend="cpu", **geometry).get_frame(0)
+    for invalid_blur in (0.0, -1.0, math.nan, math.inf):
+        expect_error(
+            lambda value=invalid_blur: direct_call(
+                core.dsmvc, "Debicubic", float_source,
+                blur=value, backend="cpu", **geometry),
+            "blur must be finite and greater than zero")
+    expect_error(
+        lambda: direct_call(
+            core.dsmvc, "Debicubic", float_source,
+            blur=64.0, backend="cpu", **geometry),
+        "blur exceeds the supported source-plane extent")
 
     identity_arguments = {"width": 96, "height": 64,
                           "src_width": 96.0, "src_height": 64.0}

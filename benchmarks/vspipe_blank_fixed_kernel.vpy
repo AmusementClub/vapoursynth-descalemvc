@@ -47,9 +47,10 @@ sample_formats = {
 if sample_format_name not in sample_formats:
     raise ValueError("unsupported sample_format: " + str(sample_format_name))
 
-if implementation == "new":
+if implementation in ("baseline", "new"):
     if not hasattr(core, "dsmvc"):
-        core.std.LoadPlugin(path=plugin)
+        core.std.LoadPlugin(
+            path=plugin if implementation == "new" else baseline_plugin)
     namespace = core.dsmvc
 else:
     reference_plugin = (globals().get("jet_plugin", "")
@@ -75,11 +76,15 @@ source = core.std.BlankClip(
 )
 arguments = fixed_geometry(
     source.width, source.height, float(src_height), float(base_height))
+blur = float(globals().get("blur", "1.0"))
+pass_blur = bool(int(globals().get("pass_blur", "1")))
 if kernel == "bicubic_b0_c0_5":
     arguments.update(b=0.0, c=0.5)
 elif kernel.startswith("lanczos"):
     arguments["taps"] = int(kernel.removeprefix("lanczos"))
-if implementation == "new":
+if implementation in ("jet", "baseline", "new") and pass_blur:
+    arguments["blur"] = blur
+if implementation in ("baseline", "new"):
     arguments["backend"] = backend
     if opt:
         arguments["opt"] = opt

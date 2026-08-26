@@ -910,6 +910,9 @@ void solve_horizontal_block(const AxisPlan &plan,
     } else if (plan.half_bandwidth == 7) {
         solve_horizontal_generic<7>(
             plan, packed, scratch, output, output_stride);
+    } else if (plan.half_bandwidth == 9) {
+        solve_horizontal_generic<9>(
+            plan, packed, scratch, output, output_stride);
     } else {
         solve_horizontal_generic<0>(
             plan, packed, scratch, output, output_stride);
@@ -2186,7 +2189,8 @@ void inverse_columns_neon(const AxisPlan &plan,
     } else if (plan.half_bandwidth == 3) {
         solve_columns_b3(plan, packed, input, input_row_stride, output,
                          output_row_stride, vector_columns);
-    } else if (plan.half_bandwidth == 5 || plan.half_bandwidth == 7) {
+    } else if (plan.half_bandwidth == 5 || plan.half_bandwidth == 7
+               || plan.half_bandwidth == 9) {
         solve_columns_pair(plan, packed, input, input_row_stride, output,
                            output_row_stride, vector_columns);
     } else {

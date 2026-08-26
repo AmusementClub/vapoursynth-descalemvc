@@ -43,6 +43,7 @@ struct PlanKey {
     std::int32_t taps;
     std::uint64_t b;
     std::uint64_t c;
+    std::uint64_t blur;
     BorderMode border;
     F64Mode f64_mode;
 
@@ -77,6 +78,7 @@ struct KeyHash {
             mix(static_cast<std::uint32_t>(key.taps));
             mix(key.b);
             mix(key.c);
+            mix(key.blur);
             mix(static_cast<std::uint8_t>(key.f64_mode));
         } else {
             mix(static_cast<std::uint32_t>(key.support));
@@ -388,21 +390,37 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
     case F64Mode::float64_only: break;
     default: throw std::invalid_argument("f64 mode is invalid");
     }
-    std::int32_t support = 0;
-    switch (request.kernel.kind) {
-    case KernelKind::bilinear: support = 1; break;
-    case KernelKind::bicubic:
-    case KernelKind::spline16: support = 2; break;
-    case KernelKind::spline36: support = 3; break;
-    case KernelKind::spline64: support = 4; break;
-    case KernelKind::lanczos:
-    case KernelKind::custom: support = request.kernel.taps; break;
+    if (!(request.kernel.blur > 0.0) || !std::isfinite(request.kernel.blur)) {
+        throw std::invalid_argument(
+            "blur must be finite and greater than zero");
     }
-    if (support <= 0
-        || support > (std::numeric_limits<std::int32_t>::max() - 1) / 2) {
+    std::int32_t base_support = 0;
+    switch (request.kernel.kind) {
+    case KernelKind::bilinear: base_support = 1; break;
+    case KernelKind::bicubic:
+    case KernelKind::spline16: base_support = 2; break;
+    case KernelKind::spline36: base_support = 3; break;
+    case KernelKind::spline64: base_support = 4; break;
+    case KernelKind::lanczos:
+    case KernelKind::custom: base_support = request.kernel.taps; break;
+    }
+    constexpr auto maximum_support =
+        (std::numeric_limits<std::int32_t>::max() - 1) / 2;
+    if (base_support <= 0 || base_support > maximum_support) {
         throw std::invalid_argument("filter support is invalid or too large");
     }
-    return support;
+    const double scaled_support = static_cast<double>(base_support)
+        * request.kernel.blur;
+    if (!std::isfinite(scaled_support)
+        || scaled_support > static_cast<double>(maximum_support)) {
+        throw std::length_error("effective filter support is too large");
+    }
+    const double effective_support = std::ceil(scaled_support);
+    if (!(effective_support >= 1.0)
+        || effective_support > static_cast<double>(maximum_support)) {
+        throw std::length_error("effective filter support is too large");
+    }
+    return static_cast<std::int32_t>(effective_support);
 }
 
 [[nodiscard]] PlanKey plan_key(const AxisRequest &request) noexcept {
@@ -417,6 +435,7 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
         lanczos ? request.kernel.taps : 0,
         bicubic ? std::bit_cast<std::uint64_t>(request.kernel.b) : 0U,
         bicubic ? std::bit_cast<std::uint64_t>(request.kernel.c) : 0U,
+        std::bit_cast<std::uint64_t>(request.kernel.blur),
         request.border,
         request.f64_mode,
     };
@@ -524,6 +543,7 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
     result.offsets.push_back(0U);
 
     const bool custom = request.kernel.kind == KernelKind::custom;
+    const bool unity_blur = request.kernel.blur == 1.0;
     std::vector<double> tap_weights(static_cast<std::size_t>(tap_count));
     std::vector<double> coalesced(static_cast<std::size_t>(tap_count));
     std::vector<bool> seen(static_cast<std::size_t>(tap_count));
@@ -532,8 +552,10 @@ SingleFlightLru<GeometryKey, AxisGeometry, KeyHash> &geometry_cache() {
             * static_cast<std::size_t>(tap_count);
         double total = 0.0;
         for (std::int32_t tap = 0; tap < tap_count; ++tap) {
-            const double distance = geometry.distances[
+            const double raw_distance = geometry.distances[
                 row_base + static_cast<std::size_t>(tap)];
+            const double distance = unity_blur
+                ? raw_distance : raw_distance / request.kernel.blur;
             const double weight = custom
                 ? custom_kernel(std::abs(distance))
                 : filter_weight(request.kernel, distance);

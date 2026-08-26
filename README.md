@@ -6,14 +6,13 @@
 ![VapourSynth API4](https://img.shields.io/badge/VapourSynth-API4-green)
 
 `dsmvc` is a VapourSynth API4 plugin compatible with the public filter API of
-Irrational-Encoding-Wizardry/descale, with native CPU (scalar/AVX2/NEON),
-CUDA, Vulkan, and Apple Metal execution routes.
+Irrational-Encoding-Wizardry/descale, with native Metal, Vulkan, CUDA/CPU(AVX2/FMA, NEON).
 
 For native-resolution discovery, we recommend [GetNative-VF](https://github.com/MysteryDove/GetNative-VF)
 as the practical `getnative` alternative. It is designed for the same
 candidate-search workflow and can use `dsmvc` as the descale implementation.
 
-> **Use Getnative-VF for faster getnative:** on an RTX 5080, a complete candidate scan
+> **Use GetNative-VF for faster getnative:** on an RTX 5080, a complete candidate scan
 > reaches approximately **3,600 candidates/s** with CUDA. That is about
 > **65x the original descale plugin** and about **8x the current plugin's CPU
 > candidate-scan throughput** on the same workload. These are measurements for
@@ -24,17 +23,47 @@ candidate-search workflow and can use `dsmvc` as the descale implementation.
 | Route | Supported hardware |
 |---|---|
 | CPU | x86-64 with a universal scalar path and optional AVX2/FMA acceleration; ARM64/AArch64 with scalar and NEON/FMA paths. Automatic routing selects the fastest path supported by the current CPU. |
-| CUDA | NVIDIA Turing or newer (compute capability 7.5+) on Windows and Linux. Default builds include native SM75, SM86, SM89, and SM120 kernels, covering GeForce GTX 16/RTX 20, RTX 30, RTX 40, and RTX 50 series respectively. |
+| CUDA | NVIDIA Turing or newer (compute capability 7.5+) on Windows and Linux. Covering GeForce GTX 16/RTX 20, RTX 30, RTX 40, and RTX 50 series respectively. |
 | Vulkan | Windows or Linux devices with a Vulkan 1.2 driver. Float64 additionally requires the capabilities listed in [Backend support](#backend-support). |
 | Metal | Apple Silicon M-series systems on macOS 13.3 or newer. Retained-Float64 work uses the CPU fallback. |
 
-CUDA devices without a matching native image can use the embedded compute_75
-or compute_120 PTX through NVIDIA driver JIT when compatible. This requires a
-sufficiently recent driver and may add a one-time startup delay. CUDA is an
-optional build feature and is selected explicitly with `backend="cuda"`.
+CUDA devices without a matching native image (Like a Datacenter Nvidia GPU) can use the embedded compute_75
+or compute_120 PTX through NVIDIA driver JIT when compatible.
 
-> **Release performance:** Measured results are listed in
-> the [full release benchmark](docs/release-benchmark.md) and [ARM benchmark](docs/arm-benchmark.md).
+> **Release performance and output error:**
+> Measured CPU/ARM/Vulkan results are listed in the [full release
+> benchmark](docs/release-benchmark.md) and [ARM benchmark](docs/arm-benchmark.md).
+
+## Usage
+
+The native VapourSynth plugin accepts constant-format GRAY, YUV, and RGB
+clips. Integer and non-Float32 input is converted internally when needed. For
+subsampled formats, the output dimensions must remain compatible with the
+source chroma subsampling.
+
+Native plugin API (`core.dsmvc`):
+
+```text
+core.dsmvc.Debilinear(clip src, int width, int height, float blur=1.0, float src_left=0.0, float src_top=0.0, float src_width=width, float src_height=height, int border_handling=None, int force=0, int force_h=force, int force_v=force, int opt=0, data backend="auto", int padding=3, int f64mode=0)
+
+core.dsmvc.Debicubic(clip src, int width, int height, float b=0.0, float c=0.5, float blur=1.0, float src_left=0.0, float src_top=0.0, float src_width=width, float src_height=height, int border_handling=None, int force=0, int force_h=force, int force_v=force, int opt=0, data backend="auto", int padding=3, int f64mode=0)
+
+core.dsmvc.Delanczos(clip src, int width, int height, int taps=3, float blur=1.0, float src_left=0.0, float src_top=0.0, float src_width=width, float src_height=height, int border_handling=None, int force=0, int force_h=force, int force_v=force, int opt=0, data backend="auto", int padding=3, int f64mode=0)
+
+core.dsmvc.Despline16(clip src, int width, int height, float blur=1.0, float src_left=0.0, float src_top=0.0, float src_width=width, float src_height=height, int border_handling=None, int force=0, int force_h=force, int force_v=force, int opt=0, data backend="auto", int padding=3, int f64mode=0)
+
+core.dsmvc.Despline36(...)
+
+core.dsmvc.Despline64(...)
+
+core.dsmvc.Descale(clip src, int width, int height, data kernel=None, int taps=3, float b=0.0, float c=0.5, float blur=1.0, float src_left=0.0, float src_top=0.0, float src_width=width, float src_height=height, int border_handling=None, int force=0, int force_h=force, int force_v=force, int opt=0, func custom=None, int support=None, func custom_kernel=None, data backend="auto", int padding=3, int f64mode=0)
+```
+
+`padding` and the legacy `border_handling` argument are mutually exclusive.
+Generic `Descale` requires either `kernel` or a custom-kernel callback; custom
+kernels also require `taps` or `support`.
+
+### Basic example
 
 ```python
 core.std.LoadPlugin(path=r"C:\path\to\dsmvc.dll")
@@ -100,22 +129,32 @@ flowchart LR
     PLG --> EX
 ```
 
-## Filters
+## Arguments
 
-The following functions preserve the baseline arguments, then append the
-optional `backend:data`, `padding:int`, and `f64mode:int` controls:
-
-- `Debilinear`
-- `Debicubic`
-- `Delanczos`
-- `Despline16`
-- `Despline36`
-- `Despline64`
-- `Descale`
+The native functions preserve the baseline arguments, add JET v12-compatible
+`blur:float`, then append the optional `backend:data`, `padding:int`, and
+`f64mode:int` controls shown above.
 
 `Descale` accepts the baseline custom-kernel forms `custom`/`support` and
 `custom_kernel`/`taps`. If both aliases are supplied, baseline precedence is
 preserved: `custom` wins over `custom_kernel`, and `taps` wins over `support`.
+
+`blur` defaults to `1.0` and is available on every fixed-kernel entry, generic
+`Descale`, and the Python wrappers. It stretches a kernel entirely during plan
+construction:
+
+```text
+effective_support = ceil(base_support * blur)
+weight = kernel(distance / blur)
+```
+
+The value must be finite and greater than zero, and the plugin requires it to
+be smaller than the minimum input-plane extent. Lanczos continues to use its
+original `taps` value for the window even when effective support grows. The
+default `blur=1.0` plan follows the original coefficient path without an added
+division. Wider supports increase planning, factor, and execution cost, and may
+change the normal matrix enough for automatic `f64mode=0` to retain Float64.
+There is no extra per-frame convolution, frame, or memory round trip.
 
 `padding` selects the explicit edge extension and defaults to `3`:
 
@@ -172,9 +211,10 @@ fall back to scalar.
 Planning is deferred until the first requested frame. The inverse-only planner
 uses Float64 CSR and banded LDLT construction, stores immutable Float32
 coefficients, and retains Float64 factors according to `f64mode`. Built-in plans
-use bounded exact-key single-flight LRU caching; sampling geometry is cached
-separately so kernel families and precision modes can reuse it. SIMD packed
-plans are shared by filters that share a canonical Float32 plan.
+use bounded exact-key single-flight LRU caching; the exact blur bit pattern is
+part of the plan key. Sampling geometry is cached separately by effective
+support, so different blur values in the same support tier can reuse it. SIMD
+packed plans are shared by filters that share a canonical Float32 plan.
 
 The Python wrapper is [dsmvc.py](dsmvc.py). It preserves the
 baseline RGB, YUV, GRAY, bit-depth, subsampling, `yuv444`, `gray`, and chroma
@@ -182,17 +222,17 @@ conversion behavior while dispatching to `core.dsmvc`.
 
 ## Performance snapshot
 
-The following snapshot reports dsmvc's measured CPU, CUDA, ARM, and Vulkan
-results. Candidate/s figures are end-to-end GetNative graph measurements;
-GPU backends are explicitly selected. The GetNative-VF RTX 5080 figure above
-is a separate project measurement and is not included in this table.
+The following snapshot combines the latest RTX 5080 CUDA candidate scan with
+the published CPU, ARM, and Vulkan release reports. Candidate/s figures are
+end-to-end GetNative graph measurements unless noted otherwise; GPU backends
+are explicitly selected.
 
 | Platform / route | Candidate-scan result | Comparison |
 |---|---|---|
 | RTX 5080 / CUDA | **417.457 candidates/s** | **7.30x** original descale |
 | Ryzen 9 5950X / CPU at R32T32 | **370.049 candidates/s** | **6.47x** original descale |
 | Apple M4 Max / ARM NEON at R16T16 | **421.237 candidates/s** | **2.25x** original descale |
-| RTX 5080 / Vulkan at R32T32 | **133.423 candidates/s** | Explicit Vulkan route; refreshed 2026-08-24 |
+| RTX 5080 / Vulkan at R32T32 | **353.068 candidates/s** | **2.618x** the v0.1.0 Vulkan result; refreshed 2026-08-27 |
 
 The CUDA/CPU/ARM/Vulkan measurements use different hosts and request levels;
 compare ratios within each benchmark rather than absolute candidates/s across
@@ -337,6 +377,12 @@ workflow are documented in [benchmarks/README.md](benchmarks/README.md).
 it records architecture-specific build commands, correctness and identity
 checks, paired CPU/Metal results, system-pressure snapshots, and required CI
 evidence.
+
+`benchmarks/blank_fixed_kernel_benchmark.py --blurs 0.75 1 1.01 1.25 1.5`
+records blur, effective support, and half-bandwidth in JSON, CSV, and Markdown.
+Non-unity values may compare only `jet` and `new`, because original IEW descale
+does not expose blur. Use `--omit-unity-blur` to benchmark the omitted default
+separately from an explicit `blur=1.0` call.
 
 For the real-video end-to-end comparison based on the supplied training HTML,
 `test_getfnative*.vpy`, and `test_selectkernel.vpy`, use

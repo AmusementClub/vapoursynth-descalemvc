@@ -54,11 +54,11 @@
 <circle cx="169.00" cy="168.53" r="3.5" fill="#dc2626"/>
 <circle cx="261.00" cy="166.07" r="3.5" fill="#dc2626"/>
 <circle cx="353.00" cy="178.87" r="3.5" fill="#dc2626"/>
-<polyline points="77.00,331.16 169.00,294.70 261.00,295.28 353.00,295.31" fill="none" stroke="#0f766e" stroke-width="2.5"/>
-<circle cx="77.00" cy="331.16" r="3.5" fill="#0f766e"/>
-<circle cx="169.00" cy="294.70" r="3.5" fill="#0f766e"/>
-<circle cx="261.00" cy="295.28" r="3.5" fill="#0f766e"/>
-<circle cx="353.00" cy="295.31" r="3.5" fill="#0f766e"/>
+<polyline points="77.00,299.17 169.00,203.37 261.00,204.70 353.00,205.27" fill="none" stroke="#0f766e" stroke-width="2.5"/>
+<circle cx="77.00" cy="299.17" r="3.5" fill="#0f766e"/>
+<circle cx="169.00" cy="203.37" r="3.5" fill="#0f766e"/>
+<circle cx="261.00" cy="204.70" r="3.5" fill="#0f766e"/>
+<circle cx="353.00" cy="205.27" r="3.5" fill="#0f766e"/>
 </g>
 <g font-family="sans-serif">
 <rect x="375" y="108" width="332" height="270" fill="#f8fafc" stroke="#cbd5e1"/>
@@ -95,11 +95,11 @@
 <circle cx="519.00" cy="194.19" r="3.5" fill="#dc2626"/>
 <circle cx="611.00" cy="187.80" r="3.5" fill="#dc2626"/>
 <circle cx="703.00" cy="192.97" r="3.5" fill="#dc2626"/>
-<polyline points="427.00,327.51 519.00,297.78 611.00,298.05 703.00,297.40" fill="none" stroke="#0f766e" stroke-width="2.5"/>
-<circle cx="427.00" cy="327.51" r="3.5" fill="#0f766e"/>
-<circle cx="519.00" cy="297.78" r="3.5" fill="#0f766e"/>
-<circle cx="611.00" cy="298.05" r="3.5" fill="#0f766e"/>
-<circle cx="703.00" cy="297.40" r="3.5" fill="#0f766e"/>
+<polyline points="427.00,268.60 519.00,193.75 611.00,190.94 703.00,195.35" fill="none" stroke="#0f766e" stroke-width="2.5"/>
+<circle cx="427.00" cy="268.60" r="3.5" fill="#0f766e"/>
+<circle cx="519.00" cy="193.75" r="3.5" fill="#0f766e"/>
+<circle cx="611.00" cy="190.94" r="3.5" fill="#0f766e"/>
+<circle cx="703.00" cy="195.35" r="3.5" fill="#0f766e"/>
 </g>
 <g font-family="sans-serif">
 <rect x="725" y="108" width="332" height="270" fill="#f8fafc" stroke="#cbd5e1"/>
@@ -136,10 +136,10 @@
 <circle cx="869.00" cy="197.84" r="3.5" fill="#dc2626"/>
 <circle cx="961.00" cy="205.13" r="3.5" fill="#dc2626"/>
 <circle cx="1053.00" cy="208.88" r="3.5" fill="#dc2626"/>
-<polyline points="777.00,300.08 869.00,269.38 961.00,270.92 1053.00,271.96" fill="none" stroke="#0f766e" stroke-width="2.5"/>
-<circle cx="777.00" cy="300.08" r="3.5" fill="#0f766e"/>
-<circle cx="869.00" cy="269.38" r="3.5" fill="#0f766e"/>
-<circle cx="961.00" cy="270.92" r="3.5" fill="#0f766e"/>
-<circle cx="1053.00" cy="271.96" r="3.5" fill="#0f766e"/>
+<polyline points="777.00,269.47 869.00,220.56 961.00,225.73 1053.00,226.35" fill="none" stroke="#0f766e" stroke-width="2.5"/>
+<circle cx="777.00" cy="269.47" r="3.5" fill="#0f766e"/>
+<circle cx="869.00" cy="220.56" r="3.5" fill="#0f766e"/>
+<circle cx="961.00" cy="225.73" r="3.5" fill="#0f766e"/>
+<circle cx="1053.00" cy="226.35" r="3.5" fill="#0f766e"/>
 </g>
 </svg>

@@ -12,6 +12,37 @@ The pipeline is split into four Python runners:
 - `blank_fixed_kernel_benchmark.py` measures the same kernels from an
   in-memory `std.BlankClip`.
 
+The BlankClip runner accepts one or more kernel stretch factors through
+`--blurs`. Every JSON/CSV/Markdown case records the requested blur, computed
+`ceil(base_support * blur)`, and resulting half-bandwidth. Original IEW has no
+blur argument, so any non-unity value is restricted to `--implementations jet
+new` (or either of those implementations alone). `--omit-unity-blur` leaves the
+argument absent for `blur=1.0`, allowing the default API path and explicit
+unity path to be measured as separate artifacts.
+
+For a before/after dsmvc gate, pass the preserved binary as
+`--baseline-plugin` and select `--implementations baseline new`. Measured
+process order reverses on every second run, so each cell is paired without a
+fixed baseline-first thermal bias. The preserved baseline never receives a
+blur argument by default; this supports both omitted-default and
+explicit-unity candidate checks.
+
+When the preserved baseline is itself a blur-capable dsmvc build, add
+`--baseline-supports-blur` to compare non-unity blur across executor revisions.
+The flag is intentionally explicit so an older pre-blur binary cannot be used
+for a misleading non-unity comparison.
+
+```sh
+python3 benchmarks/blank_fixed_kernel_benchmark.py \
+  --jet-plugin /path/to/jet-v12/libdescale.so \
+  --new-plugin /path/to/dsmvc.so \
+  --vspipe /path/to/vspipe \
+  --implementations jet new \
+  --blurs 0.75 1.01 1.25 1.5 \
+  --threads 1 8 32 \
+  --output benchmark-results/blank-blur
+```
+
 `cpu_api_regression.py` is a focused ABI regression runner for comparing a
 preserved API3 plugin with the API4-only build on `backend=cpu`. It runs each
 ABI in a separate VSPipe process, alternates their order, gives every measured

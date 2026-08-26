@@ -1,6 +1,9 @@
 # Descale MVC Release Benchmark
 
-_Official release benchmark; CPU/CUDA/reference data collected 2026-08-23, Vulkan performance refreshed 2026-08-24, on dsmvc source `99b920a`._
+_Official release benchmark; CPU/CUDA/reference data collected 2026-08-23 on
+dsmvc source `99b920a`; optimized Vulkan data refreshed 2026-08-26, with the
+final E2E Vulkan R1T1-R32T32 sweeps collected 2026-08-27 from the v0.1.1 release
+candidate._
 
 ## Executive Summary
 
@@ -8,11 +11,11 @@ This package compares the current Release build against the original descale plu
 
 | Workload | Result |
 |---|---:|
-| E2E getfnative candidates | 370.049 candidates/s (CPU) / 417.457 (CUDA) / 133.423 (Vulkan) at R32T32 |
+| E2E getfnative candidates | 370.049 candidates/s (CPU) / 417.457 (CUDA) / 353.068 (Vulkan) at R32T32 |
 | getfnative speedup vs old | 8.90x at R1T1, 6.47x at R32T32 (CPU column) |
 | getfnative speedup vs JET | 8.59x at R1T1, 6.47x at R32T32 (CPU column) |
-| Fixed kernel coverage | 10 kernels x 4 thread levels x 4 columns, 4,000 frames each |
-| BlankClip kernel coverage | 10 kernels x 4 thread levels x 4 columns, 8,000 frames each |
+| Fixed kernel coverage | 10 kernels x 4 thread levels x 5 columns, 4,000 frames each |
+| BlankClip kernel coverage | 10 kernels x 4 thread levels x 5 columns, 8,000 frames each |
 | Error coverage | 34,101 candidates across three recipes, old and JET references |
 | Accuracy showcase | 6 ill-conditioned plans; old/JET float32 error up to 3.3e6 absolute on `lanczos2-catastrophic`, dsmvc auto matches the F64 reference bit-exactly |
 
@@ -30,7 +33,7 @@ GPU columns measure the current plugin with an explicitly forced backend (`backe
 | Source filter | `lsmas` |
 | Descale geometry | base `1778x1000`, native target `1440x810` |
 | Thread sweep | `R1T1`, `R8T8`, `R16T16`, `R32T32`; each cell uses `core.num_threads=N` and `--requests N` |
-| Performance repetition | One fresh VSPipe process per implementation/case/thread cell under a campaign-wide flock; Vulkan refresh required five consecutive <=2% utilization samples before each GPU cell |
+| Performance repetition | One fresh VSPipe process per implementation/case/thread cell under a campaign-wide flock; Vulkan refreshes added one warmup and an idle-utilization gate; each final E2E Vulkan case/thread cell used three valid full-scan samples |
 | BlankClip throughput | In-memory `std.BlankClip`, 1920x1080 GRAYS, fixed 810p geometry, 8,000 frames per cell |
 
 ## E2E Case Definitions
@@ -45,8 +48,14 @@ The measured graph starts with `source -> ShufflePlanes(plane=0, GRAY) -> resize
 
 ## Build and Provenance
 
-- dsmvc source: master `99b920a` (2026-08-23); build `Release`, CUDA + Vulkan enabled, GCC 15.2.0, CUDA 13.3, Vulkan SDK 1.4.357
-- Correctness gates before the campaign: ctest 23/23; `dsmvc_cpu_f64_avx2_benchmark --check-only` 76/76 bit-exact (0 ULP)
+- Historical CPU/CUDA/reference source: master `99b920a` (2026-08-23); build
+  `Release`, CUDA + Vulkan enabled, GCC 15.2.0, CUDA 13.3, Vulkan SDK 1.4.357
+- Optimized Vulkan build: v0.1.1 release-candidate source snapshot; plugin
+  SHA-256 `486a96f07d8e4ce8171231719c3f7166c4facce0fa429d584f51fd0ff890fd98`
+- Correctness gates: historical campaign ctest 23/23 and
+  `dsmvc_cpu_f64_avx2_benchmark --check-only` 76/76 bit-exact (0 ULP);
+  v0.1.1 release candidate ctest 35/35 plus full VapourSynth CUDA/Vulkan
+  integration on the RTX 5080 host
 - old descale: IEW Descale-11 (`tegaf.asi.xe`), the vsrepo binary
 - JET descale: v12 built from source, pinned commit `d699532b` (2026-08-20), meson release; IEW and JET share the plugin identifier and namespace, so every reference cell runs in its own VSPipe process with the vsrepo copy quarantined for the campaign duration
 - Binary hashes and gate outputs were checked during the private benchmark run.
@@ -55,45 +64,45 @@ On healthy 1080p -> 810p geometries all three implementations agree with the F64
 
 ### Vulkan performance refresh
 
-The original Vulkan E2E cells were invalidated because the campaign log showed
-11-48% GPU utilization immediately before those cells, contrary to the intended
-idle protocol. The matched refresh reused the same plugin binary, source,
-graphs, frame counts, and one-run protocol after an idle-utilization gate. Only
-the Vulkan performance cells changed; CPU, CUDA, reference-plugin, correctness,
-error-sweep, and accuracy results remain from the original campaign.
+The v0.1.1 refresh replaced every Vulkan performance cell while preserving the
+source bytes, graphs, geometry, frame counts, and thread/request sweep. Each
+group used one warmup and an idle-utilization gate. All E2E Vulkan points are
+three-sample medians; fixed-kernel and BlankClip Vulkan cells retain the one-run
+table protocol. CPU, CUDA, reference-plugin, error-sweep, and accuracy data
+remain from the 2026-08-23 campaign.
 
 ## E2E Thread Scaling
 
 ![E2E thread scaling](e2e-scaling.svg)
 
-The chart reports candidates per second for the complete candidate graph. It includes planner/cache work, FrameEval, reconstruction, Expr, PlaneStats, frame delivery, and VSPipe process overhead. GPU columns are explicit-backend runs (`backend=cuda` / `backend=vulkan`); automatic mode always routes to CPU, so the CPU column is what an unconfigured user gets.
+The chart reports candidates per second for the complete candidate graph. It includes planner/cache work, FrameEval, reconstruction, Expr, PlaneStats, frame delivery, and VSPipe process overhead. GPU columns are explicit-backend runs (`backend=cuda` / `backend=vulkan`); automatic mode always routes to CPU, so the CPU column is what an unconfigured user gets. Every Vulkan point in all three E2E recipes is a final three-sample median.
 
 ### `getfnative`
 
 | Threads | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| R1T1 | 15.129 | 15.676 | 134.662 | 152.479 | 45.956 | 8.90x | 8.59x |
-| R8T8 | 55.259 | 55.963 | 405.593 | 442.680 | 134.910 | 7.34x | 7.25x |
-| R16T16 | 59.513 | 59.534 | 392.952 | 448.681 | 133.494 | 6.60x | 6.60x |
-| R32T32 | 57.174 | 57.173 | 370.049 | 417.457 | 133.423 | 6.47x | 6.47x |
+| R1T1 | 15.129 | 15.676 | 134.662 | 152.479 | 124.007 | 8.90x | 8.59x |
+| R8T8 | 55.259 | 55.963 | 405.593 | 442.680 | 357.684 | 7.34x | 7.25x |
+| R16T16 | 59.513 | 59.534 | 392.952 | 448.681 | 354.461 | 6.60x | 6.60x |
+| R32T32 | 57.174 | 57.173 | 370.049 | 417.457 | 353.068 | 6.47x | 6.47x |
 
 ### `getfnative_v2`
 
 | Threads | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| R1T1 | 50.895 | 52.987 | 356.503 | 231.825 | 57.718 | 7.00x | 6.73x |
-| R8T8 | 168.882 | 168.378 | 470.976 | 399.807 | 134.001 | 2.79x | 2.80x |
-| R16T16 | 172.568 | 172.796 | 471.971 | 416.223 | 133.304 | 2.73x | 2.73x |
-| R32T32 | 164.893 | 165.103 | 446.947 | 402.958 | 134.969 | 2.71x | 2.71x |
+| R1T1 | 50.895 | 52.987 | 356.503 | 231.825 | 208.887 | 7.00x | 6.73x |
+| R8T8 | 168.882 | 168.378 | 470.976 | 399.807 | 400.949 | 2.79x | 2.80x |
+| R16T16 | 172.568 | 172.796 | 471.971 | 416.223 | 408.160 | 2.73x | 2.73x |
+| R32T32 | 164.893 | 165.103 | 446.947 | 402.958 | 396.830 | 2.71x | 2.71x |
 
 ### `selectkernel`
 
 | Threads | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| R1T1 | 17.489 | 18.188 | 139.034 | 90.335 | 46.729 | 7.95x | 7.64x |
-| R8T8 | 54.259 | 53.552 | 172.168 | 142.429 | 75.466 | 3.17x | 3.21x |
-| R16T16 | 57.879 | 55.805 | 167.799 | 135.610 | 74.019 | 2.90x | 3.01x |
-| R32T32 | 56.629 | 55.867 | 154.270 | 132.096 | 73.050 | 2.72x | 2.76x |
+| R1T1 | 17.489 | 18.188 | 139.034 | 90.335 | 75.381 | 7.95x | 7.64x |
+| R8T8 | 54.259 | 53.552 | 172.168 | 142.429 | 121.161 | 3.17x | 3.21x |
+| R16T16 | 57.879 | 55.805 | 167.799 | 135.610 | 116.326 | 2.90x | 3.01x |
+| R32T32 | 56.629 | 55.867 | 154.270 | 132.096 | 115.747 | 2.72x | 2.76x |
 
 ## E2E Error Comparison
 
@@ -369,61 +378,61 @@ Each cell is wall-clock FPS for 4,000 source frames at fixed 810p geometry. This
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 398.074 | 387.391 | 473.326 | 250.038 | 208.290 | 1.19x | 1.22x |
-| `bicubic (0, 0.5)` | 309.425 | 317.546 | 440.582 | 284.823 | 217.756 | 1.42x | 1.39x |
-| `lanczos2` | 307.292 | 317.198 | 436.738 | 285.306 | 217.368 | 1.42x | 1.38x |
-| `lanczos3` | 199.207 | 201.071 | 352.578 | 270.406 | 194.533 | 1.77x | 1.75x |
-| `lanczos4` | 160.780 | 162.683 | 323.741 | 268.465 | 176.069 | 2.01x | 1.99x |
-| `lanczos5` | 134.381 | 135.816 | 276.383 | 225.776 | 179.116 | 2.06x | 2.03x |
-| `lanczos6` | 114.908 | 115.505 | 252.505 | 212.984 | 165.414 | 2.20x | 2.19x |
-| `spline16` | 307.466 | 316.774 | 437.439 | 286.874 | 217.204 | 1.42x | 1.38x |
-| `spline36` | 198.794 | 201.010 | 352.948 | 274.968 | 192.920 | 1.78x | 1.76x |
-| `spline64` | 161.381 | 162.744 | 323.087 | 269.385 | 176.302 | 2.00x | 1.99x |
+| `bilinear` | 398.074 | 387.391 | 473.326 | 250.038 | 217.222 | 1.19x | 1.22x |
+| `bicubic (0, 0.5)` | 309.425 | 317.546 | 440.582 | 284.823 | 261.339 | 1.42x | 1.39x |
+| `lanczos2` | 307.292 | 317.198 | 436.738 | 285.306 | 258.653 | 1.42x | 1.38x |
+| `lanczos3` | 199.207 | 201.071 | 352.578 | 270.406 | 253.862 | 1.77x | 1.75x |
+| `lanczos4` | 160.780 | 162.683 | 323.741 | 268.465 | 247.718 | 2.01x | 1.99x |
+| `lanczos5` | 134.381 | 135.816 | 276.383 | 225.776 | 228.596 | 2.06x | 2.03x |
+| `lanczos6` | 114.908 | 115.505 | 252.505 | 212.984 | 213.548 | 2.20x | 2.19x |
+| `spline16` | 307.466 | 316.774 | 437.439 | 286.874 | 260.261 | 1.42x | 1.38x |
+| `spline36` | 198.794 | 201.010 | 352.948 | 274.968 | 255.380 | 1.78x | 1.76x |
+| `spline64` | 161.381 | 162.744 | 323.087 | 269.385 | 247.253 | 2.00x | 1.99x |
 
 ### R8T8
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 413.253 | 408.500 | 470.288 | 364.149 | 316.974 | 1.14x | 1.15x |
-| `bicubic (0, 0.5)` | 410.475 | 412.769 | 463.492 | 365.136 | 320.615 | 1.13x | 1.12x |
-| `lanczos2` | 406.862 | 411.669 | 458.991 | 362.887 | 319.252 | 1.13x | 1.11x |
-| `lanczos3` | 398.301 | 398.830 | 458.036 | 362.553 | 317.542 | 1.15x | 1.15x |
-| `lanczos4` | 401.055 | 399.669 | 453.733 | 364.644 | 289.738 | 1.13x | 1.14x |
-| `lanczos5` | 395.697 | 396.224 | 457.077 | 364.567 | 296.748 | 1.16x | 1.15x |
-| `lanczos6` | 389.930 | 397.468 | 448.136 | 363.341 | 262.787 | 1.15x | 1.13x |
-| `spline16` | 403.312 | 410.150 | 461.500 | 366.296 | 315.570 | 1.14x | 1.13x |
-| `spline36` | 398.461 | 399.972 | 452.336 | 360.145 | 319.068 | 1.14x | 1.13x |
-| `spline64` | 395.979 | 396.858 | 450.904 | 365.210 | 287.975 | 1.14x | 1.14x |
+| `bilinear` | 413.253 | 408.500 | 470.288 | 364.149 | 319.710 | 1.14x | 1.15x |
+| `bicubic (0, 0.5)` | 410.475 | 412.769 | 463.492 | 365.136 | 306.920 | 1.13x | 1.12x |
+| `lanczos2` | 406.862 | 411.669 | 458.991 | 362.887 | 320.889 | 1.13x | 1.11x |
+| `lanczos3` | 398.301 | 398.830 | 458.036 | 362.553 | 323.270 | 1.15x | 1.15x |
+| `lanczos4` | 401.055 | 399.669 | 453.733 | 364.644 | 321.588 | 1.13x | 1.14x |
+| `lanczos5` | 395.697 | 396.224 | 457.077 | 364.567 | 318.979 | 1.16x | 1.15x |
+| `lanczos6` | 389.930 | 397.468 | 448.136 | 363.341 | 317.523 | 1.15x | 1.13x |
+| `spline16` | 403.312 | 410.150 | 461.500 | 366.296 | 323.079 | 1.14x | 1.13x |
+| `spline36` | 398.461 | 399.972 | 452.336 | 360.145 | 321.729 | 1.14x | 1.13x |
+| `spline64` | 395.979 | 396.858 | 450.904 | 365.210 | 322.381 | 1.14x | 1.14x |
 
 ### R16T16
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 417.173 | 417.064 | 468.163 | 363.952 | 321.425 | 1.12x | 1.12x |
-| `bicubic (0, 0.5)` | 410.980 | 411.329 | 461.242 | 365.316 | 320.901 | 1.12x | 1.12x |
-| `lanczos2` | 409.703 | 410.359 | 462.065 | 364.468 | 321.868 | 1.13x | 1.13x |
-| `lanczos3` | 402.250 | 402.607 | 455.625 | 365.072 | 319.411 | 1.13x | 1.13x |
-| `lanczos4` | 397.956 | 397.210 | 452.625 | 364.077 | 287.997 | 1.14x | 1.14x |
-| `lanczos5` | 394.291 | 394.017 | 449.694 | 364.045 | 294.831 | 1.14x | 1.14x |
-| `lanczos6` | 392.355 | 392.444 | 444.027 | 363.232 | 262.337 | 1.13x | 1.13x |
-| `spline16` | 411.134 | 410.065 | 463.495 | 364.491 | 320.503 | 1.13x | 1.13x |
-| `spline36` | 401.609 | 402.452 | 457.267 | 364.680 | 320.374 | 1.14x | 1.14x |
-| `spline64` | 397.540 | 398.605 | 452.985 | 364.440 | 287.741 | 1.14x | 1.14x |
+| `bilinear` | 417.173 | 417.064 | 468.163 | 363.952 | 321.564 | 1.12x | 1.12x |
+| `bicubic (0, 0.5)` | 410.980 | 411.329 | 461.242 | 365.316 | 325.118 | 1.12x | 1.12x |
+| `lanczos2` | 409.703 | 410.359 | 462.065 | 364.468 | 323.973 | 1.13x | 1.13x |
+| `lanczos3` | 402.250 | 402.607 | 455.625 | 365.072 | 323.747 | 1.13x | 1.13x |
+| `lanczos4` | 397.956 | 397.210 | 452.625 | 364.077 | 324.692 | 1.14x | 1.14x |
+| `lanczos5` | 394.291 | 394.017 | 449.694 | 364.045 | 322.460 | 1.14x | 1.14x |
+| `lanczos6` | 392.355 | 392.444 | 444.027 | 363.232 | 320.449 | 1.13x | 1.13x |
+| `spline16` | 411.134 | 410.065 | 463.495 | 364.491 | 324.488 | 1.13x | 1.13x |
+| `spline36` | 401.609 | 402.452 | 457.267 | 364.680 | 321.886 | 1.14x | 1.14x |
+| `spline64` | 397.540 | 398.605 | 452.985 | 364.440 | 322.086 | 1.14x | 1.14x |
 
 ### R32T32
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 414.322 | 414.299 | 465.398 | 361.649 | 318.854 | 1.12x | 1.12x |
-| `bicubic (0, 0.5)` | 408.218 | 408.831 | 458.467 | 363.084 | 318.818 | 1.12x | 1.12x |
-| `lanczos2` | 407.940 | 408.490 | 456.761 | 364.053 | 318.652 | 1.12x | 1.12x |
-| `lanczos3` | 400.815 | 400.246 | 450.086 | 362.105 | 313.879 | 1.12x | 1.12x |
-| `lanczos4` | 395.522 | 396.076 | 446.969 | 361.184 | 287.316 | 1.13x | 1.13x |
-| `lanczos5` | 391.787 | 392.747 | 444.585 | 361.046 | 295.453 | 1.13x | 1.13x |
-| `lanczos6` | 388.866 | 388.764 | 440.197 | 361.171 | 261.537 | 1.13x | 1.13x |
-| `spline16` | 408.045 | 409.100 | 457.640 | 363.256 | 319.181 | 1.12x | 1.12x |
-| `spline36` | 398.649 | 400.344 | 450.973 | 363.561 | 317.606 | 1.13x | 1.13x |
-| `spline64` | 396.345 | 395.221 | 447.768 | 362.230 | 287.730 | 1.13x | 1.13x |
+| `bilinear` | 414.322 | 414.299 | 465.398 | 361.649 | 318.640 | 1.12x | 1.12x |
+| `bicubic (0, 0.5)` | 408.218 | 408.831 | 458.467 | 363.084 | 324.209 | 1.12x | 1.12x |
+| `lanczos2` | 407.940 | 408.490 | 456.761 | 364.053 | 324.007 | 1.12x | 1.12x |
+| `lanczos3` | 400.815 | 400.246 | 450.086 | 362.105 | 322.922 | 1.12x | 1.12x |
+| `lanczos4` | 395.522 | 396.076 | 446.969 | 361.184 | 321.774 | 1.13x | 1.13x |
+| `lanczos5` | 391.787 | 392.747 | 444.585 | 361.046 | 319.707 | 1.13x | 1.13x |
+| `lanczos6` | 388.866 | 388.764 | 440.197 | 361.171 | 318.975 | 1.13x | 1.13x |
+| `spline16` | 408.045 | 409.100 | 457.640 | 363.256 | 323.648 | 1.12x | 1.12x |
+| `spline36` | 398.649 | 400.344 | 450.973 | 363.561 | 323.585 | 1.13x | 1.13x |
+| `spline64` | 396.345 | 395.221 | 447.768 | 362.230 | 322.746 | 1.13x | 1.13x |
 
 
 ## BlankClip Throughput
@@ -436,61 +445,61 @@ Each cell is wall-clock FPS for 8,000 frames from an in-memory 1920x1080 GRAYS `
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 951.699 | 905.473 | 2103.648 | 388.115 | 289.423 | 2.21x | 2.32x |
-| `bicubic (0, 0.5)` | 536.680 | 558.183 | 1470.621 | 487.399 | 306.510 | 2.74x | 2.63x |
-| `lanczos2` | 535.439 | 558.363 | 1382.413 | 487.626 | 307.664 | 2.58x | 2.48x |
-| `lanczos3` | 263.790 | 267.720 | 874.060 | 450.835 | 263.867 | 3.31x | 3.26x |
-| `lanczos4` | 201.818 | 202.819 | 729.681 | 433.490 | 231.127 | 3.62x | 3.60x |
-| `lanczos5` | 160.401 | 162.595 | 538.078 | 325.501 | 236.037 | 3.35x | 3.31x |
-| `lanczos6` | 134.673 | 135.055 | 467.228 | 299.081 | 211.839 | 3.47x | 3.46x |
-| `spline16` | 539.237 | 560.980 | 1426.142 | 489.099 | 308.248 | 2.64x | 2.54x |
-| `spline36` | 265.501 | 268.352 | 913.734 | 453.017 | 264.165 | 3.44x | 3.40x |
-| `spline64` | 202.033 | 203.288 | 752.305 | 436.411 | 231.329 | 3.72x | 3.70x |
+| `bilinear` | 951.699 | 905.473 | 2103.648 | 388.115 | 309.911 | 2.21x | 2.32x |
+| `bicubic (0, 0.5)` | 536.680 | 558.183 | 1470.621 | 487.399 | 421.554 | 2.74x | 2.63x |
+| `lanczos2` | 535.439 | 558.363 | 1382.413 | 487.626 | 417.390 | 2.58x | 2.48x |
+| `lanczos3` | 263.790 | 267.720 | 874.060 | 450.835 | 401.134 | 3.31x | 3.26x |
+| `lanczos4` | 201.818 | 202.819 | 729.681 | 433.490 | 377.801 | 3.62x | 3.60x |
+| `lanczos5` | 160.401 | 162.595 | 538.078 | 325.501 | 330.570 | 3.35x | 3.31x |
+| `lanczos6` | 134.673 | 135.055 | 467.228 | 299.081 | 301.733 | 3.47x | 3.46x |
+| `spline16` | 539.237 | 560.980 | 1426.142 | 489.099 | 416.543 | 2.64x | 2.54x |
+| `spline36` | 265.501 | 268.352 | 913.734 | 453.017 | 399.703 | 3.44x | 3.40x |
+| `spline64` | 202.033 | 203.288 | 752.305 | 436.411 | 379.121 | 3.72x | 3.70x |
 
 ### R8T8
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 805.429 | 806.963 | 1254.002 | 755.137 | 407.954 | 1.56x | 1.55x |
-| `bicubic (0, 0.5)` | 800.803 | 802.209 | 1257.211 | 753.731 | 450.363 | 1.57x | 1.57x |
-| `lanczos2` | 804.939 | 801.467 | 1255.526 | 750.485 | 448.033 | 1.56x | 1.57x |
-| `lanczos3` | 806.268 | 806.544 | 1167.943 | 751.357 | 360.918 | 1.45x | 1.45x |
-| `lanczos4` | 789.731 | 792.551 | 1040.491 | 748.914 | 302.717 | 1.32x | 1.31x |
-| `lanczos5` | 757.172 | 764.224 | 911.977 | 758.343 | 311.908 | 1.20x | 1.19x |
-| `lanczos6` | 716.729 | 723.390 | 812.054 | 744.190 | 275.407 | 1.13x | 1.12x |
-| `spline16` | 804.658 | 803.110 | 1241.073 | 751.136 | 448.618 | 1.54x | 1.55x |
-| `spline36` | 805.387 | 805.123 | 1162.419 | 752.644 | 360.969 | 1.44x | 1.44x |
-| `spline64` | 787.827 | 788.800 | 1026.180 | 751.537 | 302.421 | 1.30x | 1.30x |
+| `bilinear` | 805.429 | 806.963 | 1254.002 | 755.137 | 449.662 | 1.56x | 1.55x |
+| `bicubic (0, 0.5)` | 800.803 | 802.209 | 1257.211 | 753.731 | 637.796 | 1.57x | 1.57x |
+| `lanczos2` | 804.939 | 801.467 | 1255.526 | 750.485 | 641.861 | 1.56x | 1.57x |
+| `lanczos3` | 806.268 | 806.544 | 1167.943 | 751.357 | 640.145 | 1.45x | 1.45x |
+| `lanczos4` | 789.731 | 792.551 | 1040.491 | 748.914 | 603.303 | 1.32x | 1.31x |
+| `lanczos5` | 757.172 | 764.224 | 911.977 | 758.343 | 505.263 | 1.20x | 1.19x |
+| `lanczos6` | 716.729 | 723.390 | 812.054 | 744.190 | 441.334 | 1.13x | 1.12x |
+| `spline16` | 804.658 | 803.110 | 1241.073 | 751.136 | 637.454 | 1.54x | 1.55x |
+| `spline36` | 805.387 | 805.123 | 1162.419 | 752.644 | 642.442 | 1.44x | 1.44x |
+| `spline64` | 787.827 | 788.800 | 1026.180 | 751.537 | 605.969 | 1.30x | 1.30x |
 
 ### R16T16
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 805.631 | 808.265 | 1276.083 | 735.958 | 406.681 | 1.58x | 1.58x |
-| `bicubic (0, 0.5)` | 810.209 | 805.409 | 1272.184 | 734.700 | 448.315 | 1.57x | 1.58x |
-| `lanczos2` | 808.769 | 803.994 | 1274.381 | 734.426 | 449.527 | 1.58x | 1.59x |
-| `lanczos3` | 816.513 | 817.666 | 1256.230 | 736.050 | 359.705 | 1.54x | 1.54x |
-| `lanczos4` | 815.451 | 811.899 | 1199.750 | 733.067 | 304.711 | 1.47x | 1.48x |
-| `lanczos5` | 811.447 | 810.288 | 1172.182 | 740.128 | 312.400 | 1.44x | 1.45x |
-| `lanczos6` | 810.306 | 807.747 | 1119.768 | 732.444 | 274.969 | 1.38x | 1.39x |
-| `spline16` | 807.633 | 806.361 | 1274.109 | 731.866 | 446.924 | 1.58x | 1.58x |
-| `spline36` | 817.351 | 817.956 | 1261.545 | 734.531 | 360.803 | 1.54x | 1.54x |
-| `spline64` | 817.713 | 812.210 | 1206.905 | 736.454 | 305.824 | 1.48x | 1.49x |
+| `bilinear` | 805.631 | 808.265 | 1276.083 | 735.958 | 449.219 | 1.58x | 1.58x |
+| `bicubic (0, 0.5)` | 810.209 | 805.409 | 1272.184 | 734.700 | 608.485 | 1.57x | 1.58x |
+| `lanczos2` | 808.769 | 803.994 | 1274.381 | 734.426 | 619.338 | 1.58x | 1.59x |
+| `lanczos3` | 816.513 | 817.666 | 1256.230 | 736.050 | 615.178 | 1.54x | 1.54x |
+| `lanczos4` | 815.451 | 811.899 | 1199.750 | 733.067 | 606.920 | 1.47x | 1.48x |
+| `lanczos5` | 811.447 | 810.288 | 1172.182 | 740.128 | 504.678 | 1.44x | 1.45x |
+| `lanczos6` | 810.306 | 807.747 | 1119.768 | 732.444 | 439.866 | 1.38x | 1.39x |
+| `spline16` | 807.633 | 806.361 | 1274.109 | 731.866 | 627.276 | 1.58x | 1.58x |
+| `spline36` | 817.351 | 817.956 | 1261.545 | 734.531 | 622.674 | 1.54x | 1.54x |
+| `spline64` | 817.713 | 812.210 | 1206.905 | 736.454 | 593.789 | 1.48x | 1.49x |
 
 ### R32T32
 
 | Kernel | old descale | JET descale | dsmvc-cpu | dsmvc-cuda | dsmvc-vulkan | cpu vs old | cpu vs JET |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `bilinear` | 732.138 | 731.207 | 1085.542 | 721.957 | 405.404 | 1.48x | 1.48x |
-| `bicubic (0, 0.5)` | 742.755 | 740.207 | 1074.574 | 713.068 | 444.348 | 1.45x | 1.45x |
-| `lanczos2` | 743.184 | 740.494 | 1077.803 | 711.473 | 445.242 | 1.45x | 1.46x |
-| `lanczos3` | 733.278 | 730.715 | 1094.656 | 709.289 | 359.500 | 1.49x | 1.50x |
-| `lanczos4` | 728.418 | 727.679 | 1090.586 | 708.447 | 303.512 | 1.50x | 1.50x |
-| `lanczos5` | 723.067 | 721.883 | 1068.174 | 719.425 | 314.450 | 1.48x | 1.48x |
-| `lanczos6` | 723.020 | 722.383 | 1036.213 | 717.993 | 272.476 | 1.43x | 1.43x |
-| `spline16` | 743.215 | 742.049 | 1071.705 | 712.258 | 444.366 | 1.44x | 1.44x |
-| `spline36` | 733.014 | 731.348 | 1095.581 | 711.509 | 359.449 | 1.49x | 1.50x |
-| `spline64` | 728.013 | 726.769 | 1090.167 | 709.447 | 301.303 | 1.50x | 1.50x |
+| `bilinear` | 732.138 | 731.207 | 1085.542 | 721.957 | 448.310 | 1.48x | 1.48x |
+| `bicubic (0, 0.5)` | 742.755 | 740.207 | 1074.574 | 713.068 | 623.070 | 1.45x | 1.45x |
+| `lanczos2` | 743.184 | 740.494 | 1077.803 | 711.473 | 591.880 | 1.45x | 1.46x |
+| `lanczos3` | 733.278 | 730.715 | 1094.656 | 709.289 | 579.142 | 1.49x | 1.50x |
+| `lanczos4` | 728.418 | 727.679 | 1090.586 | 708.447 | 599.295 | 1.50x | 1.50x |
+| `lanczos5` | 723.067 | 721.883 | 1068.174 | 719.425 | 503.683 | 1.48x | 1.48x |
+| `lanczos6` | 723.020 | 722.383 | 1036.213 | 717.993 | 438.627 | 1.43x | 1.43x |
+| `spline16` | 743.215 | 742.049 | 1071.705 | 712.258 | 605.441 | 1.44x | 1.44x |
+| `spline36` | 733.014 | 731.348 | 1095.581 | 711.509 | 596.130 | 1.49x | 1.50x |
+| `spline64` | 728.013 | 726.769 | 1090.167 | 709.447 | 576.018 | 1.50x | 1.50x |
 
 
 ## Ill-Conditioned Plan Accuracy Showcase

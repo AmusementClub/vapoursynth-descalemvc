@@ -35,12 +35,11 @@ void require(bool condition, std::string message) {
 
 [[nodiscard]] std::shared_ptr<const dsmvc::AxisPlan> make_generic_plan() {
     auto request = dsmvc::numerical::make_axis_request(
-        71, 59, 58.75, 0.1875, dsmvc::KernelKind::custom, 5,
+        71, 59, 58.75, 0.1875, dsmvc::KernelKind::spline64, 0,
         dsmvc::BorderMode::symmetric, dsmvc::F64Mode::float32_only);
+    request.kernel.blur = 1.25;
     auto plan = std::make_shared<const dsmvc::AxisPlan>(
-        dsmvc::build_axis_plan(request, [](double distance) {
-            return std::max(1.0 - distance / 5.0, 0.0);
-        }));
+        dsmvc::build_axis_plan(request));
     require(plan->valid() && !plan->requires_float64()
                 && plan->half_bandwidth == 9,
             "Metal generic plan is invalid");

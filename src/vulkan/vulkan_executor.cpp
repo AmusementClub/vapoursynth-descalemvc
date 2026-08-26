@@ -5,12 +5,24 @@
 #include "vulkan_convert_f64_spv.hpp"
 #include "vulkan_inverse_32_spv.hpp"
 #include "vulkan_inverse_64_spv.hpp"
+#include "vulkan_inverse_b11_32_spv.hpp"
+#include "vulkan_inverse_b1_32_spv.hpp"
+#include "vulkan_inverse_b3_32_spv.hpp"
+#include "vulkan_inverse_b5_32_spv.hpp"
+#include "vulkan_inverse_b7_32_spv.hpp"
+#include "vulkan_inverse_b9_32_spv.hpp"
 #include "vulkan_inverse_f64_spv.hpp"
 #include "vulkan_rhs_128_spv.hpp"
 #include "vulkan_rhs_256_spv.hpp"
 #include "vulkan_rhs_f64_spv.hpp"
 #include "vulkan_solve_32_spv.hpp"
 #include "vulkan_solve_64_spv.hpp"
+#include "vulkan_solve_b11_32_spv.hpp"
+#include "vulkan_solve_b1_32_spv.hpp"
+#include "vulkan_solve_b3_32_spv.hpp"
+#include "vulkan_solve_b5_32_spv.hpp"
+#include "vulkan_solve_b7_32_spv.hpp"
+#include "vulkan_solve_b9_32_spv.hpp"
 #include "vulkan_solve_f64_spv.hpp"
 #include "vulkan_transpose_128_spv.hpp"
 #include "vulkan_transpose_256_spv.hpp"
@@ -31,6 +43,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <list>
@@ -54,6 +67,8 @@ constexpr VkDeviceSize maximum_allocation_bytes = 2ULL * 1024ULL * 1024ULL * 102
 constexpr std::size_t descriptor_set_count = 8U;
 constexpr std::size_t default_plan_cache_bytes = 16U * 1024U * 1024U;
 constexpr std::size_t default_input_cache_bytes = 64U * 1024U * 1024U;
+constexpr std::array<std::uint32_t, 6U> fixed_bandwidths{
+    1U, 3U, 5U, 7U, 9U, 11U};
 
 [[nodiscard]] std::size_t checked_add(
     std::size_t left, std::size_t right, const char *label) {
@@ -599,6 +614,7 @@ private:
 
 class DeviceArena;
 class InputCache;
+class PlanUploadPool;
 class StagingPool;
 struct ExecutionSlot;
 
@@ -626,7 +642,6 @@ public:
         VkCommandBuffer command, VkFence fence, std::uint64_t wait_value,
         bool signal_timeline);
     void wait_fence(VkFence fence, const char *label);
-    void wait_timeline(std::uint64_t value, const char *label);
 
     [[nodiscard]] std::size_t acquire_slot(bool heavy, bool host_limited);
     void release_slot(std::size_t index, bool heavy) noexcept;
@@ -644,6 +659,8 @@ public:
     VkPipeline inverse_pipeline = VK_NULL_HANDLE;
     VkPipeline rhs_pipeline = VK_NULL_HANDLE;
     VkPipeline solve_pipeline = VK_NULL_HANDLE;
+    std::array<VkPipeline, fixed_bandwidths.size()> fixed_inverse_pipelines{};
+    std::array<VkPipeline, fixed_bandwidths.size()> fixed_solve_pipelines{};
     VkPipeline convert_pipeline = VK_NULL_HANDLE;
     VkPipeline transpose_f64_pipeline = VK_NULL_HANDLE;
     VkPipeline inverse_f64_pipeline = VK_NULL_HANDLE;
@@ -666,6 +683,7 @@ public:
     std::unique_ptr<DeviceArena> plan_arena;
     std::unique_ptr<DeviceArena> input_arena;
     std::unique_ptr<InputCache> input_cache;
+    std::unique_ptr<PlanUploadPool> plan_upload_pool;
     std::unique_ptr<StagingPool> staging_pool;
     std::vector<std::unique_ptr<ExecutionSlot>> slots;
     std::vector<bool> slot_busy;
@@ -914,6 +932,101 @@ private:
     std::vector<std::shared_ptr<Chunk>> chunks_;
 };
 
+class PlanUploadPool {
+    static constexpr std::size_t maximum_retained_slots = 32U;
+
+    struct Slot {
+        explicit Slot(Runtime &requested_runtime) : runtime(requested_runtime) {}
+
+        void reserve(VkDeviceSize requested) {
+            if (staging.handle() && staging.size() >= requested) return;
+            const VkDeviceSize capacity = std::min<VkDeviceSize>(
+                maximum_allocation_bytes,
+                std::max<VkDeviceSize>(requested, staging.size() * 2U));
+            staging = Buffer(
+                runtime, capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                    | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                "dsmvc pooled plan upload staging");
+        }
+
+        Runtime &runtime;
+        Buffer staging;
+    };
+
+public:
+    class Allocation {
+    public:
+        Allocation() = default;
+        ~Allocation() { reset(); }
+        Allocation(const Allocation &) = delete;
+        Allocation &operator=(const Allocation &) = delete;
+        Allocation(Allocation &&other) noexcept
+            : pool_(std::exchange(other.pool_, nullptr)),
+              slot_(std::move(other.slot_)) {}
+        Allocation &operator=(Allocation &&other) noexcept {
+            if (this != &other) {
+                reset();
+                pool_ = std::exchange(other.pool_, nullptr);
+                slot_ = std::move(other.slot_);
+            }
+            return *this;
+        }
+
+        void reset() noexcept {
+            if (!pool_) return;
+            pool_->release(std::move(slot_));
+            pool_ = nullptr;
+        }
+        [[nodiscard]] Buffer &staging() noexcept { return slot_->staging; }
+        [[nodiscard]] const Buffer &staging() const noexcept {
+            return slot_->staging;
+        }
+
+    private:
+        Allocation(PlanUploadPool &pool, std::unique_ptr<Slot> slot) noexcept
+            : pool_(&pool), slot_(std::move(slot)) {}
+
+        PlanUploadPool *pool_ = nullptr;
+        std::unique_ptr<Slot> slot_;
+        friend class PlanUploadPool;
+    };
+
+    explicit PlanUploadPool(Runtime &runtime) : runtime_(runtime) {}
+
+    [[nodiscard]] Allocation acquire(VkDeviceSize bytes) {
+        runtime_.throw_if_failed();
+        std::unique_ptr<Slot> slot;
+        {
+            const std::scoped_lock lock(mutex_);
+            if (!available_.empty()) {
+                slot = std::move(available_.back());
+                available_.pop_back();
+            }
+        }
+        if (!slot) slot = std::make_unique<Slot>(runtime_);
+        Allocation allocation(*this, std::move(slot));
+        allocation.slot_->reserve(bytes);
+        return allocation;
+    }
+
+private:
+    void release(std::unique_ptr<Slot> slot) noexcept {
+        try {
+            const std::scoped_lock lock(mutex_);
+            if (available_.size() < maximum_retained_slots) {
+                available_.push_back(std::move(slot));
+            }
+        } catch (...) {
+        }
+    }
+
+    Runtime &runtime_;
+    std::mutex mutex_;
+    std::vector<std::unique_ptr<Slot>> available_;
+};
+
 struct PushConstants {
     std::array<std::uint32_t, 32U> value{};
 };
@@ -972,13 +1085,31 @@ public:
                 "Vulkan packed plan exceeds maxStorageBufferRange");
         }
 
-        std::vector<std::uint32_t> packed(storage_bytes / sizeof(std::uint32_t));
+        storage = runtime->plan_arena->allocate(storage_bytes);
+        Buffer *upload_staging = nullptr;
+        if (runtime->timeline_enabled) {
+            if (!runtime->plan_upload_pool) {
+                throw std::logic_error(
+                    "Vulkan timeline plan upload pool is unavailable");
+            }
+            timeline_upload = runtime->plan_upload_pool->acquire(storage_bytes);
+            upload_staging = &timeline_upload.staging();
+        } else {
+            staging = Buffer(
+                *runtime, storage_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                "dsmvc plan upload staging");
+            upload_staging = &staging;
+        }
+        auto *packed = static_cast<std::uint32_t *>(upload_staging->mapped());
+        std::memset(packed, 0, storage_bytes);
         const auto copy_words = [&](const auto &values, std::uint32_t word_offset) {
             using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
             static_assert(sizeof(Value) == sizeof(std::uint32_t));
             const std::size_t bytes = values.size() * sizeof(Value);
             if (bytes != 0U) {
-                std::memcpy(reinterpret_cast<std::byte *>(packed.data())
+                std::memcpy(reinterpret_cast<std::byte *>(packed)
                                 + static_cast<std::ptrdiff_t>(word_offset * 4U),
                             values.data(), bytes);
             }
@@ -1025,69 +1156,44 @@ public:
             }
         }
 
-        storage = runtime->plan_arena->allocate(storage_bytes);
-        staging = Buffer(
-            *runtime, storage_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            "dsmvc plan upload staging");
-        std::memcpy(staging.mapped(), packed.data(), storage_bytes);
-        staging.flush(0U, storage_bytes);
+        upload_staging->flush(0U, storage_bytes);
 
-        const VkCommandPoolCreateInfo pool_info{
-            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            nullptr,
-            VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-            runtime->selected.queue_family,
-        };
-        runtime->check(vkCreateCommandPool(
-                           runtime->device, &pool_info, nullptr, &upload_pool),
-                       "vkCreateCommandPool(plan upload)");
-        try {
-            const VkCommandBufferAllocateInfo command_info{
-                VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        if (runtime->timeline_enabled) {
+            upload_state = UploadState::pending;
+        } else {
+            const VkCommandPoolCreateInfo pool_info{
+                VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                 nullptr,
-                upload_pool,
-                VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                1U,
+                VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                runtime->selected.queue_family,
             };
-            VkCommandBuffer command = VK_NULL_HANDLE;
-            runtime->check(vkAllocateCommandBuffers(
-                               runtime->device, &command_info, &command),
-                           "vkAllocateCommandBuffers(plan upload)");
-            const VkCommandBufferBeginInfo begin_info{
-                VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                nullptr,
-                VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-                nullptr,
-            };
-            runtime->check(vkBeginCommandBuffer(command, &begin_info),
-                           "vkBeginCommandBuffer(plan upload)");
-            const VkBufferCopy copy_region{0U, storage.offset(), storage_bytes};
-            vkCmdCopyBuffer(
-                command, staging.handle(), storage.buffer(), 1U, &copy_region);
-            const VkBufferMemoryBarrier barrier{
-                VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                nullptr,
-                VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_QUEUE_FAMILY_IGNORED,
-                VK_QUEUE_FAMILY_IGNORED,
-                storage.buffer(),
-                storage.offset(),
-                storage.size(),
-            };
-            vkCmdPipelineBarrier(
-                command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0U,
-                0U, nullptr, 1U, &barrier, 0U, nullptr);
-            runtime->check(vkEndCommandBuffer(command),
-                           "vkEndCommandBuffer(plan upload)");
+            runtime->check(vkCreateCommandPool(
+                               runtime->device, &pool_info, nullptr, &upload_pool),
+                           "vkCreateCommandPool(plan upload)");
+            try {
+                const VkCommandBufferAllocateInfo command_info{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                    nullptr,
+                    upload_pool,
+                    VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                    1U,
+                };
+                VkCommandBuffer command = VK_NULL_HANDLE;
+                runtime->check(vkAllocateCommandBuffers(
+                                   runtime->device, &command_info, &command),
+                               "vkAllocateCommandBuffers(plan upload)");
+                const VkCommandBufferBeginInfo begin_info{
+                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                    nullptr,
+                    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+                    nullptr,
+                };
+                runtime->check(vkBeginCommandBuffer(command, &begin_info),
+                               "vkBeginCommandBuffer(plan upload)");
+                record_upload(command, *upload_staging);
+                runtime->check(vkEndCommandBuffer(command),
+                               "vkEndCommandBuffer(plan upload)");
 
-            if (runtime->timeline_enabled) {
-                ready_value = runtime->submit(
-                    command, VK_NULL_HANDLE, 0U, true);
-            } else {
                 const VkFenceCreateInfo fence_info{
                     VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0U};
                 runtime->check(vkCreateFence(
@@ -1097,37 +1203,46 @@ public:
                 (void)runtime->submit(command, upload_fence, 0U, false);
                 runtime->wait_fence(upload_fence, "Vulkan plan upload");
                 retire_upload();
+            } catch (...) {
+                retire_upload();
+                throw;
             }
+        }
+    }
+
+    ~PackedPlan() { retire_upload(); }
+
+    [[nodiscard]] bool record_pending_upload(VkCommandBuffer command) const {
+        if (!runtime->timeline_enabled) return false;
+        runtime->throw_if_failed();
+        std::unique_lock lock(upload_mutex);
+        upload_ready.wait(lock, [&] {
+            return upload_state != UploadState::recording;
+        });
+        if (upload_state == UploadState::complete) return false;
+        upload_state = UploadState::recording;
+        try {
+            record_upload(command, timeline_upload.staging());
         } catch (...) {
-            retire_upload();
+            upload_state = UploadState::pending;
+            lock.unlock();
+            upload_ready.notify_all();
             throw;
         }
+        return true;
     }
 
-    ~PackedPlan() {
-        try {
-            if (ready_value != 0U) {
-                runtime->wait_timeline(ready_value, "Vulkan plan retirement");
+    void finish_pending_upload(bool complete) const noexcept {
+        if (!runtime->timeline_enabled) return;
+        {
+            const std::scoped_lock lock(upload_mutex);
+            if (upload_state != UploadState::recording) return;
+            upload_state = complete ? UploadState::complete : UploadState::pending;
+            if (complete) {
+                const_cast<PackedPlan *>(this)->timeline_upload.reset();
             }
-        } catch (...) {
         }
-        retire_upload();
-    }
-
-    [[nodiscard]] std::uint64_t wait_value() const noexcept {
-        return ready_value;
-    }
-
-    void mark_upload_complete() const noexcept {
-        if (ready_value == 0U) return;
-        const std::scoped_lock lock(upload_mutex);
-        if (!upload_pool) return;
-        std::uint64_t completed = 0U;
-        if (vkGetSemaphoreCounterValue(
-                runtime->device, runtime->timeline, &completed) == VK_SUCCESS
-            && completed >= ready_value) {
-            const_cast<PackedPlan *>(this)->retire_upload_locked();
-        }
+        upload_ready.notify_all();
     }
 
     [[nodiscard]] VkBuffer buffer() const noexcept { return storage.buffer(); }
@@ -1159,12 +1274,42 @@ public:
     mutable std::atomic<std::uint32_t> execution_count{0U};
 
 private:
+    enum class UploadState : std::uint8_t {
+        complete,
+        pending,
+        recording,
+    };
+
+    void record_upload(
+        VkCommandBuffer command, const Buffer &upload_staging) const noexcept {
+        const VkBufferCopy copy_region{0U, storage.offset(), storage_bytes};
+        vkCmdCopyBuffer(
+            command, upload_staging.handle(), storage.buffer(),
+            1U, &copy_region);
+        const VkBufferMemoryBarrier barrier{
+            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_QUEUE_FAMILY_IGNORED,
+            VK_QUEUE_FAMILY_IGNORED,
+            storage.buffer(),
+            storage.offset(),
+            storage.size(),
+        };
+        vkCmdPipelineBarrier(
+            command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0U,
+            0U, nullptr, 1U, &barrier, 0U, nullptr);
+    }
+
     void retire_upload() noexcept {
         const std::scoped_lock lock(upload_mutex);
         retire_upload_locked();
     }
 
     void retire_upload_locked() noexcept {
+        timeline_upload.reset();
         staging.reset();
         if (upload_fence) {
             vkDestroyFence(runtime->device, upload_fence, nullptr);
@@ -1177,11 +1322,52 @@ private:
     }
 
     DeviceArena::Allocation storage;
+    PlanUploadPool::Allocation timeline_upload;
     Buffer staging;
     VkCommandPool upload_pool = VK_NULL_HANDLE;
     VkFence upload_fence = VK_NULL_HANDLE;
-    std::uint64_t ready_value = 0U;
+    mutable UploadState upload_state = UploadState::complete;
     mutable std::mutex upload_mutex;
+    mutable std::condition_variable upload_ready;
+};
+
+class PendingPlanUploads {
+public:
+    explicit PendingPlanUploads(
+        std::shared_ptr<const PackedPlan> first,
+        std::shared_ptr<const PackedPlan> second = {})
+        : first_(std::move(first)), second_(std::move(second)) {
+        if (second_ == first_) second_.reset();
+        if (second_ && std::less<const PackedPlan *>{}(
+                           second_.get(), first_.get())) {
+            std::swap(first_, second_);
+        }
+    }
+
+    ~PendingPlanUploads() { finish(false); }
+    PendingPlanUploads(const PendingPlanUploads &) = delete;
+    PendingPlanUploads &operator=(const PendingPlanUploads &) = delete;
+
+    void record(VkCommandBuffer command) {
+        first_pending_ = first_->record_pending_upload(command);
+        if (second_) second_pending_ = second_->record_pending_upload(command);
+    }
+
+    void complete() noexcept { finish(true); }
+
+private:
+    void finish(bool complete) noexcept {
+        if (finished_) return;
+        if (first_pending_) first_->finish_pending_upload(complete);
+        if (second_pending_) second_->finish_pending_upload(complete);
+        finished_ = true;
+    }
+
+    std::shared_ptr<const PackedPlan> first_;
+    std::shared_ptr<const PackedPlan> second_;
+    bool first_pending_ = false;
+    bool second_pending_ = false;
+    bool finished_ = false;
 };
 
 class PackedPlanRequest {
@@ -1436,6 +1622,20 @@ void fill_plan_push(PushConstants &push, const PackedPlan &plan) noexcept {
     push.value[14] = plan.diagonal_offset;
 }
 
+[[nodiscard]] VkPipeline select_inverse_pipeline(
+    const Runtime &runtime, std::uint32_t bandwidth, bool solve_only) noexcept {
+    const auto found = std::ranges::find(fixed_bandwidths, bandwidth);
+    if (found != fixed_bandwidths.end()) {
+        const std::size_t index = static_cast<std::size_t>(
+            found - fixed_bandwidths.begin());
+        const VkPipeline pipeline = solve_only
+            ? runtime.fixed_solve_pipelines[index]
+            : runtime.fixed_inverse_pipelines[index];
+        if (pipeline) return pipeline;
+    }
+    return solve_only ? runtime.solve_pipeline : runtime.inverse_pipeline;
+}
+
 template <class Slot>
 void record_inverse(
     Runtime &runtime, Slot &slot, const PackedPlan &plan,
@@ -1471,12 +1671,18 @@ void record_inverse(
         VkDescriptorSet solve_set = slot.descriptor_set(
             plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
             cache_buffer, cache_offset, cache_size);
-        bind_compute(runtime, slot, runtime.solve_pipeline, solve_set, push);
+        bind_compute(
+            runtime, slot,
+            select_inverse_pipeline(runtime, plan.half_bandwidth, true),
+            solve_set, push);
     } else {
         VkDescriptorSet inverse_set = slot.descriptor_set(
             plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
             cache_buffer, cache_offset, cache_size);
-        bind_compute(runtime, slot, runtime.inverse_pipeline, inverse_set, push);
+        bind_compute(
+            runtime, slot,
+            select_inverse_pipeline(runtime, plan.half_bandwidth, false),
+            inverse_set, push);
     }
     vkCmdDispatch(
         slot.command, divide_up(vector_count, runtime.inverse_local_size), 1U, 1U);
@@ -2350,6 +2556,54 @@ Runtime::Runtime()
             solve_pipeline = create_pipeline(
                 embedded::vulkan_solve_32_spv,
                 sizeof(embedded::vulkan_solve_32_spv), "dsmvc split solve 32");
+            fixed_inverse_pipelines[0] = create_pipeline(
+                embedded::vulkan_inverse_b1_32_spv,
+                sizeof(embedded::vulkan_inverse_b1_32_spv),
+                "dsmvc fused inverse B1 32");
+            fixed_inverse_pipelines[1] = create_pipeline(
+                embedded::vulkan_inverse_b3_32_spv,
+                sizeof(embedded::vulkan_inverse_b3_32_spv),
+                "dsmvc fused inverse B3 32");
+            fixed_inverse_pipelines[2] = create_pipeline(
+                embedded::vulkan_inverse_b5_32_spv,
+                sizeof(embedded::vulkan_inverse_b5_32_spv),
+                "dsmvc fused inverse B5 32");
+            fixed_inverse_pipelines[3] = create_pipeline(
+                embedded::vulkan_inverse_b7_32_spv,
+                sizeof(embedded::vulkan_inverse_b7_32_spv),
+                "dsmvc fused inverse B7 32");
+            fixed_inverse_pipelines[4] = create_pipeline(
+                embedded::vulkan_inverse_b9_32_spv,
+                sizeof(embedded::vulkan_inverse_b9_32_spv),
+                "dsmvc fused inverse B9 32");
+            fixed_inverse_pipelines[5] = create_pipeline(
+                embedded::vulkan_inverse_b11_32_spv,
+                sizeof(embedded::vulkan_inverse_b11_32_spv),
+                "dsmvc fused inverse B11 32");
+            fixed_solve_pipelines[0] = create_pipeline(
+                embedded::vulkan_solve_b1_32_spv,
+                sizeof(embedded::vulkan_solve_b1_32_spv),
+                "dsmvc split solve B1 32");
+            fixed_solve_pipelines[1] = create_pipeline(
+                embedded::vulkan_solve_b3_32_spv,
+                sizeof(embedded::vulkan_solve_b3_32_spv),
+                "dsmvc split solve B3 32");
+            fixed_solve_pipelines[2] = create_pipeline(
+                embedded::vulkan_solve_b5_32_spv,
+                sizeof(embedded::vulkan_solve_b5_32_spv),
+                "dsmvc split solve B5 32");
+            fixed_solve_pipelines[3] = create_pipeline(
+                embedded::vulkan_solve_b7_32_spv,
+                sizeof(embedded::vulkan_solve_b7_32_spv),
+                "dsmvc split solve B7 32");
+            fixed_solve_pipelines[4] = create_pipeline(
+                embedded::vulkan_solve_b9_32_spv,
+                sizeof(embedded::vulkan_solve_b9_32_spv),
+                "dsmvc split solve B9 32");
+            fixed_solve_pipelines[5] = create_pipeline(
+                embedded::vulkan_solve_b11_32_spv,
+                sizeof(embedded::vulkan_solve_b11_32_spv),
+                "dsmvc split solve B11 32");
         }
 
         if (selected.float64.strict_supported()) {
@@ -2390,6 +2644,7 @@ Runtime::Runtime()
             check(vkCreateSemaphore(
                       device, &semaphore_info, nullptr, &timeline),
                   "vkCreateSemaphore(timeline)");
+            plan_upload_pool = std::make_unique<PlanUploadPool>(*this);
         }
 
         plan_arena = std::make_unique<DeviceArena>(
@@ -2425,6 +2680,7 @@ void Runtime::destroy_device_objects() noexcept {
     (void)vkDeviceWaitIdle(device);
     slots.clear();
     staging_pool.reset();
+    plan_upload_pool.reset();
     if (input_cache) input_cache->reset();
     input_cache.reset();
     if (input_arena) input_arena->reset();
@@ -2433,6 +2689,14 @@ void Runtime::destroy_device_objects() noexcept {
     plan_arena.reset();
     if (timeline) vkDestroySemaphore(device, timeline, nullptr);
     timeline = VK_NULL_HANDLE;
+    for (VkPipeline &pipeline : fixed_inverse_pipelines) {
+        if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+        pipeline = VK_NULL_HANDLE;
+    }
+    for (VkPipeline &pipeline : fixed_solve_pipelines) {
+        if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+        pipeline = VK_NULL_HANDLE;
+    }
     for (VkPipeline *pipeline : {
              &convert_f64_pipeline, &solve_f64_pipeline, &rhs_f64_pipeline,
              &inverse_f64_pipeline, &transpose_f64_pipeline,
@@ -2620,21 +2884,6 @@ void Runtime::wait_fence(VkFence fence, const char *label) {
     check(vkWaitForFences(
               device, 1U, &fence, VK_TRUE,
               std::numeric_limits<std::uint64_t>::max()),
-          label);
-}
-
-void Runtime::wait_timeline(std::uint64_t value, const char *label) {
-    if (!timeline_enabled || value == 0U) return;
-    const VkSemaphoreWaitInfo wait_info{
-        VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-        nullptr,
-        0U,
-        1U,
-        &timeline,
-        &value,
-    };
-    check(vkWaitSemaphores(
-              device, &wait_info, std::numeric_limits<std::uint64_t>::max()),
           label);
 }
 
@@ -2880,8 +3129,10 @@ struct VulkanExecutor::Impl {
 
         bool submitted = false;
         bool cache_published = false;
+        PendingPlanUploads plan_uploads(packed_horizontal, packed_vertical);
         try {
             slot.begin();
+            plan_uploads.record(slot.command);
             runtime->begin_label(slot.command, "dsmvc Float64 2D inverse");
             clear_f64_status(slot, status_offset);
             if (!reused_input) {
@@ -3025,11 +3276,8 @@ struct VulkanExecutor::Impl {
             runtime->check(vkEndCommandBuffer(slot.command),
                            "vkEndCommandBuffer(Float64 2D inverse)");
 
-            std::uint64_t wait_value = std::max(
-                packed_horizontal->wait_value(), packed_vertical->wait_value());
-            wait_value = std::max(wait_value, input_wait_value);
             const std::uint64_t signal_value = runtime->submit(
-                slot.command, slot.fence, wait_value,
+                slot.command, slot.fence, input_wait_value,
                 cache_producer && runtime->timeline_enabled);
             submitted = true;
             if (cache_producer && runtime->timeline_enabled) {
@@ -3041,8 +3289,7 @@ struct VulkanExecutor::Impl {
                 cached_input->publish(0U);
                 cache_published = true;
             }
-            packed_horizontal->mark_upload_complete();
-            packed_vertical->mark_upload_complete();
+            plan_uploads.complete();
         } catch (...) {
             const auto error = std::current_exception();
             if (!submitted) slot.recover_unsubmitted();
@@ -3179,8 +3426,10 @@ struct VulkanExecutor::Impl {
 
         bool submitted = false;
         bool cache_published = false;
+        PendingPlanUploads plan_uploads(packed_horizontal, packed_vertical);
         try {
             slot.begin();
+            plan_uploads.record(slot.command);
             runtime->begin_label(slot.command, "dsmvc 2D inverse");
             if (!reused_input) {
                 runtime->begin_label(slot.command, "input transpose");
@@ -3314,11 +3563,8 @@ struct VulkanExecutor::Impl {
             runtime->check(vkEndCommandBuffer(slot.command),
                            "vkEndCommandBuffer(2D inverse)");
 
-            std::uint64_t wait_value = std::max(
-                packed_horizontal->wait_value(), packed_vertical->wait_value());
-            wait_value = std::max(wait_value, input_wait_value);
             const std::uint64_t signal_value = runtime->submit(
-                slot.command, slot.fence, wait_value,
+                slot.command, slot.fence, input_wait_value,
                 cache_producer && runtime->timeline_enabled);
             submitted = true;
             if (cache_producer && runtime->timeline_enabled) {
@@ -3330,8 +3576,7 @@ struct VulkanExecutor::Impl {
                 cached_input->publish(0U);
                 cache_published = true;
             }
-            packed_horizontal->mark_upload_complete();
-            packed_vertical->mark_upload_complete();
+            plan_uploads.complete();
         } catch (...) {
             const auto error = std::current_exception();
             if (!submitted) slot.recover_unsubmitted();
@@ -3451,8 +3696,10 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
 
     bool submitted = false;
     bool cache_published = false;
+    PendingPlanUploads plan_uploads(packed);
     try {
         slot.begin();
+        plan_uploads.record(slot.command);
         runtime->begin_label(slot.command, rows
             ? "dsmvc Float64 row inverse" : "dsmvc Float64 column inverse");
         clear_f64_status(slot, status_offset);
@@ -3540,10 +3787,8 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
         runtime->end_label(slot.command);
         runtime->check(vkEndCommandBuffer(slot.command),
                        "vkEndCommandBuffer(Float64 1D inverse)");
-        const std::uint64_t wait_value = std::max(
-            packed->wait_value(), input_wait_value);
         const std::uint64_t signal_value = runtime->submit(
-            slot.command, slot.fence, wait_value,
+            slot.command, slot.fence, input_wait_value,
             cache_producer && runtime->timeline_enabled);
         submitted = true;
         if (cache_producer && runtime->timeline_enabled) {
@@ -3555,7 +3800,7 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
             cached_input->publish(0U);
             cache_published = true;
         }
-        packed->mark_upload_complete();
+        plan_uploads.complete();
     } catch (...) {
         const auto error = std::current_exception();
         if (!submitted) slot.recover_unsubmitted();
@@ -3650,8 +3895,10 @@ void VulkanExecutor::Impl::execute_one_dimensional(
 
     bool submitted = false;
     bool cache_published = false;
+    PendingPlanUploads plan_uploads(packed);
     try {
         slot.begin();
+        plan_uploads.record(slot.command);
         runtime->begin_label(slot.command, rows
             ? "dsmvc row inverse" : "dsmvc column inverse");
         if (!reused_input) {
@@ -3702,10 +3949,8 @@ void VulkanExecutor::Impl::execute_one_dimensional(
         runtime->end_label(slot.command);
         runtime->check(vkEndCommandBuffer(slot.command),
                        "vkEndCommandBuffer(1D inverse)");
-        const std::uint64_t wait_value = std::max(
-            packed->wait_value(), input_wait_value);
         const std::uint64_t signal_value = runtime->submit(
-            slot.command, slot.fence, wait_value,
+            slot.command, slot.fence, input_wait_value,
             cache_producer && runtime->timeline_enabled);
         submitted = true;
         if (cache_producer && runtime->timeline_enabled) {
@@ -3717,7 +3962,7 @@ void VulkanExecutor::Impl::execute_one_dimensional(
             cached_input->publish(0U);
             cache_published = true;
         }
-        packed->mark_upload_complete();
+        plan_uploads.complete();
     } catch (...) {
         const auto error = std::current_exception();
         if (!submitted) slot.recover_unsubmitted();
@@ -3744,8 +3989,11 @@ bool backend_available() noexcept {
 }
 
 void require_backend_available() {
-    auto instance = create_instance(false);
-    (void)select_device(enumerate_devices(instance.instance));
+    static std::once_flag once;
+    std::call_once(once, [] {
+        auto instance = create_instance(false);
+        (void)select_device(enumerate_devices(instance.instance));
+    });
 }
 
 VulkanFloat64Capabilities selected_float64_capabilities() {

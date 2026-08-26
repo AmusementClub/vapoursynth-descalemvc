@@ -433,6 +433,23 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
 
     parsed.kernel.b = get_float(in, "b", 0.0, vsapi);
     parsed.kernel.c = get_float(in, "c", 0.5, vsapi);
+    parsed.kernel.blur = get_float(in, "blur", 1.0, vsapi);
+    if (!(parsed.kernel.blur > 0.0) || !std::isfinite(parsed.kernel.blur)) {
+        throw std::invalid_argument(
+            "blur must be finite and greater than zero");
+    }
+    int minimum_plane_extent = std::min(source_vi.width, source_vi.height);
+    if (source_vi.format.numPlanes > 1) {
+        minimum_plane_extent = std::min({
+            minimum_plane_extent,
+            source_vi.width >> source_vi.format.subSamplingW,
+            source_vi.height >> source_vi.format.subSamplingH,
+        });
+    }
+    if (parsed.kernel.blur >= static_cast<double>(minimum_plane_extent)) {
+        throw std::invalid_argument(
+            "blur exceeds the supported source-plane extent");
+    }
     int taps_error = 0;
     const auto taps = vsapi->mapGetInt(in, "taps", 0, &taps_error);
     int support_error = 0;
@@ -495,6 +512,7 @@ void copy_common_arguments(VSMap *map, const ParsedArguments &parsed,
     vsapi->mapSetInt(map, "taps", parsed.kernel.taps, maReplace);
     vsapi->mapSetFloat(map, "b", parsed.kernel.b, maReplace);
     vsapi->mapSetFloat(map, "c", parsed.kernel.c, maReplace);
+    vsapi->mapSetFloat(map, "blur", parsed.kernel.blur, maReplace);
     vsapi->mapSetFloat(map, "src_left", parsed.src_left, maReplace);
     vsapi->mapSetFloat(map, "src_top", parsed.src_top, maReplace);
     vsapi->mapSetFloat(map, "src_width", parsed.src_width, maReplace);
@@ -1475,35 +1493,39 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     const std::string geometry = common_geometry;
     const std::string tail = common_tail;
     vspapi->registerFunction(
-        "Debilinear", (geometry + tail + backend_tail).c_str(), clip_return,
+        "Debilinear", (geometry + "blur:float:opt;" + tail
+                       + backend_tail).c_str(), clip_return,
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(1)), plugin);
     vspapi->registerFunction(
-        "Debicubic", (geometry + "b:float:opt;c:float:opt;" + tail
+        "Debicubic", (geometry + "b:float:opt;c:float:opt;blur:float:opt;" + tail
                       + backend_tail).c_str(),
         clip_return, filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(2)), plugin);
     vspapi->registerFunction(
-        "Delanczos", (geometry + "taps:int:opt;" + tail
+        "Delanczos", (geometry + "taps:int:opt;blur:float:opt;" + tail
                       + backend_tail).c_str(),
         clip_return, filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(3)), plugin);
     vspapi->registerFunction(
-        "Despline16", (geometry + tail + backend_tail).c_str(), clip_return,
+        "Despline16", (geometry + "blur:float:opt;" + tail
+                       + backend_tail).c_str(), clip_return,
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(4)), plugin);
     vspapi->registerFunction(
-        "Despline36", (geometry + tail + backend_tail).c_str(), clip_return,
+        "Despline36", (geometry + "blur:float:opt;" + tail
+                       + backend_tail).c_str(), clip_return,
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(5)), plugin);
     vspapi->registerFunction(
-        "Despline64", (geometry + tail + backend_tail).c_str(), clip_return,
+        "Despline64", (geometry + "blur:float:opt;" + tail
+                       + backend_tail).c_str(), clip_return,
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(6)), plugin);
     vspapi->registerFunction(
         "Descale",
         (geometry
-         + "kernel:data:opt;taps:int:opt;b:float:opt;c:float:opt;"
+         + "kernel:data:opt;taps:int:opt;b:float:opt;c:float:opt;blur:float:opt;"
          + tail
          + "custom:func:opt;support:int:opt;custom_kernel:func:opt;"
          + backend_tail).c_str(),
