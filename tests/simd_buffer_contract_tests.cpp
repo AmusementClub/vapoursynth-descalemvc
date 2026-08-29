@@ -135,15 +135,17 @@ private:
 };
 
 [[nodiscard]] dsmvc::AxisPlan make_plan(
-    std::int32_t source, std::int32_t destination, double shift = 0.125) {
+    std::int32_t source, std::int32_t destination, double shift = 0.125,
+    dsmvc::KernelKind kernel = dsmvc::KernelKind::bicubic) {
     dsmvc::AxisRequest request;
     request.source_size = source;
     request.destination_size = destination;
     request.active_length = static_cast<double>(destination) - 0.25;
     request.shift = shift;
-    request.kernel.kind = dsmvc::KernelKind::bicubic;
+    request.kernel.kind = kernel;
     request.kernel.b = 0.0;
     request.kernel.c = 0.5;
+    if (kernel == dsmvc::KernelKind::lanczos) request.kernel.taps = 3;
     request.border = dsmvc::BorderMode::symmetric;
     request.f64_mode = dsmvc::F64Mode::float32_only;
     return dsmvc::build_axis_plan(request);
@@ -237,8 +239,10 @@ void require_integer_agreement(
 }
 
 void test_rows_and_columns(
-    dsmvc::CpuPath path, std::int32_t lanes, std::int32_t residue) {
-    const auto plan = make_plan(2 * lanes + residue, lanes + residue);
+    dsmvc::CpuPath path, std::int32_t lanes, std::int32_t residue,
+    dsmvc::KernelKind kernel = dsmvc::KernelKind::bicubic) {
+    const auto plan = make_plan(
+        2 * lanes + residue, lanes + residue, 0.125, kernel);
     const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
     const dsmvc::CpuExecutor executor(path);
 
@@ -486,6 +490,9 @@ void test_cpu_paths_and_strides() {
         test_short_strides(avx512, "AVX-512");
         for (std::int32_t residue = 1; residue < 16; ++residue) {
             test_rows_and_columns(dsmvc::CpuPath::avx512, 16, residue);
+            test_rows_and_columns(
+                dsmvc::CpuPath::avx512, 16, residue,
+                dsmvc::KernelKind::lanczos);
         }
     }
     if (dsmvc::cpu_avx2_available()) {
@@ -493,6 +500,15 @@ void test_cpu_paths_and_strides() {
         test_short_strides(avx2, "AVX2");
         for (std::int32_t residue = 1; residue < 8; ++residue) {
             test_rows_and_columns(dsmvc::CpuPath::avx2, 8, residue);
+            test_rows_and_columns(
+                dsmvc::CpuPath::avx2, 8, residue,
+                dsmvc::KernelKind::bilinear);
+            test_rows_and_columns(
+                dsmvc::CpuPath::avx2, 8, residue,
+                dsmvc::KernelKind::lanczos);
+            test_rows_and_columns(
+                dsmvc::CpuPath::avx2, 8, residue,
+                dsmvc::KernelKind::spline64);
             test_float_2d(dsmvc::CpuPath::avx2, 8, residue);
             test_integer_2d<std::uint8_t>(
                 dsmvc::CpuPath::avx2, 8, residue,

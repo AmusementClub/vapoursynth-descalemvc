@@ -15,6 +15,19 @@ throughput evidence.
 ./benchmarks/profile_gcp_avx512.sh 3 1
 ```
 
+`cpu_avx512_memory_benchmark` isolates the profiled B1/B3/B5/B7 horizontal
+paths for working-set and Top-Down analysis. It reports per-call medians and
+accepts a path mode, row count, sample count, iteration count, cache mode, and
+optional `b1`, `b3`, `b5`, or `b7` horizontal kernel. The cold mode touches a
+128 MiB eviction buffer before each timed kernel call; eviction time is
+excluded from the reported kernel time.
+
+```sh
+./build/dsmvc_cpu_avx512_memory_benchmark pair 256 11 5 hot
+./build/dsmvc_cpu_avx512_memory_benchmark pair 4096 11 5 cold
+./build/dsmvc_cpu_avx512_memory_benchmark avx512 4096 5 100 hot
+```
+
 This directory contains the reproducible old/current Release comparison used
 to produce [`docs/release-benchmark.md`](../docs/release-benchmark.md).
 

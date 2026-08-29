@@ -93,7 +93,9 @@ if(DSMVC_ENABLE_NATIVE_CPU_SIMD
    AND CMAKE_SIZEOF_VOID_P EQUAL 8
    AND DSMVC_TARGET_PROCESSOR MATCHES "^(amd64|x86_64)$")
     set(DSMVC_CAN_BUILD_AVX2 ON)
-    list(APPEND DSMVC_ENGINE_SOURCES src/cpu_executor_avx2.cpp)
+    list(APPEND DSMVC_ENGINE_SOURCES
+        src/cpu_executor_avx2.cpp
+        src/cpu_executor_avx2_fixed.cpp)
     include(CheckCXXCompilerFlag)
     check_cxx_compiler_flag("-mavx512f" DSMVC_COMPILER_HAS_AVX512F)
     check_cxx_compiler_flag("-mavx512dq" DSMVC_COMPILER_HAS_AVX512DQ)
@@ -296,10 +298,13 @@ endif()
 if(DSMVC_CAN_BUILD_AVX2)
     target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_AVX2_OBJECT=1)
     if(MSVC)
-        set_source_files_properties(src/cpu_executor_avx2.cpp PROPERTIES
+        set_source_files_properties(
+            src/cpu_executor_avx2.cpp src/cpu_executor_avx2_fixed.cpp PROPERTIES
             COMPILE_OPTIONS "/arch:AVX2;/Ob3;/fp:strict")
     else()
-        set_source_files_properties(src/cpu_executor_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        set_source_files_properties(
+            src/cpu_executor_avx2.cpp src/cpu_executor_avx2_fixed.cpp PROPERTIES
+            COMPILE_OPTIONS "-mavx2;-mfma")
     endif()
 elseif(DSMVC_CAN_BUILD_NEON)
     target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_NEON_OBJECT=1)
@@ -573,6 +578,22 @@ if(DSMVC_BUILD_BENCHMARKS)
             _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
     else()
         target_compile_options(dsmvc_cpu_avx512_benchmark PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off)
+    endif()
+
+    add_executable(dsmvc_cpu_avx512_memory_benchmark
+        benchmarks/cpu_avx512_memory_benchmark.cpp)
+    target_compile_features(
+        dsmvc_cpu_avx512_memory_benchmark PRIVATE cxx_std_23)
+    target_link_libraries(
+        dsmvc_cpu_avx512_memory_benchmark PRIVATE dsmvc_engine)
+    if(MSVC)
+        target_compile_options(dsmvc_cpu_avx512_memory_benchmark PRIVATE
+            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_definitions(dsmvc_cpu_avx512_memory_benchmark PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(dsmvc_cpu_avx512_memory_benchmark PRIVATE
             -Wall -Wextra -Wpedantic -ffp-contract=off)
     endif()
 

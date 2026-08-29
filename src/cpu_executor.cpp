@@ -322,6 +322,13 @@ void inverse_rows_avx2(const AxisPlan &plan,
                        const float *input, std::ptrdiff_t input_row_stride,
                        float *output, std::ptrdiff_t output_row_stride,
                        std::int32_t row_count);
+void inverse_rows_fixed_avx2(const AxisPlan &plan,
+                             const detail::PackedCpuPlan &packed,
+                             const float *input,
+                             std::ptrdiff_t input_row_stride,
+                             float *output,
+                             std::ptrdiff_t output_row_stride,
+                             std::int32_t row_count);
 void inverse_columns_avx2(const AxisPlan &plan,
                           const detail::PackedCpuPlan &packed,
                           const float *input, std::ptrdiff_t input_row_stride,
@@ -334,6 +341,7 @@ void inverse_rows_avx512(const AxisPlan &plan,
                          float *output, std::ptrdiff_t output_row_stride,
                          std::int32_t row_count);
 #endif
+
 void solve_rhs_columns_avx2(
     const AxisPlan &plan, const detail::PackedCpuPlan &packed,
     float *output, std::ptrdiff_t output_row_stride,
@@ -1017,15 +1025,73 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
     if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
         const auto packed = impl_->get(plan);
 #if defined(DSMVC_HAS_AVX512_OBJECT)
-        // Cross-platform profiling only retained a stable gain for B7.
-        // B1/B3 have hand-unrolled AVX2 dependency chains, while B5 regresses
-        // on AMD and wider generic bands have not met the benchmark gate.
-        if (path_ == CpuPath::avx512 && plan.half_bandwidth == 7) {
+        // B1/B3 have hand-unrolled AVX2 dependency chains; wider generic bands
+        // have not met the benchmark gate for a 16-lane horizontal route.
+        if (path_ == CpuPath::avx512
+            && (plan.half_bandwidth == 5 || plan.half_bandwidth == 7)
+            && row_count >= 16) {
+            const auto complete_groups = static_cast<std::size_t>(row_count / 16);
+            const auto task_count = std::min(
+                impl_->workers->parallelism(), complete_groups);
+            const auto enough_work = detail::checked_size_product(
+                static_cast<std::size_t>(row_count),
+                static_cast<std::size_t>(plan.destination_size),
+                "CPU AVX-512 row work") >= 262144U;
+            if (task_count != 0U && enough_work
+                && impl_->workers->try_run(
+                    task_count, [&](std::size_t task) {
+                        const auto first_group =
+                            complete_groups * task / task_count;
+                        const auto last_group =
+                            complete_groups * (task + 1U) / task_count;
+                        const auto first_row = static_cast<std::int32_t>(
+                            first_group * 16U);
+                        const auto task_rows = static_cast<std::int32_t>(
+                            (last_group - first_group) * 16U);
+                        inverse_rows_avx512(
+                            plan, *packed,
+                            input + static_cast<std::ptrdiff_t>(first_row)
+                                * input_row_stride,
+                            input_row_stride,
+                            output + static_cast<std::ptrdiff_t>(first_row)
+                                * output_row_stride,
+                            output_row_stride, task_rows);
+                    })) {
+                const auto complete_rows = static_cast<std::int32_t>(
+                    complete_groups * 16U);
+                if (complete_rows != row_count) {
+                    const auto first_row = row_count - 16;
+                    inverse_rows_avx512(
+                        plan, *packed,
+                        input + static_cast<std::ptrdiff_t>(first_row)
+                            * input_row_stride,
+                        input_row_stride,
+                        output + static_cast<std::ptrdiff_t>(first_row)
+                            * output_row_stride,
+                        output_row_stride, 16);
+                }
+                return;
+            }
             inverse_rows_avx512(plan, *packed, input, input_row_stride,
                                 output, output_row_stride, row_count);
             return;
         }
 #endif
+        const bool use_fixed_avx2 = plan.half_bandwidth == 5
+            || plan.half_bandwidth == 7;
+        const auto execute_avx2_rows = [&](const float *task_input,
+                                           float *task_output,
+                                           std::int32_t task_rows) {
+            if (use_fixed_avx2) {
+                inverse_rows_fixed_avx2(
+                    plan, *packed, task_input, input_row_stride,
+                    task_output, output_row_stride, task_rows);
+            } else {
+                inverse_rows_avx2(
+                    plan, *packed, task_input, input_row_stride,
+                    task_output, output_row_stride, task_rows);
+            }
+        };
         const auto complete_groups = static_cast<std::size_t>(row_count / 8);
         const auto task_count = std::min(
             impl_->workers->parallelism(), complete_groups);
@@ -1040,26 +1106,21 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
                     const auto first_row = static_cast<std::int32_t>(first_group * 8U);
                     const auto task_rows = static_cast<std::int32_t>(
                         (last_group - first_group) * 8U);
-                    inverse_rows_avx2(
-                        plan, *packed,
+                    execute_avx2_rows(
                         input + static_cast<std::ptrdiff_t>(first_row) * input_row_stride,
-                        input_row_stride,
                         output + static_cast<std::ptrdiff_t>(first_row) * output_row_stride,
-                        output_row_stride, task_rows);
+                        task_rows);
                 })) {
             if ((row_count & 7) != 0) {
                 const auto first_row = row_count - 8;
-                inverse_rows_avx2(
-                    plan, *packed,
+                execute_avx2_rows(
                     input + static_cast<std::ptrdiff_t>(first_row) * input_row_stride,
-                    input_row_stride,
                     output + static_cast<std::ptrdiff_t>(first_row) * output_row_stride,
-                    output_row_stride, 8);
+                    8);
             }
             return;
         }
-        inverse_rows_avx2(plan, *packed, input, input_row_stride, output,
-                          output_row_stride, row_count);
+        execute_avx2_rows(input, output, row_count);
         return;
     }
 #elif defined(DSMVC_HAS_NEON_OBJECT)

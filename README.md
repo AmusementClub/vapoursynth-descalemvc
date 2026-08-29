@@ -205,9 +205,12 @@ and `Opt.SIMD`; `Opt.AVX2`, `Opt.NEON`, and `Opt.SIMD` preserve `opt=2`, while
 `Opt.AVX512` is the new explicit value.
 
 The current AVX-512 path specializes F32 vertical solves in 16-column blocks
-and the profiled B7 horizontal solve in 16-row blocks. Other horizontal bands,
-F64, integer, and fused 2D operations retain the AVX2 kernels until an isolated
-benchmark demonstrates a worthwhile 512-bit implementation.
+and the profiled B5/B7 horizontal solves in 16-row blocks. Other horizontal
+bands, F64, integer, and fused 2D operations retain the AVX2 kernels until an
+isolated benchmark demonstrates a worthwhile 512-bit implementation.
+The AVX2 F32 B1/B3/B5/B7 horizontal kernels write complete 8-column tiles
+directly and keep only the final partial tile in local storage, avoiding a
+full padded-output copy for widths that are not divisible by eight.
 
 At the public engine level, explicitly requesting `CpuPath::avx2`,
 `CpuPath::avx512`, or
