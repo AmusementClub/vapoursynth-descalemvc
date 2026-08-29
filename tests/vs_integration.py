@@ -470,6 +470,8 @@ def run(options) -> None:
     require(new_wrapper.Opt.SIMD == new_wrapper.Opt.AVX2
             == new_wrapper.Opt.NEON == 2,
             "wrapper SIMD option aliases differ")
+    require(new_wrapper.Opt.AVX512 == 3,
+            "wrapper AVX-512 option value differs")
     require(new_wrapper.Opt(2).name == "AVX2",
             "wrapper changed the canonical legacy AVX2 option name")
     require(tuple(int(value) for value in new_wrapper.Padding) == (0, 1, 2, 3),

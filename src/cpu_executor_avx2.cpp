@@ -523,11 +523,16 @@ void transpose_integer_source(
         _mm256_set1_ps(packed.upper_l[2U * stride + index]), next3, value);
 }
 
-void solve_horizontal_b1(const detail::PackedCpuPlan &packed, const float *scratch,
-                         float *output, std::ptrdiff_t stride) noexcept {
+void solve_horizontal_b1(const detail::PackedCpuPlan &packed,
+                         const float *scratch, float *output,
+                         std::ptrdiff_t stride,
+                         std::int32_t destination_size) noexcept {
     __m256 previous = _mm256_setzero_ps();
     const auto padded = packed.padded_destination_size;
-    for (std::int32_t j = 0; j < padded; j += 8) {
+    const auto full_destination = destination_size & ~7;
+    const auto has_tail = full_destination != destination_size;
+    alignas(32) float tail_tile[64];
+    for (std::int32_t j = 0; j < full_destination; j += 8) {
         __m256 x0 = forward_b1(packed, j + 0, multiply_transpose(packed, scratch, j + 0), previous);
         __m256 x1 = forward_b1(packed, j + 1, multiply_transpose(packed, scratch, j + 1), x0);
         __m256 x2 = forward_b1(packed, j + 2, multiply_transpose(packed, scratch, j + 2), x1);
@@ -546,9 +551,64 @@ void solve_horizontal_b1(const detail::PackedCpuPlan &packed, const float *scrat
         _mm256_storeu_ps(output + 6 * stride + j, x6);
         _mm256_storeu_ps(output + 7 * stride + j, x7);
     }
+    if (has_tail) {
+        const auto j = full_destination;
+        __m256 x0 = forward_b1(packed, j + 0, multiply_transpose(packed, scratch, j + 0), previous);
+        __m256 x1 = forward_b1(packed, j + 1, multiply_transpose(packed, scratch, j + 1), x0);
+        __m256 x2 = forward_b1(packed, j + 2, multiply_transpose(packed, scratch, j + 2), x1);
+        __m256 x3 = forward_b1(packed, j + 3, multiply_transpose(packed, scratch, j + 3), x2);
+        __m256 x4 = forward_b1(packed, j + 4, multiply_transpose(packed, scratch, j + 4), x3);
+        __m256 x5 = forward_b1(packed, j + 5, multiply_transpose(packed, scratch, j + 5), x4);
+        __m256 x6 = forward_b1(packed, j + 6, multiply_transpose(packed, scratch, j + 6), x5);
+        __m256 x7 = forward_b1(packed, j + 7, multiply_transpose(packed, scratch, j + 7), x6);
+        _mm256_store_ps(tail_tile + 0U * 8U, x0);
+        _mm256_store_ps(tail_tile + 1U * 8U, x1);
+        _mm256_store_ps(tail_tile + 2U * 8U, x2);
+        _mm256_store_ps(tail_tile + 3U * 8U, x3);
+        _mm256_store_ps(tail_tile + 4U * 8U, x4);
+        _mm256_store_ps(tail_tile + 5U * 8U, x5);
+        _mm256_store_ps(tail_tile + 6U * 8U, x6);
+        _mm256_store_ps(tail_tile + 7U * 8U, x7);
+    }
 
     __m256 next = _mm256_setzero_ps();
-    for (std::int32_t j = padded - 8; j >= 0; j -= 8) {
+    if (has_tail) {
+        const auto j = full_destination;
+        __m256 x0 = _mm256_load_ps(tail_tile + 0U * 8U);
+        __m256 x1 = _mm256_load_ps(tail_tile + 1U * 8U);
+        __m256 x2 = _mm256_load_ps(tail_tile + 2U * 8U);
+        __m256 x3 = _mm256_load_ps(tail_tile + 3U * 8U);
+        __m256 x4 = _mm256_load_ps(tail_tile + 4U * 8U);
+        __m256 x5 = _mm256_load_ps(tail_tile + 5U * 8U);
+        __m256 x6 = _mm256_load_ps(tail_tile + 6U * 8U);
+        __m256 x7 = _mm256_load_ps(tail_tile + 7U * 8U);
+        x7 = backward_b1(packed, j + 7, x7, next);
+        x6 = backward_b1(packed, j + 6, x6, x7);
+        x5 = backward_b1(packed, j + 5, x5, x6);
+        x4 = backward_b1(packed, j + 4, x4, x5);
+        x3 = backward_b1(packed, j + 3, x3, x4);
+        x2 = backward_b1(packed, j + 2, x2, x3);
+        x1 = backward_b1(packed, j + 1, x1, x2);
+        x0 = backward_b1(packed, j + 0, x0, x1);
+        next = x0;
+        transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
+        const auto remaining = destination_size - full_destination;
+        const __m256i mask = _mm256_setr_epi32(
+            remaining > 0 ? -1 : 0, remaining > 1 ? -1 : 0,
+            remaining > 2 ? -1 : 0, remaining > 3 ? -1 : 0,
+            remaining > 4 ? -1 : 0, remaining > 5 ? -1 : 0,
+            remaining > 6 ? -1 : 0, remaining > 7 ? -1 : 0);
+        _mm256_maskstore_ps(output + full_destination, mask, x0);
+        _mm256_maskstore_ps(output + stride + full_destination, mask, x1);
+        _mm256_maskstore_ps(output + 2 * stride + full_destination, mask, x2);
+        _mm256_maskstore_ps(output + 3 * stride + full_destination, mask, x3);
+        _mm256_maskstore_ps(output + 4 * stride + full_destination, mask, x4);
+        _mm256_maskstore_ps(output + 5 * stride + full_destination, mask, x5);
+        _mm256_maskstore_ps(output + 6 * stride + full_destination, mask, x6);
+        _mm256_maskstore_ps(output + 7 * stride + full_destination, mask, x7);
+    }
+    const auto backward_start = has_tail ? full_destination - 8 : padded - 8;
+    for (std::int32_t j = backward_start; j >= 0; j -= 8) {
         __m256 x0 = _mm256_loadu_ps(output + j);
         __m256 x1 = _mm256_loadu_ps(output + stride + j);
         __m256 x2 = _mm256_loadu_ps(output + 2 * stride + j);
@@ -578,17 +638,24 @@ void solve_horizontal_b1(const detail::PackedCpuPlan &packed, const float *scrat
     }
 }
 
-void solve_horizontal_b3(const detail::PackedCpuPlan &packed, const float *scratch,
-                         float *output, std::ptrdiff_t stride) noexcept {
+void solve_horizontal_b3(const detail::PackedCpuPlan &packed,
+                         const float *scratch, float *output,
+                         std::ptrdiff_t stride,
+                         std::int32_t destination_size) noexcept {
     __m256 previous1 = _mm256_setzero_ps();
     __m256 previous2 = _mm256_setzero_ps();
     __m256 previous3 = _mm256_setzero_ps();
     const auto padded = packed.padded_destination_size;
-    for (std::int32_t j = 0; j < padded; j += 8) {
+    const auto full_destination = destination_size & ~7;
+    const auto has_tail = full_destination != destination_size;
+    // The recurrence state crosses tiles in registers, so only the final
+    // partial tile needs storage outside the caller's logical output rows.
+    alignas(32) float tail_tile[64];
 #define DSMVC_FORWARD3(LANE, PREVIOUS1, PREVIOUS2, PREVIOUS3) \
         __m256 x##LANE = forward_b3( \
             packed, j + LANE, multiply_transpose(packed, scratch, j + LANE), \
             PREVIOUS1, PREVIOUS2, PREVIOUS3)
+    for (std::int32_t j = 0; j < full_destination; j += 8) {
         DSMVC_FORWARD3(0, previous1, previous2, previous3);
         DSMVC_FORWARD3(1, x0, previous1, previous2);
         DSMVC_FORWARD3(2, x1, x0, previous1);
@@ -597,7 +664,6 @@ void solve_horizontal_b3(const detail::PackedCpuPlan &packed, const float *scrat
         DSMVC_FORWARD3(5, x4, x3, x2);
         DSMVC_FORWARD3(6, x5, x4, x3);
         DSMVC_FORWARD3(7, x6, x5, x4);
-#undef DSMVC_FORWARD3
         previous1 = x7;
         previous2 = x6;
         previous3 = x5;
@@ -610,11 +676,69 @@ void solve_horizontal_b3(const detail::PackedCpuPlan &packed, const float *scrat
         _mm256_storeu_ps(output + 6 * stride + j, x6);
         _mm256_storeu_ps(output + 7 * stride + j, x7);
     }
+    if (has_tail) {
+        const auto j = full_destination;
+        DSMVC_FORWARD3(0, previous1, previous2, previous3);
+        DSMVC_FORWARD3(1, x0, previous1, previous2);
+        DSMVC_FORWARD3(2, x1, x0, previous1);
+        DSMVC_FORWARD3(3, x2, x1, x0);
+        DSMVC_FORWARD3(4, x3, x2, x1);
+        DSMVC_FORWARD3(5, x4, x3, x2);
+        DSMVC_FORWARD3(6, x5, x4, x3);
+        DSMVC_FORWARD3(7, x6, x5, x4);
+        _mm256_store_ps(tail_tile + 0U * 8U, x0);
+        _mm256_store_ps(tail_tile + 1U * 8U, x1);
+        _mm256_store_ps(tail_tile + 2U * 8U, x2);
+        _mm256_store_ps(tail_tile + 3U * 8U, x3);
+        _mm256_store_ps(tail_tile + 4U * 8U, x4);
+        _mm256_store_ps(tail_tile + 5U * 8U, x5);
+        _mm256_store_ps(tail_tile + 6U * 8U, x6);
+        _mm256_store_ps(tail_tile + 7U * 8U, x7);
+    }
+#undef DSMVC_FORWARD3
 
     __m256 next1 = _mm256_setzero_ps();
     __m256 next2 = _mm256_setzero_ps();
     __m256 next3 = _mm256_setzero_ps();
-    for (std::int32_t j = padded - 8; j >= 0; j -= 8) {
+    if (has_tail) {
+        const auto j = full_destination;
+        __m256 x0 = _mm256_load_ps(tail_tile + 0U * 8U);
+        __m256 x1 = _mm256_load_ps(tail_tile + 1U * 8U);
+        __m256 x2 = _mm256_load_ps(tail_tile + 2U * 8U);
+        __m256 x3 = _mm256_load_ps(tail_tile + 3U * 8U);
+        __m256 x4 = _mm256_load_ps(tail_tile + 4U * 8U);
+        __m256 x5 = _mm256_load_ps(tail_tile + 5U * 8U);
+        __m256 x6 = _mm256_load_ps(tail_tile + 6U * 8U);
+        __m256 x7 = _mm256_load_ps(tail_tile + 7U * 8U);
+        x7 = backward_b3(packed, j + 7, x7, next1, next2, next3);
+        x6 = backward_b3(packed, j + 6, x6, x7, next1, next2);
+        x5 = backward_b3(packed, j + 5, x5, x6, x7, next1);
+        x4 = backward_b3(packed, j + 4, x4, x5, x6, x7);
+        x3 = backward_b3(packed, j + 3, x3, x4, x5, x6);
+        x2 = backward_b3(packed, j + 2, x2, x3, x4, x5);
+        x1 = backward_b3(packed, j + 1, x1, x2, x3, x4);
+        x0 = backward_b3(packed, j + 0, x0, x1, x2, x3);
+        next1 = x0;
+        next2 = x1;
+        next3 = x2;
+        transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
+        const auto remaining = destination_size - full_destination;
+        const __m256i mask = _mm256_setr_epi32(
+            remaining > 0 ? -1 : 0, remaining > 1 ? -1 : 0,
+            remaining > 2 ? -1 : 0, remaining > 3 ? -1 : 0,
+            remaining > 4 ? -1 : 0, remaining > 5 ? -1 : 0,
+            remaining > 6 ? -1 : 0, remaining > 7 ? -1 : 0);
+        _mm256_maskstore_ps(output + full_destination, mask, x0);
+        _mm256_maskstore_ps(output + stride + full_destination, mask, x1);
+        _mm256_maskstore_ps(output + 2 * stride + full_destination, mask, x2);
+        _mm256_maskstore_ps(output + 3 * stride + full_destination, mask, x3);
+        _mm256_maskstore_ps(output + 4 * stride + full_destination, mask, x4);
+        _mm256_maskstore_ps(output + 5 * stride + full_destination, mask, x5);
+        _mm256_maskstore_ps(output + 6 * stride + full_destination, mask, x6);
+        _mm256_maskstore_ps(output + 7 * stride + full_destination, mask, x7);
+    }
+    const auto backward_start = has_tail ? full_destination - 8 : padded - 8;
+    for (std::int32_t j = backward_start; j >= 0; j -= 8) {
         __m256 x0 = _mm256_loadu_ps(output + j);
         __m256 x1 = _mm256_loadu_ps(output + stride + j);
         __m256 x2 = _mm256_loadu_ps(output + 2 * stride + j);
@@ -720,9 +844,11 @@ DSMVC_FLATTEN void solve_horizontal_block(
         input, input_stride, plan.source_size,
         packed.padded_source_size, scratch);
     if (plan.half_bandwidth == 1) {
-        solve_horizontal_b1(packed, scratch, output, output_stride);
+        solve_horizontal_b1(
+            packed, scratch, output, output_stride, plan.destination_size);
     } else if (plan.half_bandwidth == 3) {
-        solve_horizontal_b3(packed, scratch, output, output_stride);
+        solve_horizontal_b3(
+            packed, scratch, output, output_stride, plan.destination_size);
     } else {
         solve_horizontal_generic(plan, packed, scratch, output, output_stride);
     }
@@ -739,9 +865,13 @@ void solve_horizontal_integer_block(
         input, input_stride, plan.source_size, packed.padded_source_size,
         input_offset, input_scale, scratch);
     if (plan.half_bandwidth == 1) {
-        solve_horizontal_b1(packed, scratch, output, output_stride);
+        solve_horizontal_b1(
+            packed, scratch, output, output_stride,
+            packed.padded_destination_size);
     } else if (plan.half_bandwidth == 3) {
-        solve_horizontal_b3(packed, scratch, output, output_stride);
+        solve_horizontal_b3(
+            packed, scratch, output, output_stride,
+            packed.padded_destination_size);
     } else {
         solve_horizontal_generic(plan, packed, scratch, output, output_stride);
     }
@@ -2130,8 +2260,9 @@ void inverse_rows_avx2(const AxisPlan &plan,
     thread_local std::vector<ScratchVector> scratch;
     scratch.resize(static_cast<std::size_t>(packed.padded_source_size));
     auto *scratch_data = scratch.front().lanes;
-    const bool use_output_scratch =
-        plan.destination_size != packed.padded_destination_size;
+    const bool use_output_scratch = plan.half_bandwidth != 1
+        && plan.half_bandwidth != 3
+        && plan.destination_size != packed.padded_destination_size;
     thread_local std::vector<ScratchVector> padded_output;
     if (use_output_scratch) {
         padded_output.resize(

@@ -385,11 +385,16 @@ ParsedArguments parse_arguments(const VSMap *in, std::intptr_t fixed_mode,
     parsed.force_v = get_int(in, "force_v", parsed.force, vsapi);
     parsed.opt = get_int(in, "opt", 0, vsapi);
 #if defined(__aarch64__) || defined(_M_ARM64)
+    if (parsed.opt == 3) {
+        throw std::runtime_error(
+            "opt=3 is unavailable on this CPU architecture");
+    }
     parsed.cpu_path = parsed.opt == 1 ? CpuPath::scalar
         : parsed.opt == 2 ? CpuPath::neon : CpuPath::automatic;
 #elif defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
     parsed.cpu_path = parsed.opt == 1 ? CpuPath::scalar
-        : parsed.opt == 2 ? CpuPath::avx2 : CpuPath::automatic;
+        : parsed.opt == 2 ? CpuPath::avx2
+        : parsed.opt == 3 ? CpuPath::avx512 : CpuPath::automatic;
 #else
     if (parsed.opt == 2) {
         throw std::runtime_error(

@@ -250,6 +250,7 @@ void test_cpu_simd_tiny(
     const dsmvc::AxisPlan &plan, const dsmvc::AxisPlan &identity) {
     std::vector<dsmvc::CpuPath> paths;
     if (dsmvc::cpu_avx2_available()) paths.push_back(dsmvc::CpuPath::avx2);
+    if (dsmvc::cpu_avx512_available()) paths.push_back(dsmvc::CpuPath::avx512);
     if (dsmvc::cpu_neon_available()) paths.push_back(dsmvc::CpuPath::neon);
     constexpr std::int32_t vectors = 5;
     const std::int32_t row_input_stride = plan.source_size + 2;
