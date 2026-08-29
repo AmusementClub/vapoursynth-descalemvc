@@ -107,17 +107,24 @@ int main(int argc, char **argv) {
     const std::size_t samples = argc > 1 ? std::strtoul(argv[1], nullptr, 10) : 3U;
     const std::size_t iterations = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 1U;
     const std::string_view filter = argc > 3 ? std::string_view(argv[3]) : std::string_view{};
-    if (samples == 0U || iterations == 0U || !dsmvc::cpu_avx512_available()) {
-        std::cerr << "AVX-512 unavailable or invalid arguments\n";
+    if (samples == 0U || iterations == 0U || !dsmvc::cpu_avx2_available()) {
+        std::cerr << "AVX2 unavailable or invalid arguments\n";
         return EXIT_FAILURE;
     }
     const dsmvc::CpuExecutor avx2(dsmvc::CpuPath::avx2);
-    const dsmvc::CpuExecutor avx512(dsmvc::CpuPath::avx512);
+    const bool has_avx512 = dsmvc::cpu_avx512_available();
+    std::unique_ptr<dsmvc::CpuExecutor> avx512;
+    if (has_avx512) avx512 = std::make_unique<dsmvc::CpuExecutor>(
+        dsmvc::CpuPath::avx512);
+    // BlankClip-equivalent in-memory workload: each representative kernel is
+    // measured in both orientations so release comparisons cover every path.
     const Case cases[] = {
         {"b1-horizontal", dsmvc::KernelKind::bilinear, 0, false},
         {"b3-horizontal", dsmvc::KernelKind::bicubic, 0, false},
         {"b5-horizontal", dsmvc::KernelKind::lanczos, 3, false},
         {"b7-horizontal", dsmvc::KernelKind::spline64, 0, false},
+        {"b1-vertical", dsmvc::KernelKind::bilinear, 0, true},
+        {"b3-vertical", dsmvc::KernelKind::bicubic, 0, true},
         {"b5-vertical", dsmvc::KernelKind::lanczos, 3, true},
         {"b7-vertical", dsmvc::KernelKind::spline64, 0, true},
     };
@@ -126,21 +133,23 @@ int main(int argc, char **argv) {
         if (!filter.empty() && filter != c.name) continue;
         const auto plan = plan_for(c);
         (void)run(avx2, *plan, c.columns, 1U);
-        (void)run(avx512, *plan, c.columns, 1U);
+        if (has_avx512) (void)run(*avx512, *plan, c.columns, 1U);
         std::vector<double> a, b;
         for (std::size_t i = 0; i < samples; ++i) {
-            double avx2_ms;
+            const double avx2_ms = run(
+                avx2, *plan, c.columns, iterations);
+            a.push_back(avx2_ms);
+            if (!has_avx512) continue;
             double avx512_ms;
             if ((i & 1U) == 0U) {
-                avx2_ms = run(avx2, *plan, c.columns, iterations);
-                avx512_ms = run(avx512, *plan, c.columns, iterations);
+                avx512_ms = run(*avx512, *plan, c.columns, iterations);
             } else {
-                avx512_ms = run(avx512, *plan, c.columns, iterations);
-                avx2_ms = run(avx2, *plan, c.columns, iterations);
+                avx512_ms = run(*avx512, *plan, c.columns, iterations);
             }
-            a.push_back(avx2_ms); b.push_back(avx512_ms);
+            b.push_back(avx512_ms);
         }
-        const double old_ms = median(a), new_ms = median(b);
+        const double old_ms = median(a);
+        const double new_ms = has_avx512 ? median(b) : 0.0;
         constexpr int stride = 1920;
         const int input_rows = c.columns ? plan->source_size : 256;
         const int output_rows = c.columns ? plan->destination_size : input_rows;
@@ -149,15 +158,18 @@ int main(int argc, char **argv) {
                                        * output_rows, 0.0F);
         std::vector<float> avx512_output(avx2_output.size(), 0.0F);
         execute(avx2, *plan, c.columns, input, avx2_output);
-        execute(avx512, *plan, c.columns, input, avx512_output);
-        const auto error = compare_outputs(
-            avx2_output, avx512_output, *plan, c.columns);
-        std::cout << c.name << " avx2_ms=" << old_ms
-                  << " avx512_ms=" << new_ms
-                  << " speedup=" << old_ms / new_ms << "x"
-                  << " max_abs_error=" << std::scientific
-                  << std::setprecision(6) << error.max_abs << std::fixed
-                  << std::setprecision(3)
-                  << " nonfinite=" << error.nonfinite << '\n';
+        std::cout << c.name << " avx2_ms=" << old_ms;
+        if (has_avx512) {
+            execute(*avx512, *plan, c.columns, input, avx512_output);
+            const auto error = compare_outputs(
+                avx2_output, avx512_output, *plan, c.columns);
+            std::cout << " avx512_ms=" << new_ms
+                      << " speedup=" << old_ms / new_ms << "x"
+                      << " max_abs_error=" << std::scientific
+                      << std::setprecision(6) << error.max_abs << std::fixed
+                      << std::setprecision(3)
+                      << " nonfinite=" << error.nonfinite;
+        }
+        std::cout << '\n';
     }
 }

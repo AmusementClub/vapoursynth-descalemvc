@@ -28,6 +28,21 @@ excluded from the reported kernel time.
 ./build/dsmvc_cpu_avx512_memory_benchmark avx512 4096 5 100 hot
 ```
 
+For a release A/B, `release_cpu_blank_ab.sh` builds the pre-tail-tile
+baseline (`8fbed39` by default) and the current checkout in separate worktrees,
+then runs the same in-memory BlankClip-equivalent benchmark. It reports B1,
+B3, B5, and B7 in both horizontal and vertical orientations. Override
+`BASELINE_REF`, `SAMPLES`, or `ITERATIONS` for another source snapshot or a
+longer run:
+
+```sh
+BASELINE_REF=8fbed39 SAMPLES=5 ITERATIONS=3 \
+  ./benchmarks/release_cpu_blank_ab.sh
+```
+
+The baseline executable supplies the pre-optimization AVX2 numbers; the current
+executable supplies optimized AVX2 versus AVX-512 and numerical error.
+
 This directory contains the reproducible old/current Release comparison used
 to produce [`docs/release-benchmark.md`](../docs/release-benchmark.md).
 
