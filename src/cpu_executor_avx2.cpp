@@ -593,19 +593,20 @@ void solve_horizontal_b1(const detail::PackedCpuPlan &packed,
         next = x0;
         transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
         const auto remaining = destination_size - full_destination;
-        const __m256i mask = _mm256_setr_epi32(
-            remaining > 0 ? -1 : 0, remaining > 1 ? -1 : 0,
-            remaining > 2 ? -1 : 0, remaining > 3 ? -1 : 0,
-            remaining > 4 ? -1 : 0, remaining > 5 ? -1 : 0,
-            remaining > 6 ? -1 : 0, remaining > 7 ? -1 : 0);
-        _mm256_maskstore_ps(output + full_destination, mask, x0);
-        _mm256_maskstore_ps(output + stride + full_destination, mask, x1);
-        _mm256_maskstore_ps(output + 2 * stride + full_destination, mask, x2);
-        _mm256_maskstore_ps(output + 3 * stride + full_destination, mask, x3);
-        _mm256_maskstore_ps(output + 4 * stride + full_destination, mask, x4);
-        _mm256_maskstore_ps(output + 5 * stride + full_destination, mask, x5);
-        _mm256_maskstore_ps(output + 6 * stride + full_destination, mask, x6);
-        _mm256_maskstore_ps(output + 7 * stride + full_destination, mask, x7);
+        _mm256_store_ps(tail_tile + 0U * 8U, x0);
+        _mm256_store_ps(tail_tile + 1U * 8U, x1);
+        _mm256_store_ps(tail_tile + 2U * 8U, x2);
+        _mm256_store_ps(tail_tile + 3U * 8U, x3);
+        _mm256_store_ps(tail_tile + 4U * 8U, x4);
+        _mm256_store_ps(tail_tile + 5U * 8U, x5);
+        _mm256_store_ps(tail_tile + 6U * 8U, x6);
+        _mm256_store_ps(tail_tile + 7U * 8U, x7);
+        for (std::int32_t row = 0; row < 8; ++row) {
+            std::copy_n(tail_tile + static_cast<std::size_t>(row) * 8U,
+                        remaining,
+                        output + static_cast<std::ptrdiff_t>(row) * stride
+                            + full_destination);
+        }
     }
     const auto backward_start = has_tail ? full_destination - 8 : padded - 8;
     for (std::int32_t j = backward_start; j >= 0; j -= 8) {
@@ -723,19 +724,20 @@ void solve_horizontal_b3(const detail::PackedCpuPlan &packed,
         next3 = x2;
         transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
         const auto remaining = destination_size - full_destination;
-        const __m256i mask = _mm256_setr_epi32(
-            remaining > 0 ? -1 : 0, remaining > 1 ? -1 : 0,
-            remaining > 2 ? -1 : 0, remaining > 3 ? -1 : 0,
-            remaining > 4 ? -1 : 0, remaining > 5 ? -1 : 0,
-            remaining > 6 ? -1 : 0, remaining > 7 ? -1 : 0);
-        _mm256_maskstore_ps(output + full_destination, mask, x0);
-        _mm256_maskstore_ps(output + stride + full_destination, mask, x1);
-        _mm256_maskstore_ps(output + 2 * stride + full_destination, mask, x2);
-        _mm256_maskstore_ps(output + 3 * stride + full_destination, mask, x3);
-        _mm256_maskstore_ps(output + 4 * stride + full_destination, mask, x4);
-        _mm256_maskstore_ps(output + 5 * stride + full_destination, mask, x5);
-        _mm256_maskstore_ps(output + 6 * stride + full_destination, mask, x6);
-        _mm256_maskstore_ps(output + 7 * stride + full_destination, mask, x7);
+        _mm256_store_ps(tail_tile + 0U * 8U, x0);
+        _mm256_store_ps(tail_tile + 1U * 8U, x1);
+        _mm256_store_ps(tail_tile + 2U * 8U, x2);
+        _mm256_store_ps(tail_tile + 3U * 8U, x3);
+        _mm256_store_ps(tail_tile + 4U * 8U, x4);
+        _mm256_store_ps(tail_tile + 5U * 8U, x5);
+        _mm256_store_ps(tail_tile + 6U * 8U, x6);
+        _mm256_store_ps(tail_tile + 7U * 8U, x7);
+        for (std::int32_t row = 0; row < 8; ++row) {
+            std::copy_n(tail_tile + static_cast<std::size_t>(row) * 8U,
+                        remaining,
+                        output + static_cast<std::ptrdiff_t>(row) * stride
+                            + full_destination);
+        }
     }
     const auto backward_start = has_tail ? full_destination - 8 : padded - 8;
     for (std::int32_t j = backward_start; j >= 0; j -= 8) {

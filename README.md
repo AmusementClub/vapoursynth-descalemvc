@@ -107,8 +107,9 @@ Float64 float output matches the CPU scalar Float64 reference within 1 output
 ULP on every backend. For both F32 and F64 solves, U8/U10/U16 output differs
 from the same-precision CPU scalar reference by at most 1 code; pairwise
 backend differences are not the contract. Repeated execution on one concrete
-route is bit-exact, and CPU buffered/streamed plus fused/two-pass dynamic
-routes are bit-exact with each other. Automatic routing never selects a
+route is bit-exact. Optimized CPU routes, including buffered/streamed and
+fused/two-pass dynamic routes, are compared within the documented Float32
+tolerance because SIMD width and FMA evaluation order may differ. Automatic routing never selects a
 Float64 plan on a GPU backend -- that admission requires paired plugin-level
 evidence against the optimized CPU Float64 path, which has not yet been
 collected.

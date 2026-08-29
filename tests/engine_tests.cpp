@@ -315,6 +315,9 @@ ErrorStats compare_2d(dsmvc::CpuPath path, dsmvc::KernelKind kind,
         }
     }
     std::cout << label << ": bit_differences=" << different << '\n';
+    // Only scalar is the canonical bit-exact reference. SIMD routes may use
+    // different FMA widths and evaluation schedules, covered by the numeric
+    // tolerance above.
     if (path == dsmvc::CpuPath::scalar) {
         require(different == 0U,
                 std::string(label)

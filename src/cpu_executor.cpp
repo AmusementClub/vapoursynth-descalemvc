@@ -1133,7 +1133,7 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
             static_cast<std::size_t>(row_count),
             static_cast<std::size_t>(plan.destination_size),
             "CPU row work") >= 262144U;
-        if (enough_work && impl_->workers->try_run(
+        if (task_count != 0U && enough_work && impl_->workers->try_run(
                 task_count, [&](std::size_t task) {
                     const auto first_group = complete_groups * task / task_count;
                     const auto last_group = complete_groups * (task + 1U) / task_count;
@@ -1280,8 +1280,41 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
 #if defined(DSMVC_HAS_AVX512_OBJECT)
     if (path_ == CpuPath::avx512) {
         const auto packed = impl_->get(plan);
-        inverse_columns_avx512(plan, *packed, input, input_row_stride,
-                               output, output_row_stride, column_count);
+        const auto vector_columns = column_count & ~15;
+        const auto complete_groups = static_cast<std::size_t>(vector_columns / 16);
+        const auto task_count = std::min(
+            impl_->workers->parallelism(), complete_groups);
+        const auto enough_work = detail::checked_size_product(
+            static_cast<std::size_t>(column_count),
+            static_cast<std::size_t>(plan.destination_size),
+            "CPU AVX-512 column work") >= 262144U;
+        const auto run_column_tail = [&] {
+            const auto remaining = column_count - vector_columns;
+            if (remaining == 0) return;
+            inverse_columns_avx2(
+                plan, *packed, input + vector_columns, input_row_stride,
+                output + vector_columns, output_row_stride, remaining);
+        };
+        if (task_count != 0U && enough_work && impl_->workers->try_run(
+                task_count, [&](std::size_t task) {
+                    const auto first_group = complete_groups * task / task_count;
+                    const auto last_group = complete_groups * (task + 1U) / task_count;
+                    const auto first_column = static_cast<std::int32_t>(
+                        first_group * 16U);
+                    const auto task_columns = static_cast<std::int32_t>(
+                        (last_group - first_group) * 16U);
+                    inverse_columns_avx512(
+                        plan, *packed, input + first_column, input_row_stride,
+                        output + first_column, output_row_stride, task_columns);
+                })) {
+            run_column_tail();
+            return;
+        }
+        if (vector_columns != 0) {
+            inverse_columns_avx512(plan, *packed, input, input_row_stride,
+                                   output, output_row_stride, vector_columns);
+        }
+        run_column_tail();
         return;
     }
 #endif

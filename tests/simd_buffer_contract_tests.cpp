@@ -493,6 +493,10 @@ void test_cpu_paths_and_strides() {
             test_rows_and_columns(
                 dsmvc::CpuPath::avx512, 16, residue,
                 dsmvc::KernelKind::lanczos);
+            test_rows_and_columns(
+                dsmvc::CpuPath::avx512, 16, residue,
+                dsmvc::KernelKind::spline64);
+            test_float_2d(dsmvc::CpuPath::avx512, 16, residue);
         }
     }
     if (dsmvc::cpu_avx2_available()) {
