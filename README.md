@@ -6,7 +6,8 @@
 ![VapourSynth API4](https://img.shields.io/badge/VapourSynth-API4-green)
 
 `dsmvc` is a VapourSynth API4 plugin compatible with the public filter API of
-Irrational-Encoding-Wizardry/descale, with native Metal, Vulkan, CUDA/CPU(AVX2/FMA, NEON).
+Irrational-Encoding-Wizardry/descale, with native Metal, Vulkan, CUDA, and CPU
+(scalar, AVX2/FMA, AVX-512, NEON).
 
 For native-resolution discovery, we recommend [GetNative-VF](https://github.com/MysteryDove/GetNative-VF)
 as the practical `getnative` alternative. It is designed for the same
@@ -22,7 +23,7 @@ candidate-search workflow and can use `dsmvc` as the descale implementation.
 
 | Route | Supported hardware |
 |---|---|
-| CPU | x86-64 with a universal scalar path and optional AVX2/FMA acceleration; ARM64/AArch64 with scalar and NEON/FMA paths. Automatic routing selects the fastest path supported by the current CPU. |
+| CPU | x86-64 with a universal scalar path and optional AVX2/FMA or AVX-512F/DQ/BW/VL acceleration; ARM64/AArch64 with scalar and NEON/FMA paths. Automatic routing selects the fastest path supported by the current CPU. |
 | CUDA | NVIDIA Turing or newer (compute capability 7.5+) on Windows and Linux. Covering GeForce GTX 16/RTX 20, RTX 30, RTX 40, and RTX 50 series respectively. |
 | Vulkan | Windows or Linux devices with a Vulkan 1.2 driver. Float64 additionally requires the capabilities listed in [Backend support](#backend-support). |
 | Metal | Apple Silicon M-series systems on macOS 13.3 or newer. Retained-Float64 work uses the CPU fallback. |
@@ -204,10 +205,11 @@ these integers or `Opt.AUTO`, `Opt.NONE`, `Opt.AVX2`, `Opt.AVX512`, `Opt.NEON`,
 and `Opt.SIMD`; `Opt.AVX2`, `Opt.NEON`, and `Opt.SIMD` preserve `opt=2`, while
 `Opt.AVX512` is the new explicit value.
 
-The current AVX-512 path specializes F32 vertical solves in 16-column blocks
-and the profiled B5/B7 horizontal solves in 16-row blocks. Other horizontal
-bands, F64, integer, and fused 2D operations retain the AVX2 kernels until an
-isolated benchmark demonstrates a worthwhile 512-bit implementation.
+The current AVX-512 path keeps the profiled F32 B5/B7 horizontal solves in
+16-row blocks. Other horizontal bands stay on AVX2. F32 vertical solves can
+use 16-column AVX-512 blocks, but F64, integer, and fused 2D operations retain
+the AVX2 kernels until an isolated benchmark demonstrates a worthwhile 512-bit
+implementation.
 The AVX2 F32 B1/B3/B5/B7 horizontal kernels write complete 8-column tiles
 directly and keep only the final partial tile in local storage, avoiding a
 full padded-output copy for widths that are not divisible by eight.
