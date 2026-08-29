@@ -1,5 +1,20 @@
 # Release benchmark
 
+## Lightweight AVX-512 probe
+
+`cpu_avx512_benchmark` performs a small AVX2/AVX-512 comparison for six
+representative F32 kernels and reports the maximum output error. It defaults
+to three samples and one iteration; the optional arguments are `samples`,
+`iterations`, and a kernel-name filter. On a VM with `perf`,
+`profile_gcp_avx512.sh` collects only cycles, instructions, branches, and
+branch misses. It is intended for short hardware probes, not release
+throughput evidence.
+
+```sh
+./build/dsmvc_cpu_avx512_benchmark 3 1
+./benchmarks/profile_gcp_avx512.sh 3 1
+```
+
 This directory contains the reproducible old/current Release comparison used
 to produce [`docs/release-benchmark.md`](../docs/release-benchmark.md).
 

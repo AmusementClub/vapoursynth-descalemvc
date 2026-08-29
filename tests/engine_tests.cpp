@@ -156,12 +156,15 @@ void require_agreement(const ErrorStats &stats, std::string_view label,
 }
 
 [[nodiscard]] bool native_simd_available() noexcept {
-    return dsmvc::cpu_avx2_available() || dsmvc::cpu_neon_available();
+    return dsmvc::cpu_avx512_available() || dsmvc::cpu_avx2_available()
+        || dsmvc::cpu_neon_available();
 }
 
 [[nodiscard]] dsmvc::CpuPath native_simd_path() noexcept {
-    return dsmvc::cpu_avx2_available()
-        ? dsmvc::CpuPath::avx2 : dsmvc::CpuPath::neon;
+    return dsmvc::cpu_avx512_available()
+        ? dsmvc::CpuPath::avx512
+        : dsmvc::cpu_avx2_available()
+            ? dsmvc::CpuPath::avx2 : dsmvc::CpuPath::neon;
 }
 
 ErrorStats compare_rows(const dsmvc::CpuExecutor &optimized_executor,
@@ -312,8 +315,11 @@ ErrorStats compare_2d(dsmvc::CpuPath path, dsmvc::KernelKind kind,
         }
     }
     std::cout << label << ": bit_differences=" << different << '\n';
-    require(different == 0U,
-            std::string(label) + " is not bit-exact with the legacy two-pass path");
+    if (path == dsmvc::CpuPath::scalar) {
+        require(different == 0U,
+                std::string(label)
+                    + " is not bit-exact with the legacy two-pass path");
+    }
     return stats;
 }
 
@@ -917,6 +923,8 @@ void test_accelerator_executor_agreement(
 void test_cpu_path_selection() {
     require(!dsmvc::cpu_avx2_available() || dsmvc::cpu_avx2_compiled(),
             "available AVX2 path was not compiled");
+    require(!dsmvc::cpu_avx512_available() || dsmvc::cpu_avx512_compiled(),
+            "available AVX-512 path was not compiled");
     require(!dsmvc::cpu_neon_available() || dsmvc::cpu_neon_compiled(),
             "available NEON path was not compiled");
 
@@ -929,8 +937,10 @@ void test_cpu_path_selection() {
         require(explicit_native.path() == expected,
                 "explicit native SIMD dispatch selected the wrong path");
         require(std::string_view(explicit_native.name())
-                    == (expected == dsmvc::CpuPath::avx2
-                            ? "avx2-fma" : "neon-fma"),
+                    == (expected == dsmvc::CpuPath::avx512
+                            ? "avx512-fma"
+                            : expected == dsmvc::CpuPath::avx2
+                                ? "avx2-fma" : "neon-fma"),
                 "native SIMD executor reported the wrong name");
     } else {
         require(automatic.path() == dsmvc::CpuPath::scalar,

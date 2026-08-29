@@ -196,14 +196,21 @@ explicit Metal is a mixed plugin-level route and publishes whether a frame
 actually used Metal.
 
 For the CPU backend, `opt=1` selects the scalar path and `opt=2` strictly
-requires the architecture's native SIMD path: AVX2/FMA on x86-64 or NEON/FMA
-on AArch64. The default selects native SIMD when available. Other numeric
-values retain baseline behavior and select automatic dispatch. The Python
-wrapper accepts either these integers or `Opt.AUTO`, `Opt.NONE`, `Opt.AVX2`,
-`Opt.NEON`, and `Opt.SIMD`; the last three names all preserve the legacy
-`opt=2` value.
+requires AVX2/FMA on x86-64 or NEON/FMA on AArch64. On x86-64, `opt=3`
+strictly requires AVX-512F/DQ/BW/VL and FMA. The default selects AVX-512,
+then AVX2 or NEON, when available. Other numeric values retain baseline
+behavior and select automatic dispatch. The Python wrapper accepts either
+these integers or `Opt.AUTO`, `Opt.NONE`, `Opt.AVX2`, `Opt.AVX512`, `Opt.NEON`,
+and `Opt.SIMD`; `Opt.AVX2`, `Opt.NEON`, and `Opt.SIMD` preserve `opt=2`, while
+`Opt.AVX512` is the new explicit value.
 
-At the public engine level, explicitly requesting `CpuPath::avx2` or
+The current AVX-512 path specializes F32 vertical solves in 16-column blocks
+and the profiled B7 horizontal solve in 16-row blocks. Other horizontal bands,
+F64, integer, and fused 2D operations retain the AVX2 kernels until an isolated
+benchmark demonstrates a worthwhile 512-bit implementation.
+
+At the public engine level, explicitly requesting `CpuPath::avx2`,
+`CpuPath::avx512`, or
 `CpuPath::neon` also requires that exact path to be compiled and supported by
 the current CPU; it raises an error otherwise. Only `CpuPath::automatic` may
 fall back to scalar.

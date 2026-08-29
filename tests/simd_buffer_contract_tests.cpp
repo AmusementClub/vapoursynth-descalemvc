@@ -481,6 +481,13 @@ void test_cpu_paths_and_strides() {
     dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
     test_short_strides(scalar, "scalar");
 
+    if (dsmvc::cpu_avx512_available()) {
+        dsmvc::CpuExecutor avx512(dsmvc::CpuPath::avx512);
+        test_short_strides(avx512, "AVX-512");
+        for (std::int32_t residue = 1; residue < 16; ++residue) {
+            test_rows_and_columns(dsmvc::CpuPath::avx512, 16, residue);
+        }
+    }
     if (dsmvc::cpu_avx2_available()) {
         dsmvc::CpuExecutor avx2(dsmvc::CpuPath::avx2);
         test_short_strides(avx2, "AVX2");
@@ -565,6 +572,16 @@ void test_strict_cpu_path_selection() {
         throw std::runtime_error("unavailable explicit AVX2 path did not fail");
     }
 avx2_rejected:
+    if (!dsmvc::cpu_avx512_available()) {
+        try {
+            dsmvc::CpuExecutor executor(dsmvc::CpuPath::avx512);
+            (void)executor;
+        } catch (const std::runtime_error &) {
+            goto avx512_rejected;
+        }
+        throw std::runtime_error("unavailable explicit AVX-512 path did not fail");
+    }
+avx512_rejected:
     if (!dsmvc::cpu_neon_available()) {
         try {
             dsmvc::CpuExecutor executor(dsmvc::CpuPath::neon);

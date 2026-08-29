@@ -25,7 +25,7 @@ set(DSMVC_CUDA_PTX_ARCHITECTURES "75;120" CACHE STRING
     "Virtual compute targets embedded as CUDA PTX fallbacks")
 option(DSMVC_BUILD_BENCHMARKS "Build CPU and numerical contract benchmarks" OFF)
 option(DSMVC_ENABLE_NATIVE_CPU_SIMD
-       "Build the native AVX2 or NEON CPU implementation" ON)
+       "Build the native AVX2, AVX-512, or NEON CPU implementation" ON)
 
 set(DSMVC_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
@@ -87,12 +87,27 @@ set(DSMVC_ENGINE_SOURCES
 )
 
 set(DSMVC_CAN_BUILD_AVX2 OFF)
+set(DSMVC_CAN_BUILD_AVX512 OFF)
 set(DSMVC_CAN_BUILD_NEON OFF)
 if(DSMVC_ENABLE_NATIVE_CPU_SIMD
    AND CMAKE_SIZEOF_VOID_P EQUAL 8
    AND DSMVC_TARGET_PROCESSOR MATCHES "^(amd64|x86_64)$")
     set(DSMVC_CAN_BUILD_AVX2 ON)
     list(APPEND DSMVC_ENGINE_SOURCES src/cpu_executor_avx2.cpp)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-mavx512f" DSMVC_COMPILER_HAS_AVX512F)
+    check_cxx_compiler_flag("-mavx512dq" DSMVC_COMPILER_HAS_AVX512DQ)
+    check_cxx_compiler_flag("-mavx512bw" DSMVC_COMPILER_HAS_AVX512BW)
+    check_cxx_compiler_flag("-mavx512vl" DSMVC_COMPILER_HAS_AVX512VL)
+    set(DSMVC_COMPILER_HAS_AVX512 OFF)
+    if(DSMVC_COMPILER_HAS_AVX512F AND DSMVC_COMPILER_HAS_AVX512DQ
+       AND DSMVC_COMPILER_HAS_AVX512BW AND DSMVC_COMPILER_HAS_AVX512VL)
+        set(DSMVC_COMPILER_HAS_AVX512 ON)
+    endif()
+    if(MSVC OR DSMVC_COMPILER_HAS_AVX512)
+        set(DSMVC_CAN_BUILD_AVX512 ON)
+        list(APPEND DSMVC_ENGINE_SOURCES src/cpu_executor_avx512.cpp)
+    endif()
 elseif(DSMVC_ENABLE_NATIVE_CPU_SIMD
        AND CMAKE_SIZEOF_VOID_P EQUAL 8
        AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
@@ -288,6 +303,16 @@ if(DSMVC_CAN_BUILD_AVX2)
     endif()
 elseif(DSMVC_CAN_BUILD_NEON)
     target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_NEON_OBJECT=1)
+endif()
+if(DSMVC_CAN_BUILD_AVX512)
+    target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_AVX512_OBJECT=1)
+    if(MSVC)
+        set_source_files_properties(src/cpu_executor_avx512.cpp PROPERTIES
+            COMPILE_OPTIONS "/arch:AVX512;/Ob3;/fp:strict")
+    else()
+        set_source_files_properties(src/cpu_executor_avx512.cpp PROPERTIES
+            COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512bw;-mavx512vl;-mfma")
+    endif()
 endif()
 
 add_library(dsmvc MODULE src/vs_plugin.cpp)
@@ -534,6 +559,20 @@ if(DSMVC_BUILD_BENCHMARKS)
             _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
     else()
         target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off)
+    endif()
+
+    add_executable(dsmvc_cpu_avx512_benchmark
+        benchmarks/cpu_avx512_benchmark.cpp)
+    target_compile_features(dsmvc_cpu_avx512_benchmark PRIVATE cxx_std_23)
+    target_link_libraries(dsmvc_cpu_avx512_benchmark PRIVATE dsmvc_engine)
+    if(MSVC)
+        target_compile_options(dsmvc_cpu_avx512_benchmark PRIVATE
+            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_definitions(dsmvc_cpu_avx512_benchmark PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(dsmvc_cpu_avx512_benchmark PRIVATE
             -Wall -Wextra -Wpedantic -ffp-contract=off)
     endif()
 

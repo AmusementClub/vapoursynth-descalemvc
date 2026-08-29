@@ -37,6 +37,7 @@ enum class CpuPath : std::uint8_t {
     scalar,
     avx2,
     neon,
+    avx512,
 };
 
 enum class BorderMode : std::uint8_t {
@@ -172,6 +173,8 @@ inline void inverse_axis_f32(const AxisPlan &plan,
 
 [[nodiscard]] bool cpu_avx2_compiled() noexcept;
 [[nodiscard]] bool cpu_avx2_available() noexcept;
+[[nodiscard]] bool cpu_avx512_compiled() noexcept;
+[[nodiscard]] bool cpu_avx512_available() noexcept;
 [[nodiscard]] bool cpu_neon_compiled() noexcept;
 [[nodiscard]] bool cpu_neon_available() noexcept;
 [[nodiscard]] bool metal_compiled() noexcept;

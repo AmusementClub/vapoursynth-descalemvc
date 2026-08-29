@@ -28,6 +28,7 @@ class Opt(IntEnum):
     AVX2 = 2
     SIMD = 2
     NEON = 2
+    AVX512 = 3
 
 
 def _plugin_args(opt, backend, padding, f64mode, border_handling):

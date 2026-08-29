@@ -277,7 +277,7 @@ private:
 #if defined(DSMVC_HAS_NEON_OBJECT)
     if (path != CpuPath::neon) return 1U;
 #else
-    if (path != CpuPath::avx2) return 1U;
+    if (path != CpuPath::avx2 && path != CpuPath::avx512) return 1U;
 #endif
     const auto hardware = std::max(std::thread::hardware_concurrency(), 1U);
     return std::min<std::size_t>(hardware, 4U);
@@ -287,7 +287,7 @@ private:
 #if defined(DSMVC_HAS_NEON_OBJECT)
     if (path != CpuPath::neon) return {};
 #else
-    if (path != CpuPath::avx2) return {};
+    if (path != CpuPath::avx2 && path != CpuPath::avx512) return {};
 #endif
     static auto pool = std::make_shared<WorkerPool>(cpu_parallelism(path));
     return pool;
@@ -296,6 +296,7 @@ private:
 } // namespace
 
 #if defined(DSMVC_HAS_AVX2_OBJECT)
+void avx512_path_marker() noexcept;
 void inverse_rows_f64_avx2(
     const AxisPlan &plan,
     const float *input, std::ptrdiff_t input_row_stride,
@@ -326,6 +327,13 @@ void inverse_columns_avx2(const AxisPlan &plan,
                           const float *input, std::ptrdiff_t input_row_stride,
                           float *output, std::ptrdiff_t output_row_stride,
                           std::int32_t column_count);
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+void inverse_rows_avx512(const AxisPlan &plan,
+                         const detail::PackedCpuPlan &packed,
+                         const float *input, std::ptrdiff_t input_row_stride,
+                         float *output, std::ptrdiff_t output_row_stride,
+                         std::int32_t row_count);
+#endif
 void solve_rhs_columns_avx2(
     const AxisPlan &plan, const detail::PackedCpuPlan &packed,
     float *output, std::ptrdiff_t output_row_stride,
@@ -398,6 +406,14 @@ void backward_rhs_to_u16_avx2(
     float *input, std::ptrdiff_t input_row_stride,
     std::uint16_t *output, std::ptrdiff_t output_row_stride,
     std::int32_t columns, const IntegerConversion &conversion);
+#endif
+
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+void inverse_columns_avx512(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t column_count);
 #endif
 
 #if defined(DSMVC_HAS_NEON_OBJECT)
@@ -691,6 +707,42 @@ bool cpu_avx2_available() noexcept {
 #endif
 }
 
+bool cpu_avx512_compiled() noexcept {
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool cpu_avx512_available() noexcept {
+#if defined(DSMVC_HAS_AVX512_OBJECT) && defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    int registers[4]{};
+    __cpuid(registers, 1);
+    constexpr int osxsave = 1 << 27;
+    constexpr int avx = 1 << 28;
+    constexpr int fma = 1 << 12;
+    if ((registers[2] & (osxsave | avx | fma)) != (osxsave | avx | fma)) return false;
+    const auto xcr0 = _xgetbv(0);
+    if ((xcr0 & 0xe6U) != 0xe6U) return false;
+    __cpuidex(registers, 7, 0);
+    constexpr int avx512f = 1 << 16;
+    constexpr int avx512dq = 1 << 17;
+    constexpr int avx512bw = 1 << 30;
+    constexpr int avx512vl = 1 << 31;
+    return (registers[1] & (avx512f | avx512dq | avx512bw | avx512vl))
+        == (avx512f | avx512dq | avx512bw | avx512vl);
+#elif defined(DSMVC_HAS_AVX512_OBJECT) && (defined(__x86_64__) || defined(__i386__))
+    return __builtin_cpu_supports("avx512f")
+        && __builtin_cpu_supports("avx512dq")
+        && __builtin_cpu_supports("avx512bw")
+        && __builtin_cpu_supports("avx512vl")
+        && __builtin_cpu_supports("fma");
+#else
+    return false;
+#endif
+}
+
 bool cpu_neon_compiled() noexcept {
 #if defined(DSMVC_HAS_NEON_OBJECT)
     return true;
@@ -726,7 +778,9 @@ bool cpu_neon_available() noexcept {
 CpuExecutor::CpuExecutor(CpuPath requested) {
     switch (requested) {
     case CpuPath::automatic:
-        if (cpu_avx2_available()) {
+        if (cpu_avx512_available()) {
+            path_ = CpuPath::avx512;
+        } else if (cpu_avx2_available()) {
             path_ = CpuPath::avx2;
         } else if (cpu_neon_available()) {
             path_ = CpuPath::neon;
@@ -743,6 +797,16 @@ CpuExecutor::CpuExecutor(CpuPath requested) {
                 "the explicit AVX2 path requires compiled AVX2 and FMA support");
         }
         path_ = CpuPath::avx2;
+        break;
+    case CpuPath::avx512:
+        if (!cpu_avx512_available()) {
+            throw std::runtime_error(
+                "the explicit AVX-512 path requires compiled AVX-512F/DQ/BW/VL and FMA support");
+        }
+        path_ = CpuPath::avx512;
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+        avx512_path_marker();
+#endif
         break;
     case CpuPath::neon:
         if (!cpu_neon_available()) {
@@ -765,6 +829,7 @@ const char *CpuExecutor::name() const noexcept {
     switch (path_) {
     case CpuPath::scalar: return "scalar";
     case CpuPath::avx2: return "avx2-fma";
+    case CpuPath::avx512: return "avx512-fma";
     case CpuPath::neon: return "neon-fma";
     default: return "invalid";
     }
@@ -841,7 +906,7 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
             "CPU Float64 row input contains NaN or infinity");
         const auto execute = [&] {
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-        if (path_ == CpuPath::avx2) {
+        if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
             const auto complete_groups = static_cast<std::size_t>(row_count / 4);
             const auto task_count = std::min(
                 impl_->workers->parallelism(), complete_groups);
@@ -949,8 +1014,18 @@ void CpuExecutor::inverse_rows(const AxisPlan &plan,
         return;
     }
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-    if (path_ == CpuPath::avx2) {
+    if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
         const auto packed = impl_->get(plan);
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+        // Cross-platform profiling only retained a stable gain for B7.
+        // B1/B3 have hand-unrolled AVX2 dependency chains, while B5 regresses
+        // on AMD and wider generic bands have not met the benchmark gate.
+        if (path_ == CpuPath::avx512 && plan.half_bandwidth == 7) {
+            inverse_rows_avx512(plan, *packed, input, input_row_stride,
+                                output, output_row_stride, row_count);
+            return;
+        }
+#endif
         const auto complete_groups = static_cast<std::size_t>(row_count / 8);
         const auto task_count = std::min(
             impl_->workers->parallelism(), complete_groups);
@@ -1049,7 +1124,7 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
             "CPU Float64 column input contains NaN or infinity");
         const auto execute = [&] {
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-        if (path_ == CpuPath::avx2) {
+        if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
             const auto complete_groups = static_cast<std::size_t>(
                 column_count / 4);
             const auto task_count = std::min(
@@ -1141,8 +1216,16 @@ void CpuExecutor::inverse_columns(const AxisPlan &plan,
             "CPU Float64 column execution produced NaN or infinity");
         return;
     }
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+    if (path_ == CpuPath::avx512) {
+        const auto packed = impl_->get(plan);
+        inverse_columns_avx512(plan, *packed, input, input_row_stride,
+                               output, output_row_stride, column_count);
+        return;
+    }
+#endif
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-    if (path_ == CpuPath::avx2) {
+    if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
         const auto packed = impl_->get(plan);
         const auto vector_columns = column_count & ~7;
         const auto column_groups = static_cast<std::size_t>(vector_columns / 8);
@@ -1778,7 +1861,7 @@ void CpuExecutor::inverse_2d(
             "CPU Float64 2D input contains NaN or infinity");
         const auto execute = [&] {
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-        if (path_ == CpuPath::avx2) {
+        if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
             inverse_2d_f64_avx2(
                 horizontal, vertical, input, input_row_stride,
                 output, output_row_stride, *impl_->workers);
@@ -1824,7 +1907,7 @@ void CpuExecutor::inverse_2d(
 #endif
     const auto packed_vertical = impl_->get(vertical);
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-    if (path_ == CpuPath::avx2) {
+    if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
         const auto packed_horizontal = impl_->get(horizontal);
         if (vertical.source_size >= 8) {
             forward_2d_rhs_avx2(
@@ -1941,7 +2024,7 @@ void CpuExecutor::inverse_2d_integer(
     auto *rhs_data = rhs.data();
 
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-    if (path_ == CpuPath::avx2) {
+    if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
         const auto packed_horizontal = impl_->get(horizontal);
         if (vertical.source_size >= 8) {
             const auto enough_work = detail::checked_size_product(
@@ -2118,7 +2201,7 @@ void CpuExecutor::inverse_2d_integer_streamed(
     auto *rhs_data = rhs.data();
 
 #if defined(DSMVC_HAS_AVX2_OBJECT)
-    if (path_ == CpuPath::avx2) {
+    if (path_ == CpuPath::avx2 || path_ == CpuPath::avx512) {
         const auto packed_horizontal = impl_->get(horizontal);
         if (vertical.source_size >= 8) {
             if constexpr (std::is_same_v<Sample, std::uint8_t>) {
