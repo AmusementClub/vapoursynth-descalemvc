@@ -174,7 +174,7 @@ void inverse_columns_avx512(
 // to ensure that an AVX-512 object was linked.
 void avx512_path_marker() noexcept {
     alignas(64) static volatile float source[16]{};
-    volatile __m512 value = _mm512_loadu_ps(const_cast<const float *>(source));
+    const __m512 value = _mm512_loadu_ps(const_cast<const float *>(source));
     volatile float lane = _mm512_cvtss_f32(value);
     (void)lane;
 }
