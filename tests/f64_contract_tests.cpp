@@ -310,7 +310,8 @@ void test_cpu_simd_tiny(
         executor.inverse_2d(
             plan, identity, input_2d.data(), input_2d_stride,
             output_2d.data(), output_2d_stride);
-        const std::string name = path == dsmvc::CpuPath::avx2 ? "AVX2" : "NEON";
+        const std::string name = path == dsmvc::CpuPath::avx512 ? "AVX-512"
+            : path == dsmvc::CpuPath::avx2 ? "AVX2" : "NEON";
         require_float_matrix(
             row_reference, rows, vectors, plan.destination_size,
             row_output_stride, "tiny-pivot/" + name + "/rows");

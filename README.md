@@ -87,6 +87,7 @@ It does not register a `core.descale` alias.
 |---|---|---|---|---|
 | CPU scalar | ✅ | ✅ | reference | `auto` / explicit |
 | CPU AVX2 (x86-64) | ✅ | ✅ | <= 1 code vs scalar | `auto` / explicit |
+| CPU AVX-512 (x86-64) | ✅ | AVX2 kernels | <= 1 code vs scalar | `auto` / explicit |
 | CPU NEON (AArch64) | ✅ | ✅ | <= 1 code vs scalar | `auto` / explicit |
 | CUDA | ✅ | ✅ | <= 1 code vs scalar | explicit only |
 | Vulkan 1.2 | ✅ | ✅¹ | <= 1 code vs scalar | explicit only |
@@ -124,7 +125,7 @@ padding after the final row, and output padding is never modified.
 flowchart LR
     REQ[AxisRequest<br/>kernel · geometry · f64mode] --> PLN[Inverse-only planner<br/>Float64 CSR + banded LDLT<br/>immutable F32 coefficients<br/>retained F64 factors]
     PLN --> EX[Executor]
-    EX -->|auto| CPU[CPU<br/>scalar · AVX2 · NEON]
+    EX -->|auto| CPU[CPU<br/>scalar · AVX2 · AVX-512 · NEON]
     EX -->|explicit| CUDA[CUDA<br/>native F32/F64 SASS]
     EX -->|explicit| VK[Vulkan<br/>embedded SPIR-V F32/F64]
     PLG[VapourSynth plugin scheduler] --> MET[Metal<br/>fixed-recipe GRAYS/YUV<br/>Apple ARM64]
@@ -206,14 +207,15 @@ these integers or `Opt.AUTO`, `Opt.NONE`, `Opt.AVX2`, `Opt.AVX512`, `Opt.NEON`,
 and `Opt.SIMD`; `Opt.AVX2`, `Opt.NEON`, and `Opt.SIMD` preserve `opt=2`, while
 `Opt.AVX512` is the new explicit value.
 
-The current AVX-512 path keeps the profiled F32 B5/B7 horizontal solves in
-16-row blocks. Other horizontal bands stay on AVX2. F32 vertical solves can
-use 16-column AVX-512 blocks, but F64, integer, and fused 2D operations retain
-the AVX2 kernels until an isolated benchmark demonstrates a worthwhile 512-bit
-implementation.
-The AVX2 F32 B1/B3/B5/B7 horizontal kernels write complete 8-column tiles
-directly and keep only the final partial tile in local storage, avoiding a
-full padded-output copy for widths that are not divisible by eight.
+The current AVX-512 path keeps the profiled F32 `Delanczos(taps=3)` and
+`Despline64` width-axis solves in 16-row blocks. Other width-axis kernels stay
+on AVX2. F32 height-axis solves can use 16-column AVX-512 blocks, but F64,
+integer, and fused 2D operations retain the AVX2 kernels until an isolated
+benchmark demonstrates a worthwhile 512-bit implementation.
+The AVX2 F32 `Debilinear` / `Debicubic` / `Delanczos(taps=3)` / `Despline64`
+width-axis kernels write complete 8-wide tiles directly and keep only the
+final partial tile in local storage, avoiding a full padded-output copy for
+widths that are not divisible by eight.
 
 At the public engine level, explicitly requesting `CpuPath::avx2`,
 `CpuPath::avx512`, or

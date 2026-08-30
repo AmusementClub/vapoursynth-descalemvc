@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(dsmvc VERSION 0.1.0 LANGUAGES CXX)
+project(dsmvc VERSION 0.1.2 LANGUAGES CXX)
 
 if(MSVC)
     # The plugin boundary is a C ABI. Static CRT linkage prevents the host's
