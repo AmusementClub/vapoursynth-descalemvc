@@ -11,12 +11,12 @@ endif()
 
 file(STRINGS "${EXPECTED_SYMBOLS}" expected_symbols)
 list(FILTER expected_symbols EXCLUDE REGEX "^[ \t]*(#.*)?$")
+list(LENGTH expected_symbols declared_count)
 list(REMOVE_DUPLICATES expected_symbols)
 list(SORT expected_symbols)
 list(LENGTH expected_symbols expected_count)
-if(NOT expected_count EQUAL 32)
-    message(FATAL_ERROR
-        "Metal inventory must contain 32 unique entrypoints, found ${expected_count}")
+if(expected_count EQUAL 0 OR NOT expected_count EQUAL declared_count)
+    message(FATAL_ERROR "Metal inventory must be nonempty and contain no duplicate entrypoints")
 endif()
 
 execute_process(

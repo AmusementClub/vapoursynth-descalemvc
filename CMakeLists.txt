@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(dsmvc VERSION 0.1.2 LANGUAGES CXX)
+project(dsmvc VERSION 0.1.3 LANGUAGES CXX)
 
 if(MSVC)
     # The plugin boundary is a C ABI. Static CRT linkage prevents the host's
@@ -42,24 +42,22 @@ set(_dsmvc_metal_default OFF)
 if(APPLE AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
     set(_dsmvc_metal_default ON)
 endif()
-if(DEFINED CACHE{DSMVC_BUILD_METAL_EXPERIMENTS})
-    set(_dsmvc_legacy_metal_option_defined ON)
-else()
-    set(_dsmvc_legacy_metal_option_defined OFF)
+# Migrate an old cache once; do not keep a second switch that can override
+# later changes to the canonical backend option.
+if(DEFINED DSMVC_BUILD_METAL_EXPERIMENTS)
+    set(DSMVC_ENABLE_METAL "${DSMVC_BUILD_METAL_EXPERIMENTS}" CACHE BOOL
+        "Build the Apple Silicon UMA Metal backend" FORCE)
+    unset(DSMVC_BUILD_METAL_EXPERIMENTS CACHE)
+    unset(DSMVC_BUILD_METAL_EXPERIMENTS)
+    message(DEPRECATION
+        "DSMVC_BUILD_METAL_EXPERIMENTS was migrated to DSMVC_ENABLE_METAL")
 endif()
 option(DSMVC_ENABLE_METAL
     "Build the Apple Silicon UMA Metal backend" ${_dsmvc_metal_default})
-option(DSMVC_BUILD_METAL_EXPERIMENTS
-    "Deprecated alias for DSMVC_ENABLE_METAL" ${DSMVC_ENABLE_METAL})
-if(_dsmvc_legacy_metal_option_defined)
-    set(DSMVC_ENABLE_METAL ${DSMVC_BUILD_METAL_EXPERIMENTS})
-else()
-    set(DSMVC_BUILD_METAL_EXPERIMENTS ${DSMVC_ENABLE_METAL})
-endif()
 
 if(APPLE AND DSMVC_TARGET_PROCESSOR MATCHES "^(arm64|aarch64)$")
     add_compile_options(
-        "$<$<CONFIG:Release>:-O3;-flto=full>"
+        "$<$<CONFIG:Release>:-flto=full>"
         "$<$<CONFIG:RelWithDebInfo>:-O3;-flto=full>")
     add_link_options(
         "$<$<CONFIG:Release>:-flto=full>"
@@ -73,7 +71,6 @@ find_path(DSMVC_VAPOURSYNTH_INCLUDE_DIR VapourSynth4.h
     HINTS
         ${_dsmvc_vs_hints}
         "$ENV{VAPOURSYNTH_SDK}/include"
-        "D:/okegui/OKEGui/tools/vapoursynth/sdk/include"
 )
 if(NOT DSMVC_VAPOURSYNTH_INCLUDE_DIR)
     message(FATAL_ERROR "VapourSynth API4 headers were not found; set DSMVC_VAPOURSYNTH_SDK")
@@ -283,8 +280,10 @@ if(DSMVC_ENABLE_CUDA)
         CUDA_RUNTIME_LIBRARY Static
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON)
+    # Release already supplies -O3. Keep optimized profiling information in
+    # RelWithDebInfo without forcing release optimization onto Debug builds.
     target_compile_options(dsmvc_engine PRIVATE
-        "$<$<COMPILE_LANGUAGE:CUDA>:-O3;-lineinfo>")
+        "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RelWithDebInfo>>:-O3;-lineinfo>")
 endif()
 
 if(DSMVC_ENABLE_VULKAN)
@@ -300,7 +299,7 @@ if(DSMVC_CAN_BUILD_AVX2)
     if(MSVC)
         set_source_files_properties(
             src/cpu_executor_avx2.cpp src/cpu_executor_avx2_fixed.cpp PROPERTIES
-            COMPILE_OPTIONS "/arch:AVX2;/Ob3;/fp:strict")
+            COMPILE_OPTIONS "/arch:AVX2;/Ob3")
     else()
         set_source_files_properties(
             src/cpu_executor_avx2.cpp src/cpu_executor_avx2_fixed.cpp PROPERTIES
@@ -313,7 +312,7 @@ if(DSMVC_CAN_BUILD_AVX512)
     target_compile_definitions(dsmvc_engine PRIVATE DSMVC_HAS_AVX512_OBJECT=1)
     if(MSVC)
         set_source_files_properties(src/cpu_executor_avx512.cpp PROPERTIES
-            COMPILE_OPTIONS "/arch:AVX512;/Ob3;/fp:strict")
+            COMPILE_OPTIONS "/arch:AVX512;/Ob3")
     else()
         set_source_files_properties(src/cpu_executor_avx512.cpp PROPERTIES
             COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512bw;-mavx512vl;-mfma")
@@ -357,6 +356,25 @@ install(TARGETS dsmvc LIBRARY DESTINATION vapoursynth RUNTIME DESTINATION vapour
 install(FILES dsmvc.py DESTINATION python)
 install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md DESTINATION share/dsmvc)
 
+# Shared flags for command-line tests and benchmarks. Production targets and
+# numerical-oracle tests keep their own language and precision contracts.
+function(dsmvc_configure_tool target)
+    cmake_parse_arguments(TOOL "STRICT_FLOAT" "" "" ${ARGN})
+    target_compile_features(${target} PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
+        target_compile_definitions(${target} PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(${target} PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off)
+        if(TOOL_STRICT_FLOAT)
+            target_compile_options(${target} PRIVATE -fno-fast-math)
+        endif()
+    endif()
+endfunction()
+
 if(BUILD_TESTING)
     include(cmake/numerical_contract.cmake)
 
@@ -369,19 +387,10 @@ if(BUILD_TESTING)
 
     add_executable(dsmvc_simd_buffer_contract_tests
         tests/simd_buffer_contract_tests.cpp)
-    target_compile_features(dsmvc_simd_buffer_contract_tests PRIVATE cxx_std_23)
     target_include_directories(dsmvc_simd_buffer_contract_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(dsmvc_simd_buffer_contract_tests PRIVATE dsmvc_engine)
-    if(MSVC)
-        target_compile_options(dsmvc_simd_buffer_contract_tests PRIVATE
-            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-        target_compile_definitions(dsmvc_simd_buffer_contract_tests PRIVATE
-            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-    else()
-        target_compile_options(dsmvc_simd_buffer_contract_tests PRIVATE
-            -Wall -Wextra -Wpedantic -ffp-contract=off)
-    endif()
+    dsmvc_configure_tool(dsmvc_simd_buffer_contract_tests)
     add_test(NAME dsmvc_simd_buffer_contract_tests
         COMMAND dsmvc_simd_buffer_contract_tests)
 
@@ -411,28 +420,46 @@ if(BUILD_TESTING)
 
         add_executable(dsmvc_cuda_f64_conformance_tests
             tests/cuda_f64_conformance_tests.cpp)
-        target_compile_features(
-            dsmvc_cuda_f64_conformance_tests PRIVATE cxx_std_23)
         target_include_directories(dsmvc_cuda_f64_conformance_tests PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests")
         target_link_libraries(dsmvc_cuda_f64_conformance_tests PRIVATE
             dsmvc_engine CUDA::cudart_static)
-        if(MSVC)
-            target_compile_options(dsmvc_cuda_f64_conformance_tests PRIVATE
-                /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-            target_compile_definitions(
-                dsmvc_cuda_f64_conformance_tests PRIVATE
-                _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-        else()
-            target_compile_options(dsmvc_cuda_f64_conformance_tests PRIVATE
-                -Wall -Wextra -Wpedantic -ffp-contract=off)
-        endif()
+        dsmvc_configure_tool(dsmvc_cuda_f64_conformance_tests)
         add_test(NAME dsmvc_cuda_f64_conformance
             COMMAND dsmvc_cuda_f64_conformance_tests)
+
+        add_executable(dsmvc_cuda_rhs_span_tests tests/cuda_rhs_span_tests.cpp)
+        target_compile_features(dsmvc_cuda_rhs_span_tests PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_cuda_rhs_span_tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(dsmvc_cuda_rhs_span_tests PRIVATE
+            dsmvc_engine CUDA::cudart_static)
+        if(MSVC)
+            target_compile_options(dsmvc_cuda_rhs_span_tests PRIVATE /W4 /fp:strict)
+        else()
+            target_compile_options(dsmvc_cuda_rhs_span_tests PRIVATE
+                -Wall -Wextra -Wpedantic -ffp-contract=off)
+        endif()
+        add_test(NAME dsmvc_cuda_rhs_span COMMAND dsmvc_cuda_rhs_span_tests)
+        set_tests_properties(dsmvc_cuda_rhs_span PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     if(DSMVC_ENABLE_VULKAN)
+        add_executable(dsmvc_vulkan_rhs_span_tests tests/gpu_rhs_span_tests.cpp)
+        target_compile_features(dsmvc_vulkan_rhs_span_tests PRIVATE cxx_std_23)
+        target_include_directories(dsmvc_vulkan_rhs_span_tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(dsmvc_vulkan_rhs_span_tests PRIVATE dsmvc_engine Vulkan::Vulkan)
+        if(MSVC)
+            target_compile_options(dsmvc_vulkan_rhs_span_tests PRIVATE /W4 /fp:strict)
+        else()
+            target_compile_options(dsmvc_vulkan_rhs_span_tests PRIVATE
+                -Wall -Wextra -Wpedantic -ffp-contract=off)
+        endif()
+        add_test(NAME dsmvc_vulkan_rhs_span COMMAND dsmvc_vulkan_rhs_span_tests)
+        set_tests_properties(dsmvc_vulkan_rhs_span PROPERTIES
+            ENVIRONMENT "DSMVC_VULKAN_SPLIT_RHS=0")
         foreach(_spirv IN LISTS DSMVC_VULKAN_SPIRV)
             get_filename_component(_shader_name "${_spirv}" NAME_WE)
             add_test(NAME "dsmvc_vulkan_spirv_${_shader_name}"
@@ -461,32 +488,16 @@ if(BUILD_TESTING)
                 vulkan_f64_policy_tests)
             add_executable(dsmvc_${_f64_test}
                 "src/vulkan/${_f64_test}.cpp")
-            target_compile_features(dsmvc_${_f64_test} PRIVATE cxx_std_23)
             target_include_directories(dsmvc_${_f64_test} PRIVATE
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan"
                 "${_dsmvc_vulkan_generated_dir}")
             target_link_libraries(dsmvc_${_f64_test} PRIVATE
                 dsmvc_engine Vulkan::Vulkan)
-            if(MSVC)
-                target_compile_options(dsmvc_${_f64_test} PRIVATE
-                    /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-                target_compile_definitions(dsmvc_${_f64_test} PRIVATE
-                    _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-            else()
-                target_compile_options(dsmvc_${_f64_test} PRIVATE
-                    -Wall -Wextra -Wpedantic -ffp-contract=off)
-            endif()
+            dsmvc_configure_tool(dsmvc_${_f64_test})
             add_test(NAME dsmvc_${_f64_test} COMMAND dsmvc_${_f64_test})
         endforeach()
     endif()
 
-    if(NOT DSMVC_VS_PYTHON AND EXISTS "D:/okegui/OKEGui/tools/vapoursynth/python.exe")
-        set(DSMVC_VS_PYTHON "D:/okegui/OKEGui/tools/vapoursynth/python.exe")
-    endif()
-    if(NOT DSMVC_BASELINE_PLUGIN AND EXISTS "D:/okegui/OKEGui/tools/vapoursynth/vapoursynth64/plugins/descale.dll")
-        set(DSMVC_BASELINE_PLUGIN
-            "D:/okegui/OKEGui/tools/vapoursynth/vapoursynth64/plugins/descale.dll")
-    endif()
     if(DSMVC_VS_PYTHON AND DSMVC_BASELINE_PLUGIN)
         set(_dsmvc_vs_integration_args
             --plugin "$<TARGET_FILE:dsmvc>"
@@ -555,103 +566,44 @@ endif()
 if(DSMVC_BUILD_BENCHMARKS)
     add_executable(dsmvc_cpu_profile_benchmark
         benchmarks/cpu_profile_benchmark.cpp)
-    target_compile_features(dsmvc_cpu_profile_benchmark PRIVATE cxx_std_23)
     target_link_libraries(dsmvc_cpu_profile_benchmark PRIVATE dsmvc_engine)
-    if(MSVC)
-        target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
-            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-        target_compile_definitions(dsmvc_cpu_profile_benchmark PRIVATE
-            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-    else()
-        target_compile_options(dsmvc_cpu_profile_benchmark PRIVATE
-            -Wall -Wextra -Wpedantic -ffp-contract=off)
-    endif()
+    dsmvc_configure_tool(dsmvc_cpu_profile_benchmark)
 
     add_executable(dsmvc_cpu_avx512_benchmark
         benchmarks/cpu_avx512_benchmark.cpp)
-    target_compile_features(dsmvc_cpu_avx512_benchmark PRIVATE cxx_std_23)
     target_link_libraries(dsmvc_cpu_avx512_benchmark PRIVATE dsmvc_engine)
-    if(MSVC)
-        target_compile_options(dsmvc_cpu_avx512_benchmark PRIVATE
-            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-        target_compile_definitions(dsmvc_cpu_avx512_benchmark PRIVATE
-            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-    else()
-        target_compile_options(dsmvc_cpu_avx512_benchmark PRIVATE
-            -Wall -Wextra -Wpedantic -ffp-contract=off)
-    endif()
+    dsmvc_configure_tool(dsmvc_cpu_avx512_benchmark)
 
     add_executable(dsmvc_cpu_avx512_memory_benchmark
         benchmarks/cpu_avx512_memory_benchmark.cpp)
-    target_compile_features(
-        dsmvc_cpu_avx512_memory_benchmark PRIVATE cxx_std_23)
     target_link_libraries(
         dsmvc_cpu_avx512_memory_benchmark PRIVATE dsmvc_engine)
-    if(MSVC)
-        target_compile_options(dsmvc_cpu_avx512_memory_benchmark PRIVATE
-            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-        target_compile_definitions(dsmvc_cpu_avx512_memory_benchmark PRIVATE
-            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-    else()
-        target_compile_options(dsmvc_cpu_avx512_memory_benchmark PRIVATE
-            -Wall -Wextra -Wpedantic -ffp-contract=off)
-    endif()
+    dsmvc_configure_tool(dsmvc_cpu_avx512_memory_benchmark)
 
     add_executable(dsmvc_numerical_contract_benchmark
         benchmarks/numerical_contract_benchmark.cpp)
-    target_compile_features(
-        dsmvc_numerical_contract_benchmark PRIVATE cxx_std_23)
     target_include_directories(dsmvc_numerical_contract_benchmark PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_link_libraries(
         dsmvc_numerical_contract_benchmark PRIVATE dsmvc_engine)
-    if(MSVC)
-        target_compile_options(dsmvc_numerical_contract_benchmark PRIVATE
-            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-        target_compile_definitions(dsmvc_numerical_contract_benchmark PRIVATE
-            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-    else()
-        target_compile_options(dsmvc_numerical_contract_benchmark PRIVATE
-            -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
-    endif()
+    dsmvc_configure_tool(dsmvc_numerical_contract_benchmark STRICT_FLOAT)
 
     add_executable(dsmvc_cpu_f64_avx2_benchmark
         benchmarks/cpu_f64_avx2_benchmark.cpp)
-    target_compile_features(
-        dsmvc_cpu_f64_avx2_benchmark PRIVATE cxx_std_23)
     target_link_libraries(
         dsmvc_cpu_f64_avx2_benchmark PRIVATE dsmvc_engine)
-    if(MSVC)
-        target_compile_options(dsmvc_cpu_f64_avx2_benchmark PRIVATE
-            /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-        target_compile_definitions(dsmvc_cpu_f64_avx2_benchmark PRIVATE
-            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-    else()
-        target_compile_options(dsmvc_cpu_f64_avx2_benchmark PRIVATE
-            -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
-    endif()
+    dsmvc_configure_tool(dsmvc_cpu_f64_avx2_benchmark STRICT_FLOAT)
 
     if(DSMVC_ENABLE_CUDA)
         add_executable(dsmvc_cuda_f64_executor_benchmark
             benchmarks/cuda_f64_executor_benchmark.cpp)
-        target_compile_features(
-            dsmvc_cuda_f64_executor_benchmark PRIVATE cxx_std_23)
         target_include_directories(
             dsmvc_cuda_f64_executor_benchmark PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src")
         target_link_libraries(dsmvc_cuda_f64_executor_benchmark PRIVATE
             dsmvc_engine CUDA::cudart_static)
-        if(MSVC)
-            target_compile_options(dsmvc_cuda_f64_executor_benchmark PRIVATE
-                /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-            target_compile_definitions(
-                dsmvc_cuda_f64_executor_benchmark PRIVATE
-                _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-        else()
-            target_compile_options(dsmvc_cuda_f64_executor_benchmark PRIVATE
-                -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
-        endif()
+        dsmvc_configure_tool(dsmvc_cuda_f64_executor_benchmark STRICT_FLOAT)
     endif()
 
     if(DSMVC_ENABLE_VULKAN)
@@ -659,8 +611,6 @@ if(DSMVC_BUILD_BENCHMARKS)
             set(_vulkan_bench_target "dsmvc_vulkan_${_suffix}_benchmark")
             add_executable(${_vulkan_bench_target}
                 src/vulkan/vulkan_f64_benchmark.cpp)
-            target_compile_features(
-                ${_vulkan_bench_target} PRIVATE cxx_std_23)
             target_include_directories(${_vulkan_bench_target} PRIVATE
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan"
                 "${_dsmvc_vulkan_generated_dir}")
@@ -670,15 +620,7 @@ if(DSMVC_BUILD_BENCHMARKS)
                 target_compile_definitions(${_vulkan_bench_target} PRIVATE
                     DSMVC_VULKAN_F64_BENCHMARK_F32_ONLY=1)
             endif()
-            if(MSVC)
-                target_compile_options(${_vulkan_bench_target} PRIVATE
-                    /W4 /permissive- /EHsc /fp:strict /Zc:__cplusplus)
-                target_compile_definitions(${_vulkan_bench_target} PRIVATE
-                    _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-            else()
-                target_compile_options(${_vulkan_bench_target} PRIVATE
-                    -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
-            endif()
+            dsmvc_configure_tool(${_vulkan_bench_target} STRICT_FLOAT)
         endforeach()
     endif()
 endif()
@@ -717,12 +659,17 @@ if(DSMVC_ENABLE_METAL)
     set(DSMVC_METALLIB_HEADER
         "${DSMVC_METAL_GENERATED_DIR}/dsmvc_metal_routes_metallib.hpp")
 
+    set(_dsmvc_metal_options)
+    if(CMAKE_OSX_DEPLOYMENT_TARGET)
+        list(APPEND _dsmvc_metal_options
+            "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    endif()
     add_custom_command(
         OUTPUT "${DSMVC_METAL_AIR}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory
                 "${DSMVC_METAL_GENERATED_DIR}"
         COMMAND "${DSMVC_XCRUN}" -sdk macosx metal
-                -Werror -fno-fast-math -ffp-contract=off
+                -Werror -fno-fast-math -ffp-contract=off ${_dsmvc_metal_options}
                 -c "${CMAKE_CURRENT_SOURCE_DIR}/src/metal/metal_routes.metal"
                 -o "${DSMVC_METAL_AIR}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/metal/metal_routes.metal"
@@ -760,6 +707,24 @@ if(DSMVC_ENABLE_METAL)
     target_link_libraries(dsmvc PRIVATE
         "${DSMVC_METAL_FRAMEWORK}"
         "${DSMVC_FOUNDATION_FRAMEWORK}")
+
+    if(BUILD_TESTING)
+        add_executable(dsmvc_metal_rhs_span_tests
+            tests/gpu_rhs_span_tests.cpp src/metal_float_executor_apple.mm
+            "${DSMVC_METALLIB_HEADER}")
+        target_compile_features(dsmvc_metal_rhs_span_tests PRIVATE cxx_std_23)
+        target_compile_definitions(dsmvc_metal_rhs_span_tests PRIVATE DSMVC_TEST_METAL=1)
+        target_include_directories(dsmvc_metal_rhs_span_tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src" "${DSMVC_METAL_GENERATED_DIR}")
+        target_compile_options(dsmvc_metal_rhs_span_tests PRIVATE
+            -Wall -Wextra -Wpedantic -ffp-contract=off)
+        target_link_libraries(dsmvc_metal_rhs_span_tests PRIVATE dsmvc_engine
+            "${DSMVC_METAL_FRAMEWORK}" "${DSMVC_FOUNDATION_FRAMEWORK}")
+        add_test(NAME dsmvc_metal_rhs_span COMMAND dsmvc_metal_rhs_span_tests)
+        set_tests_properties(dsmvc_metal_rhs_span PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK dsmvc_metal_device)
+    endif()
 
     if(DSMVC_BUILD_BENCHMARKS)
         add_executable(dsmvc_metal_route_benchmark

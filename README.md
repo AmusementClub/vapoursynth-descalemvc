@@ -207,11 +207,19 @@ these integers or `Opt.AUTO`, `Opt.NONE`, `Opt.AVX2`, `Opt.AVX512`, `Opt.NEON`,
 and `Opt.SIMD`; `Opt.AVX2`, `Opt.NEON`, and `Opt.SIMD` preserve `opt=2`, while
 `Opt.AVX512` is the new explicit value.
 
-The current AVX-512 path keeps the profiled F32 `Delanczos(taps=3)` and
-`Despline64` width-axis solves in 16-row blocks. Other width-axis kernels stay
-on AVX2. F32 height-axis solves can use 16-column AVX-512 blocks, but F64,
-integer, and fused 2D operations retain the AVX2 kernels until an isolated
-benchmark demonstrates a worthwhile 512-bit implementation.
+The AVX-512 path keeps F32 `Delanczos(taps=3)` and `Despline64` width-axis
+solves in 16-row blocks, with ordered specialization of common RHS spans.
+Other width-axis kernels stay on AVX2. F32 height-axis solves with
+half-bandwidth 5, 7, or 11 share coefficients across 64 columns, retaining
+16-column blocks and the existing tail handling for the remainder.
+When both F32 axes have one of those half-bandwidths, the output width is at
+least 64, and the input height is at least 16, the AVX-512 CPU path uses
+separate horizontal and vertical passes with a 64-byte aligned intermediate.
+The horizontal pass keeps its existing ISA selection; Lanczos6 horizontal
+work still uses AVX2. Other 2D shapes, F64, and integer operations keep their
+existing kernels. NEON half-bandwidth-11 height-axis solves share coefficients
+across 16 columns. See the [CPU release benchmark](docs/release-benchmark-v0.1.3.md)
+for measured gains and validation boundaries.
 The AVX2 F32 `Debilinear` / `Debicubic` / `Delanczos(taps=3)` / `Despline64`
 width-axis kernels write complete 8-wide tiles directly and keep only the
 final partial tile in local storage, avoiding a full padded-output copy for
@@ -298,6 +306,21 @@ limited to validated cases.
 The Release DLL is written to `build/Release/dsmvc.dll`. The build uses the
 static MSVC runtime so that an older runtime DLL bundled with a host cannot
 change the STL synchronization ABI.
+
+The ordered sparse-RHS optimization is part of the normal GPU build. It uses
+fixed counts only in the admitted fused Float32 routes: CUDA half-bandwidths
+5/7, Vulkan 32-thread fixed-band shaders 5/7/11, and Metal dedicated entrypoints
+5/7/11. Other counts and routes retain the dynamic loop. The former three
+`DSMVC_*_RHS_SPAN_EXPERIMENT` options have been removed; GPU backend selection
+and adaptive routing still use the existing settings. See the
+[GPU release benchmark](docs/release-benchmark-gpu-v0.1.3.md) for
+measured performance and workload boundaries.
+
+`DSMVC_ENABLE_METAL` is the single Metal build switch. An existing
+`DSMVC_BUILD_METAL_EXPERIMENTS` cache value is migrated once and removed.
+The macOS deployment target is passed to both the C++ and Metal compilers.
+CUDA Release uses CMake's optimization defaults; use RelWithDebInfo for
+optimized kernels with `-lineinfo`. Debug builds no longer force `-O3`.
 
 ### CUDA
 

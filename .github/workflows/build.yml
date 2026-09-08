@@ -2,6 +2,7 @@ name: Build plugins
 
 on:
   push:
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -41,6 +42,13 @@ jobs:
             enable-cuda: true
             enable-vulkan: true
             cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt", "nvtx"]'
+          - os: ubuntu-24.04-arm
+            artifact: dsmvc-linux-arm64-cpu
+            cmake-architecture: ""
+            enable-cpu-simd: true
+            enable-cuda: false
+            enable-vulkan: false
+            cuda-subpackages: '[]'
 
     steps:
       - name: Check out dsmvc
@@ -109,6 +117,10 @@ jobs:
           -DDSMVC_ENABLE_METAL=OFF
           -DDSMVC_VAPOURSYNTH_SDK="${{ github.workspace }}/dependencies/vapoursynth"
 
+      - name: Verify native Linux arm64 configuration
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: test "$(uname -m)" = aarch64
+
       - name: Build
         run: cmake --build build --config Release --parallel
 
@@ -138,6 +150,10 @@ jobs:
 
       - name: Stage plugin package
         run: cmake --install build --config Release --prefix package
+
+      - name: Verify Linux arm64 CPU package
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: python3 cmake/verify_linux_arm64_cpu_package.py build package
 
       - name: Verify embedded Vulkan package
         if: matrix.enable-vulkan
@@ -248,6 +264,8 @@ jobs:
               "dsmvc_metal_artifact_inventory",
               "dsmvc_metal_scheduler_tests",
               "dsmvc_metal_yuv_staging_tests",
+              "dsmvc_metal_rhs_span",
+              "dsmvc_metal_numerical_contract_tests",
               "dsmvc_vs_metal_integration",
           }
           missing = sorted(required - actual)

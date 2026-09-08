@@ -1,6 +1,9 @@
 #include <dsmvc/engine.hpp>
 
 #include "axis_plan_internal.hpp"
+#include "cpu_horizontal_window.hpp"
+#include "cpu_float_workspace.hpp"
+#include "cpu_rhs_span.hpp"
 #include "checked_size.hpp"
 #include "cpu_packed.hpp"
 
@@ -401,6 +404,7 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
     }
 }
 
+template <int Bandwidth = 0>
 [[nodiscard]] DSMVC_FORCE_INLINE float32x4_t multiply_transpose(
     const detail::PackedCpuPlan &packed, const float *scratch,
     std::int32_t row) noexcept {
@@ -409,9 +413,17 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
     const auto right = packed.weights_right[static_cast<std::size_t>(row)];
     const auto base = static_cast<std::size_t>(row)
         * static_cast<std::size_t>(packed.weights_columns);
+    const auto *weights = packed.weights.data() + base;
+    const auto *source_base = scratch + static_cast<std::size_t>(left) * 4U;
+    if (detail::try_accumulate_rhs_span<Bandwidth>(
+            right - left, [&]<int Tap>() noexcept {
+                sum = vfmaq_f32(sum, vdupq_n_f32(weights[Tap]),
+                    vld1q_f32(source_base + Tap * 4U));
+            })) {
+        return sum;
+    }
 
-    // Built-in kernels use 2, 4, 6, or 8 packed taps. Keep the fallback for
-    // boundary rows with a non-contiguous span and for custom kernels.
+    // Retain the short-span paths and generic boundary/custom-kernel fallback.
     const auto tap_count = right - left;
     if (tap_count == 2 || tap_count == 4
         || tap_count == 6 || tap_count == 8) {
@@ -760,130 +772,83 @@ void solve_horizontal_b3_pair(const detail::PackedCpuPlan &packed,
     }
 }
 
-[[nodiscard]] float *transposed_output(float *output, std::ptrdiff_t stride,
-                                       std::int32_t index) noexcept {
-    return output + static_cast<std::ptrdiff_t>(index & 3) * stride
-        + static_cast<std::ptrdiff_t>(index & ~3);
+[[nodiscard]] float *horizontal_value(float *work,
+                                      std::int32_t index) noexcept {
+    return work + static_cast<std::size_t>(index) * 4U;
 }
 
-template <int Distance>
-DSMVC_FORCE_INLINE void subtract_lower_descending(
-    const detail::PackedCpuPlan &packed, std::size_t factor_stride,
-    std::int32_t index, float32x4_t &value, float *output,
-    std::ptrdiff_t stride) noexcept {
-    if constexpr (Distance > 0) {
-        value = vfmsq_f32(
-            value,
-            vdupq_n_f32(packed.lower_ld[
-                static_cast<std::size_t>(Distance - 1) * factor_stride
-                + static_cast<std::size_t>(index)]),
-            vld1q_f32(transposed_output(output, stride, index - Distance)));
-        subtract_lower_descending<Distance - 1>(
-            packed, factor_stride, index, value, output, stride);
+struct HorizontalOps {
+    using Vector = float32x4_t;
+    static constexpr std::size_t lanes = 4;
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector zero() noexcept {
+        return vdupq_n_f32(0.0F);
     }
-}
-
-template <int Distance>
-DSMVC_FORCE_INLINE void subtract_upper_descending(
-    const detail::PackedCpuPlan &packed, std::size_t factor_stride,
-    std::int32_t index, float32x4_t &value, float *output,
-    std::ptrdiff_t stride) noexcept {
-    if constexpr (Distance > 0) {
-        value = vfmsq_f32(
-            value,
-            vdupq_n_f32(packed.upper_l[
-                static_cast<std::size_t>(Distance - 1) * factor_stride
-                + static_cast<std::size_t>(index)]),
-            vld1q_f32(transposed_output(output, stride, index + Distance)));
-        subtract_upper_descending<Distance - 1>(
-            packed, factor_stride, index, value, output, stride);
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector load(const float *p) noexcept {
+        return vld1q_f32(p);
     }
-}
+    static DSMVC_FORCE_INLINE void store(float *p, Vector v) noexcept {
+        vst1q_f32(p, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector subtract_product(
+        Vector v, float c, Vector previous) noexcept {
+        return vfmsq_f32(v, vdupq_n_f32(c), previous);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector multiply(
+        Vector v, float c) noexcept {
+        return vmulq_f32(v, vdupq_n_f32(c));
+    }
+};
 
 template <int FixedBandwidth>
 void solve_horizontal_generic(const AxisPlan &plan,
                               const detail::PackedCpuPlan &packed,
-                              const float *scratch, float *output,
+                              const float *scratch, float *work, float *output,
                               std::ptrdiff_t stride) noexcept {
-    const auto n = plan.destination_size;
-    const auto factor_stride = static_cast<std::size_t>(
-        packed.padded_destination_size);
-    for (std::int32_t i = 0; i < n; ++i) {
-        float32x4_t value = multiply_transpose(packed, scratch, i);
-        const auto available = std::min(plan.half_bandwidth, i);
-        if constexpr (FixedBandwidth > 0) {
-            if (i >= FixedBandwidth) {
-                subtract_lower_descending<FixedBandwidth>(
-                    packed, factor_stride, i, value, output, stride);
-            } else {
-                for (std::int32_t distance = available;
-                     distance >= 1; --distance) {
-                    value = vfmsq_f32(
-                        value,
-                        vdupq_n_f32(packed.lower_ld[
-                            static_cast<std::size_t>(distance - 1)
-                                * factor_stride
-                            + static_cast<std::size_t>(i)]),
-                        vld1q_f32(transposed_output(
-                            output, stride, i - distance)));
-                }
-            }
-        } else {
+    if constexpr (FixedBandwidth > 0) {
+        detail::solve_horizontal_window<FixedBandwidth, HorizontalOps>(
+            packed, plan.destination_size, work,
+            [&](std::int32_t i) noexcept {
+                return multiply_transpose<FixedBandwidth>(packed, scratch, i);
+            });
+    } else {
+        const auto n = plan.destination_size;
+        const auto factor_stride = static_cast<std::size_t>(
+            packed.padded_destination_size);
+        for (std::int32_t i = 0; i < n; ++i) {
+            float32x4_t value = multiply_transpose(packed, scratch, i);
+            const auto available = std::min(plan.half_bandwidth, i);
             for (std::int32_t distance = available; distance >= 1; --distance) {
-                value = vfmsq_f32(
-                    value,
+                value = vfmsq_f32(value,
                     vdupq_n_f32(packed.lower_ld[
                         static_cast<std::size_t>(distance - 1) * factor_stride
                         + static_cast<std::size_t>(i)]),
-                    vld1q_f32(transposed_output(output, stride, i - distance)));
+                    vld1q_f32(horizontal_value(work, i - distance)));
             }
+            value = vmulq_f32(value, vdupq_n_f32(
+                packed.inverse_diagonal[static_cast<std::size_t>(i)]));
+            vst1q_f32(horizontal_value(work, i), value);
         }
-        value = vmulq_f32(
-            value,
-            vdupq_n_f32(packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        vst1q_f32(transposed_output(output, stride, i), value);
-    }
-    for (std::int32_t i = n; i < packed.padded_destination_size; ++i) {
-        vst1q_f32(
-            transposed_output(output, stride, i), vdupq_n_f32(0.0F));
-    }
-    for (std::int32_t i = n - 2; i >= 0; --i) {
-        float32x4_t value = vld1q_f32(transposed_output(output, stride, i));
-        const auto available = std::min(plan.half_bandwidth, n - i - 1);
-        if constexpr (FixedBandwidth > 0) {
-            if (i + FixedBandwidth < n) {
-                subtract_upper_descending<FixedBandwidth>(
-                    packed, factor_stride, i, value, output, stride);
-            } else {
-                for (std::int32_t distance = available;
-                     distance >= 1; --distance) {
-                    value = vfmsq_f32(
-                        value,
-                        vdupq_n_f32(packed.upper_l[
-                            static_cast<std::size_t>(distance - 1)
-                                * factor_stride
-                            + static_cast<std::size_t>(i)]),
-                        vld1q_f32(transposed_output(
-                            output, stride, i + distance)));
-                }
-            }
-        } else {
+        for (std::int32_t i = n; i < packed.padded_destination_size; ++i) {
+            vst1q_f32(horizontal_value(work, i), vdupq_n_f32(0.0F));
+        }
+        for (std::int32_t i = n - 2; i >= 0; --i) {
+            float32x4_t value = vld1q_f32(horizontal_value(work, i));
+            const auto available = std::min(plan.half_bandwidth, n - i - 1);
             for (std::int32_t distance = available; distance >= 1; --distance) {
-                value = vfmsq_f32(
-                    value,
+                value = vfmsq_f32(value,
                     vdupq_n_f32(packed.upper_l[
                         static_cast<std::size_t>(distance - 1) * factor_stride
                         + static_cast<std::size_t>(i)]),
-                    vld1q_f32(transposed_output(output, stride, i + distance)));
+                    vld1q_f32(horizontal_value(work, i + distance)));
             }
+            vst1q_f32(horizontal_value(work, i), value);
         }
-        vst1q_f32(transposed_output(output, stride, i), value);
     }
     for (std::int32_t j = 0; j < packed.padded_destination_size; j += 4) {
-        float32x4_t x0 = vld1q_f32(output + j);
-        float32x4_t x1 = vld1q_f32(output + stride + j);
-        float32x4_t x2 = vld1q_f32(output + 2 * stride + j);
-        float32x4_t x3 = vld1q_f32(output + 3 * stride + j);
+        float32x4_t x0 = vld1q_f32(horizontal_value(work, j + 0));
+        float32x4_t x1 = vld1q_f32(horizontal_value(work, j + 1));
+        float32x4_t x2 = vld1q_f32(horizontal_value(work, j + 2));
+        float32x4_t x3 = vld1q_f32(horizontal_value(work, j + 3));
         transpose4(x0, x1, x2, x3);
         vst1q_f32(output + j, x0);
         vst1q_f32(output + stride + j, x1);
@@ -906,16 +871,29 @@ void solve_horizontal_block(const AxisPlan &plan,
         solve_horizontal_b3(packed, scratch, output, output_stride);
     } else if (plan.half_bandwidth == 5) {
         solve_horizontal_generic<5>(
-            plan, packed, scratch, output, output_stride);
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 4U,
+            output, output_stride);
     } else if (plan.half_bandwidth == 7) {
         solve_horizontal_generic<7>(
-            plan, packed, scratch, output, output_stride);
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 4U,
+            output, output_stride);
     } else if (plan.half_bandwidth == 9) {
         solve_horizontal_generic<9>(
-            plan, packed, scratch, output, output_stride);
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 4U,
+            output, output_stride);
+    } else if (plan.half_bandwidth == 11) {
+        solve_horizontal_generic<11>(
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 4U,
+            output, output_stride);
     } else {
         solve_horizontal_generic<0>(
-            plan, packed, scratch, output, output_stride);
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 4U,
+            output, output_stride);
     }
 }
 
@@ -1652,6 +1630,74 @@ void solve_columns_vector(const AxisPlan &plan,
     }
 }
 
+// Keep each pixel's ascending RHS and descending solve order while sharing
+// each coefficient across independent four-column accumulators.
+template <int Groups>
+void solve_columns_b11_grouped(const AxisPlan &plan,
+                              const detail::PackedCpuPlan &packed,
+                              const float *input, std::ptrdiff_t input_stride,
+                              float *output, std::ptrdiff_t output_stride,
+                              std::int32_t vector_columns) noexcept {
+    static_assert(Groups == 2 || Groups == 4);
+    constexpr std::int32_t width = 4 * Groups;
+    const auto complete = vector_columns / width * width;
+    const auto tile_width = complete >= 1024 ? 32 : complete;
+    const auto n = plan.destination_size;
+    const auto factor_stride = static_cast<std::size_t>(packed.padded_destination_size);
+    for (std::int32_t tile = 0; tile < complete; tile += tile_width) {
+        const auto tile_end = std::min(tile + tile_width, complete);
+        for (std::int32_t i = 0; i < n; ++i) {
+            const auto left = packed.weights_left[static_cast<std::size_t>(i)];
+            const auto right = packed.weights_right[static_cast<std::size_t>(i)];
+            const auto base = static_cast<std::size_t>(i) * packed.weights_columns;
+            for (std::int32_t column = tile; column < tile_end; column += width) {
+                float32x4_t value[Groups];
+                for (int group = 0; group < Groups; ++group) value[group] = vdupq_n_f32(0.0F);
+                for (auto source = left; source < right; ++source) {
+                    const auto weight = vdupq_n_f32(packed.weights[base + source - left]);
+                    const auto *row = input + static_cast<std::ptrdiff_t>(source) * input_stride + column;
+                    for (int group = 0; group < Groups; ++group) {
+                        value[group] = vfmaq_f32(value[group], weight, vld1q_f32(row + 4 * group));
+                    }
+                }
+                for (auto distance = std::min(11, i); distance >= 1; --distance) {
+                    const auto weight = vdupq_n_f32(packed.lower_ld[
+                        static_cast<std::size_t>(distance - 1) * factor_stride + i]);
+                    const auto *row = output + static_cast<std::ptrdiff_t>(i - distance) * output_stride + column;
+                    for (int group = 0; group < Groups; ++group) {
+                        value[group] = vfmsq_f32(value[group], weight, vld1q_f32(row + 4 * group));
+                    }
+                }
+                const auto diagonal = vdupq_n_f32(packed.inverse_diagonal[static_cast<std::size_t>(i)]);
+                auto *row = output + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+                for (int group = 0; group < Groups; ++group) {
+                    vst1q_f32(row + 4 * group, vmulq_f32(value[group], diagonal));
+                }
+            }
+        }
+        for (std::int32_t i = n - 2; i >= 0; --i) {
+            for (std::int32_t column = tile; column < tile_end; column += width) {
+                auto *row = output + static_cast<std::ptrdiff_t>(i) * output_stride + column;
+                float32x4_t value[Groups];
+                for (int group = 0; group < Groups; ++group) value[group] = vld1q_f32(row + 4 * group);
+                for (auto distance = std::min(11, n - i - 1); distance >= 1; --distance) {
+                    const auto weight = vdupq_n_f32(packed.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride + i]);
+                    const auto *previous = output + static_cast<std::ptrdiff_t>(i + distance) * output_stride + column;
+                    for (int group = 0; group < Groups; ++group) {
+                        value[group] = vfmsq_f32(value[group], weight, vld1q_f32(previous + 4 * group));
+                    }
+                }
+                for (int group = 0; group < Groups; ++group) vst1q_f32(row + 4 * group, value[group]);
+            }
+        }
+    }
+    if (complete != vector_columns) {
+        solve_columns_vector<0>(plan, packed, input + complete, input_stride,
+                               output + complete, output_stride, vector_columns - complete);
+    }
+}
+
 void solve_columns_pair(const AxisPlan &plan,
                         const detail::PackedCpuPlan &packed,
                         const float *input, std::ptrdiff_t input_stride,
@@ -1795,7 +1841,7 @@ void forward_2d_integer_rhs(
         std::max(packed_vertical.streaming_cache_blocks, 1));
 
     thread_local std::vector<float> normalized_block;
-    thread_local std::vector<ScratchVector> transpose_scratch;
+    thread_local std::vector<float> transpose_scratch;
     thread_local std::vector<ScratchVector> horizontal_cache;
     thread_local std::vector<std::int32_t> cache_rows;
     thread_local std::vector<std::uint64_t> cache_ages;
@@ -1803,14 +1849,18 @@ void forward_2d_integer_rhs(
     normalized_block.resize(detail::checked_size_product(
         4U, static_cast<std::size_t>(packed_horizontal.padded_source_size),
         "NEON normalized block"));
-    transpose_scratch.resize(
-        static_cast<std::size_t>(packed_horizontal.padded_source_size));
+    const auto transpose_scratch_vectors =
+        static_cast<std::size_t>(packed_horizontal.padded_source_size)
+        + (horizontal.half_bandwidth != 1 && horizontal.half_bandwidth != 3
+            ? static_cast<std::size_t>(padded_columns) : 0U);
     horizontal_cache.resize(detail::checked_size_product(
         cache_blocks, static_cast<std::size_t>(padded_columns),
         "NEON horizontal cache"));
     cache_rows.assign(cache_blocks, -1);
     cache_ages.assign(cache_blocks, 0U);
-    auto *transpose_data = transpose_scratch.front().lanes;
+    auto *transpose_data = detail::aligned_float_workspace<16>(
+        transpose_scratch, detail::checked_size_product(transpose_scratch_vectors, 4U,
+            "NEON integer scratch"), "NEON integer scratch");
     std::uint64_t age = 0U;
 
     const auto tail_block = vertical.source_size & 3
@@ -2123,11 +2173,15 @@ void inverse_rows_neon(const AxisPlan &plan,
     const bool pair_b3 = plan.half_bandwidth == 3 && complete_rows >= 8
         && !use_output_scratch;
     const auto scratch_blocks = pair_b3 ? 2U : 1U;
-    thread_local std::vector<ScratchVector> scratch;
-    scratch.resize(detail::checked_size_product(
+    thread_local std::vector<float> scratch;
+    const auto scratch_vectors = detail::checked_size_product(
         static_cast<std::size_t>(packed.padded_source_size), scratch_blocks,
-        "NEON row scratch"));
-    auto *scratch_data = scratch.front().lanes;
+        "NEON row scratch")
+        + (plan.half_bandwidth != 1 && plan.half_bandwidth != 3
+            ? static_cast<std::size_t>(packed.padded_destination_size) : 0U);
+    auto *scratch_data = detail::aligned_float_workspace<16>(
+        scratch, detail::checked_size_product(scratch_vectors, 4U,
+            "NEON row scratch"), "NEON row scratch");
     thread_local std::vector<ScratchVector> padded_output;
     if (use_output_scratch) {
         padded_output.resize(
@@ -2193,6 +2247,9 @@ void inverse_columns_neon(const AxisPlan &plan,
                || plan.half_bandwidth == 9) {
         solve_columns_pair(plan, packed, input, input_row_stride, output,
                            output_row_stride, vector_columns);
+    } else if (plan.half_bandwidth == 11) {
+        solve_columns_b11_grouped<4>(plan, packed, input, input_row_stride,
+                                     output, output_row_stride, vector_columns);
     } else {
         solve_columns_vector<0>(plan, packed, input, input_row_stride, output,
                                 output_row_stride, vector_columns);

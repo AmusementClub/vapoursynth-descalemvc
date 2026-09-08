@@ -27,6 +27,7 @@ CASES = {
     "spline36": ("Despline36", {}, 7),
     "lanczos3": ("Delanczos", {"taps": 3}, 7),
     "spline64": ("Despline64", {}, 7),
+    "lanczos6": ("Delanczos", {"taps": 6}, 7),
 }
 
 GEOMETRY_SIGNATURE = "src:vnode;width:int;height:int;"

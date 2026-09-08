@@ -458,9 +458,9 @@ public:
                 throw std::runtime_error(
                     ns_error(error, "embedded Metal library load failed"));
             }
-            const std::array<NSString *, 5> float_names{
+            const std::array<NSString *, 6> float_names{
                 @"inverse_axis_generic", @"inverse_axis_h1",
-                @"inverse_axis_h3", @"inverse_axis_h5", @"inverse_axis_h7"};
+                @"inverse_axis_h3", @"inverse_axis_h5", @"inverse_axis_h7", @"inverse_axis_h11"};
             const std::array<NSString *, 5> u8_names{
                 @"inverse_axis_u8_generic", @"inverse_axis_u8_h1",
                 @"inverse_axis_u8_h3", @"inverse_axis_u8_h5",
@@ -469,14 +469,16 @@ public:
                 @"inverse_axis_u16_generic", @"inverse_axis_u16_h1",
                 @"inverse_axis_u16_h3", @"inverse_axis_u16_h5",
                 @"inverse_axis_u16_h7"};
-            const std::array<NSString *, 5> transposed_names{
+            const std::array<NSString *, 6> transposed_names{
                 @"inverse_axis_transposed_generic",
                 @"inverse_axis_transposed_h1", @"inverse_axis_transposed_h3",
-                @"inverse_axis_transposed_h5", @"inverse_axis_transposed_h7"};
+                @"inverse_axis_transposed_h5", @"inverse_axis_transposed_h7", @"inverse_axis_transposed_h11"};
             for (std::size_t index = 0; index < float_names.size(); ++index) {
                 float_pipelines_[index] = make_pipeline(float_names[index]);
-                u8_pipelines_[index] = make_pipeline(u8_names[index]);
-                u16_pipelines_[index] = make_pipeline(u16_names[index]);
+                if (index < u8_names.size()) {
+                    u8_pipelines_[index] = make_pipeline(u8_names[index]);
+                    u16_pipelines_[index] = make_pipeline(u16_names[index]);
+                }
                 transposed_pipelines_[index] = make_pipeline(
                     transposed_names[index]);
             }
@@ -707,16 +709,16 @@ private:
         if (pipelines[index] != nil) {
             return pipelines[index];
         }
-        const std::array<NSString *, 5> regular_names{
+        const std::array<NSString *, 6> regular_names{
             @"inverse_axis_batch_generic", @"inverse_axis_batch_h1",
             @"inverse_axis_batch_h3", @"inverse_axis_batch_h5",
-            @"inverse_axis_batch_h7"};
-        const std::array<NSString *, 5> transposed_names{
+            @"inverse_axis_batch_h7", @"inverse_axis_batch_h11"};
+        const std::array<NSString *, 6> transposed_names{
             @"inverse_axis_transposed_batch_generic",
             @"inverse_axis_transposed_batch_h1",
             @"inverse_axis_transposed_batch_h3",
             @"inverse_axis_transposed_batch_h5",
-            @"inverse_axis_transposed_batch_h7"};
+            @"inverse_axis_transposed_batch_h7", @"inverse_axis_transposed_batch_h11"};
         pipelines[index] = make_pipeline(
             transposed ? transposed_names[index] : regular_names[index]);
         return pipelines[index];
@@ -1134,12 +1136,13 @@ private:
     }
 
     [[nodiscard]] static std::size_t pipeline_index(
-        std::uint32_t half_bandwidth) noexcept {
+        std::uint32_t half_bandwidth, bool integer_input = false) noexcept {
         switch (half_bandwidth) {
         case 1U: return 1U;
         case 3U: return 2U;
         case 5U: return 3U;
         case 7U: return 4U;
+        case 11U: return integer_input ? 0U : 5U;
         default: return 0U;
         }
     }
@@ -1628,7 +1631,7 @@ private:
             0U};
 
         id<MTLComputePipelineState> pipeline = nil;
-        const std::size_t index = pipeline_index(job.half_bandwidth);
+        const std::size_t index = pipeline_index(job.half_bandwidth, integer_input);
         if (!integer_input) {
             pipeline = transposed
                 ? transposed_pipelines_[index] : float_pipelines_[index];
@@ -2160,10 +2163,10 @@ private:
     id<MTLDevice> device_ = nil;
     id<MTLCommandQueue> queue_ = nil;
     id<MTLLibrary> library_ = nil;
-    std::array<id<MTLComputePipelineState>, 5> float_pipelines_{};
-    std::array<id<MTLComputePipelineState>, 5> float_batch_pipelines_{};
-    std::array<id<MTLComputePipelineState>, 5> transposed_pipelines_{};
-    std::array<id<MTLComputePipelineState>, 5> transposed_batch_pipelines_{};
+    std::array<id<MTLComputePipelineState>, 6> float_pipelines_{};
+    std::array<id<MTLComputePipelineState>, 6> float_batch_pipelines_{};
+    std::array<id<MTLComputePipelineState>, 6> transposed_pipelines_{};
+    std::array<id<MTLComputePipelineState>, 6> transposed_batch_pipelines_{};
     std::array<id<MTLComputePipelineState>, 5> u8_pipelines_{};
     std::array<id<MTLComputePipelineState>, 5> u16_pipelines_{};
     id<MTLComputePipelineState> convert_u8_ = nil;

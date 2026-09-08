@@ -56,6 +56,54 @@ void store_output(uint vector, uint index, float result) {
     workspace_data[output_index(vector, index)] = floatBitsToUint(result);
 }
 
+#if !DSMVC_SOLVE_ONLY && DSMVC_LOCAL_SIZE == 32 && \
+    (DSMVC_FIXED_BANDWIDTH == 5 || DSMVC_FIXED_BANDWIDTH == 7 || \
+     DSMVC_FIXED_BANDWIDTH == 11)
+#define DSMVC_SPECIALIZE_RHS 1
+// Keep one ascending FMA chain. Only the common sparse counts are unrolled;
+// clipped borders and every other support retain the original traversal.
+#define DSMVC_DEFINE_RHS_COUNT(Count) \
+float rhs_count_##Count(uint vector, uint begin) { \
+    float sum = 0.0; \
+    [[unroll]] \
+    for (uint offset = 0U; offset < Count; ++offset) { \
+        const uint position = begin + offset; \
+        const uint source = plan_data[pc.value[10] + position]; \
+        sum = fma(uintBitsToFloat(plan_data[pc.value[11] + position]), \
+                  source_value(vector, source), sum); \
+    } \
+    return sum; \
+}
+DSMVC_DEFINE_RHS_COUNT(6)
+DSMVC_DEFINE_RHS_COUNT(7)
+DSMVC_DEFINE_RHS_COUNT(9)
+DSMVC_DEFINE_RHS_COUNT(10)
+DSMVC_DEFINE_RHS_COUNT(13)
+DSMVC_DEFINE_RHS_COUNT(14)
+#undef DSMVC_DEFINE_RHS_COUNT
+
+float ordered_rhs(uint vector, uint begin, uint end, uint bandwidth) {
+    const uint count = end - begin;
+    if (bandwidth == 5U) {
+        if (count == 6U) return rhs_count_6(vector, begin);
+        if (count == 7U) return rhs_count_7(vector, begin);
+    } else if (bandwidth == 7U) {
+        if (count == 9U) return rhs_count_9(vector, begin);
+        if (count == 10U) return rhs_count_10(vector, begin);
+    } else if (bandwidth == 11U) {
+        if (count == 13U) return rhs_count_13(vector, begin);
+        if (count == 14U) return rhs_count_14(vector, begin);
+    }
+    float sum = 0.0;
+    for (uint position = begin; position < end; ++position) {
+        const uint source = plan_data[pc.value[10] + position];
+        sum = fma(uintBitsToFloat(plan_data[pc.value[11] + position]),
+                  source_value(vector, source), sum);
+    }
+    return sum;
+}
+#endif
+
 void inverse_axis_generic(uint vector, uint bandwidth) {
     const uint size = pc.value[1];
     for (uint index = 0U; index < size; ++index) {
@@ -123,15 +171,21 @@ void inverse_axis_fixed(uint vector) {
 #if DSMVC_SOLVE_ONLY
         float sum = output_value(vector, index);
 #else
+#ifndef DSMVC_SPECIALIZE_RHS
         float sum = 0.0;
+#endif
         const uint begin = plan_data[pc.value[9] + index];
         const uint end = plan_data[pc.value[9] + index + 1U];
+#ifdef DSMVC_SPECIALIZE_RHS
+        float sum = ordered_rhs(vector, begin, end, uint(DSMVC_FIXED_BANDWIDTH));
+#else
         for (uint position = begin; position < end; ++position) {
             const uint source = plan_data[pc.value[10] + position];
             sum = fma(
                 uintBitsToFloat(plan_data[pc.value[11] + position]),
                 source_value(vector, source), sum);
         }
+#endif
 #endif
         const uint available = min(uint(DSMVC_FIXED_BANDWIDTH), index);
         [[unroll]]

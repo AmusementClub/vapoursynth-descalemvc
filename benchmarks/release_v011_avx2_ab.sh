@@ -5,5 +5,5 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 output=${OUTPUT_DIR:-"$repo_root/artifacts/release-cpu-ab-$(date -u +%Y%m%dT%H%M%SZ)"}
 exec python3 "$repo_root/benchmarks/release_cpu_version_ab.py" \
-    --baseline "${BASELINE_REF:-8fbed39}" \
+    --baseline "${BASELINE_REF:-v0.1.1}" \
     --output "$output" --samples "${SAMPLES:-5}" --iterations "${ITERATIONS:-3}"

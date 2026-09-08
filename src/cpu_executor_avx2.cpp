@@ -1,6 +1,9 @@
 #include <dsmvc/engine.hpp>
 
 #include "axis_plan_internal.hpp"
+#include "cpu_horizontal_window.hpp"
+#include "cpu_float_workspace.hpp"
+#include "cpu_rhs_span.hpp"
 #include "checked_size.hpp"
 #include "cpu_packed.hpp"
 
@@ -458,6 +461,7 @@ void transpose_integer_source(
     }
 }
 
+template <int Bandwidth = 0>
 [[nodiscard]] DSMVC_FORCE_INLINE __m256 multiply_transpose(const detail::PackedCpuPlan &packed,
                                         const float *scratch,
                                         std::int32_t row) noexcept {
@@ -466,6 +470,15 @@ void transpose_integer_source(
     const auto right = packed.weights_right[static_cast<std::size_t>(row)];
     const auto base = static_cast<std::size_t>(row)
         * static_cast<std::size_t>(packed.weights_columns);
+    const auto *weights = packed.weights.data() + base;
+    const auto *source_base = scratch + static_cast<std::size_t>(left) * 8U;
+    if (detail::try_accumulate_rhs_span<Bandwidth>(
+            right - left, [&]<int Tap>() noexcept {
+                sum = _mm256_fmadd_ps(_mm256_set1_ps(weights[Tap]),
+                    _mm256_load_ps(source_base + Tap * 8U), sum);
+            })) {
+        return sum;
+    }
     for (std::int32_t source = left; source < right; ++source) {
         const __m256 weight = _mm256_set1_ps(
             packed.weights[base + static_cast<std::size_t>(source - left)]);
@@ -772,59 +785,92 @@ void solve_horizontal_b3(const detail::PackedCpuPlan &packed,
     }
 }
 
-[[nodiscard]] float *transposed_output(float *output, std::ptrdiff_t stride,
-                                       std::int32_t index) noexcept {
-    return output + static_cast<std::ptrdiff_t>(index & 7) * stride
-        + static_cast<std::ptrdiff_t>(index & ~7);
+[[nodiscard]] float *horizontal_value(float *work,
+                                      std::int32_t index) noexcept {
+    return work + static_cast<std::size_t>(index) * 8U;
 }
 
+[[nodiscard]] DSMVC_FORCE_INLINE __m256 subtract_product(
+    __m256 value, __m256 coefficient, __m256 previous) noexcept {
+    return _mm256_fnmadd_ps(coefficient, previous, value);
+}
+
+struct HorizontalOps {
+    using Vector = __m256;
+    static constexpr std::size_t lanes = 8;
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector zero() noexcept {
+        return _mm256_setzero_ps();
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector load(const float *p) noexcept {
+        return _mm256_loadu_ps(p);
+    }
+    static DSMVC_FORCE_INLINE void store(float *p, Vector v) noexcept {
+        _mm256_storeu_ps(p, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector subtract_product(
+        Vector v, float c, Vector previous) noexcept {
+        return _mm256_fnmadd_ps(_mm256_set1_ps(c), previous, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector multiply(
+        Vector v, float c) noexcept {
+        return _mm256_mul_ps(v, _mm256_set1_ps(c));
+    }
+};
+
+template <int FixedBandwidth>
 void solve_horizontal_generic(const AxisPlan &plan,
                               const detail::PackedCpuPlan &packed,
-                              const float *scratch, float *output,
+                              const float *scratch, float *work, float *output,
                               std::ptrdiff_t stride) noexcept {
-    const auto n = plan.destination_size;
-    const auto factor_stride = static_cast<std::size_t>(packed.padded_destination_size);
-    for (std::int32_t i = 0; i < n; ++i) {
-        __m256 value = multiply_transpose(packed, scratch, i);
-        const auto available = std::min(plan.half_bandwidth, i);
-        for (std::int32_t distance = available; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.lower_ld[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                _mm256_loadu_ps(transposed_output(output, stride, i - distance)),
-                value);
+    if constexpr (FixedBandwidth > 0) {
+        detail::solve_horizontal_window<FixedBandwidth, HorizontalOps>(
+            packed, plan.destination_size, work,
+            [&](std::int32_t i) noexcept {
+                return multiply_transpose<FixedBandwidth>(packed, scratch, i);
+            });
+    } else {
+        const auto n = plan.destination_size;
+        const auto factor_stride = static_cast<std::size_t>(
+            packed.padded_destination_size);
+        for (std::int32_t i = 0; i < n; ++i) {
+            __m256 value = multiply_transpose(packed, scratch, i);
+            const auto available = std::min(plan.half_bandwidth, i);
+            for (std::int32_t distance = available; distance >= 1; --distance) {
+                value = subtract_product(value,
+                    _mm256_set1_ps(packed.lower_ld[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + static_cast<std::size_t>(i)]),
+                    _mm256_loadu_ps(horizontal_value(work, i - distance)));
+            }
+            value = _mm256_mul_ps(value, _mm256_set1_ps(
+                packed.inverse_diagonal[static_cast<std::size_t>(i)]));
+            _mm256_storeu_ps(horizontal_value(work, i), value);
         }
-        value = _mm256_mul_ps(
-            value, _mm256_set1_ps(
-                       packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-    for (std::int32_t i = n; i < packed.padded_destination_size; ++i) {
-        _mm256_storeu_ps(transposed_output(output, stride, i), _mm256_setzero_ps());
-    }
-    for (std::int32_t i = n - 2; i >= 0; --i) {
-        __m256 value = _mm256_loadu_ps(transposed_output(output, stride, i));
-        const auto available = std::min(plan.half_bandwidth, n - i - 1);
-        for (std::int32_t distance = available; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.upper_l[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                _mm256_loadu_ps(transposed_output(output, stride, i + distance)),
-                value);
+        for (std::int32_t i = n; i < packed.padded_destination_size; ++i) {
+            _mm256_storeu_ps(horizontal_value(work, i), _mm256_setzero_ps());
         }
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
+        for (std::int32_t i = n - 2; i >= 0; --i) {
+            __m256 value = _mm256_loadu_ps(horizontal_value(work, i));
+            const auto available = std::min(plan.half_bandwidth, n - i - 1);
+            for (std::int32_t distance = available; distance >= 1; --distance) {
+                value = subtract_product(value,
+                    _mm256_set1_ps(packed.upper_l[
+                        static_cast<std::size_t>(distance - 1) * factor_stride
+                        + static_cast<std::size_t>(i)]),
+                    _mm256_loadu_ps(horizontal_value(work, i + distance)));
+            }
+            _mm256_storeu_ps(horizontal_value(work, i), value);
+        }
     }
     for (std::int32_t j = 0; j < packed.padded_destination_size; j += 8) {
-        __m256 x0 = _mm256_loadu_ps(output + j);
-        __m256 x1 = _mm256_loadu_ps(output + stride + j);
-        __m256 x2 = _mm256_loadu_ps(output + 2 * stride + j);
-        __m256 x3 = _mm256_loadu_ps(output + 3 * stride + j);
-        __m256 x4 = _mm256_loadu_ps(output + 4 * stride + j);
-        __m256 x5 = _mm256_loadu_ps(output + 5 * stride + j);
-        __m256 x6 = _mm256_loadu_ps(output + 6 * stride + j);
-        __m256 x7 = _mm256_loadu_ps(output + 7 * stride + j);
+        __m256 x0 = _mm256_loadu_ps(horizontal_value(work, j + 0));
+        __m256 x1 = _mm256_loadu_ps(horizontal_value(work, j + 1));
+        __m256 x2 = _mm256_loadu_ps(horizontal_value(work, j + 2));
+        __m256 x3 = _mm256_loadu_ps(horizontal_value(work, j + 3));
+        __m256 x4 = _mm256_loadu_ps(horizontal_value(work, j + 4));
+        __m256 x5 = _mm256_loadu_ps(horizontal_value(work, j + 5));
+        __m256 x6 = _mm256_loadu_ps(horizontal_value(work, j + 6));
+        __m256 x7 = _mm256_loadu_ps(horizontal_value(work, j + 7));
         transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
         _mm256_storeu_ps(output + j, x0);
         _mm256_storeu_ps(output + stride + j, x1);
@@ -834,6 +880,29 @@ void solve_horizontal_generic(const AxisPlan &plan,
         _mm256_storeu_ps(output + 5 * stride + j, x5);
         _mm256_storeu_ps(output + 6 * stride + j, x6);
         _mm256_storeu_ps(output + 7 * stride + j, x7);
+    }
+}
+
+void solve_horizontal_wide(const AxisPlan &plan,
+                           const detail::PackedCpuPlan &packed,
+                           const float *scratch, float *work, float *output,
+                           std::ptrdiff_t stride) noexcept {
+    switch (plan.half_bandwidth) {
+    case 5:
+        solve_horizontal_generic<5>(plan, packed, scratch, work, output, stride);
+        break;
+    case 7:
+        solve_horizontal_generic<7>(plan, packed, scratch, work, output, stride);
+        break;
+    case 9:
+        solve_horizontal_generic<9>(plan, packed, scratch, work, output, stride);
+        break;
+    case 11:
+        solve_horizontal_generic<11>(plan, packed, scratch, work, output, stride);
+        break;
+    default:
+        solve_horizontal_generic<0>(plan, packed, scratch, work, output, stride);
+        break;
     }
 }
 
@@ -852,7 +921,10 @@ DSMVC_FLATTEN void solve_horizontal_block(
         solve_horizontal_b3(
             packed, scratch, output, output_stride, plan.destination_size);
     } else {
-        solve_horizontal_generic(plan, packed, scratch, output, output_stride);
+        solve_horizontal_wide(
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 8U,
+            output, output_stride);
     }
 }
 
@@ -875,7 +947,10 @@ void solve_horizontal_integer_block(
             packed, scratch, output, output_stride,
             packed.padded_destination_size);
     } else {
-        solve_horizontal_generic(plan, packed, scratch, output, output_stride);
+        solve_horizontal_wide(
+            plan, packed, scratch,
+            scratch + static_cast<std::size_t>(packed.padded_source_size) * 8U,
+            output, output_stride);
     }
 }
 
@@ -1681,12 +1756,16 @@ void accumulate_2d_integer_rhs_impl(
                     padded_columns, 0.0F);
     }
 
-    thread_local std::vector<ScratchVector> transpose_scratch;
+    thread_local std::vector<float> transpose_scratch;
     thread_local std::vector<ScratchVector> horizontal_scratch;
-    transpose_scratch.resize(
-        static_cast<std::size_t>(packed_horizontal.padded_source_size));
+    const auto transpose_scratch_vectors =
+        static_cast<std::size_t>(packed_horizontal.padded_source_size)
+        + (horizontal.half_bandwidth != 1 && horizontal.half_bandwidth != 3
+            ? static_cast<std::size_t>(padded_columns) : 0U);
     horizontal_scratch.resize(static_cast<std::size_t>(padded_columns));
-    auto *transpose_data = transpose_scratch.front().lanes;
+    auto *transpose_data = detail::aligned_float_workspace<32>(
+        transpose_scratch, detail::checked_size_product(transpose_scratch_vectors, 8U,
+            "AVX2 integer scratch"), "AVX2 integer scratch");
     auto *horizontal_rows = horizontal_scratch.front().lanes;
 
     const auto process_block = [&](std::int32_t block_row,
@@ -1745,19 +1824,23 @@ DSMVC_FLATTEN void forward_2d_rhs_destination_impl(
     const auto cache_blocks = static_cast<std::size_t>(
         std::max(packed_vertical.streaming_cache_blocks, 1));
 
-    thread_local std::vector<ScratchVector> transpose_scratch;
+    thread_local std::vector<float> transpose_scratch;
     thread_local std::vector<ScratchVector> horizontal_cache;
     thread_local std::vector<std::int32_t> cache_rows;
     thread_local std::vector<std::uint64_t> cache_ages;
     thread_local std::vector<const float *> source_rows;
-    transpose_scratch.resize(
-        static_cast<std::size_t>(packed_horizontal.padded_source_size));
+    const auto transpose_scratch_vectors =
+        static_cast<std::size_t>(packed_horizontal.padded_source_size)
+        + (horizontal.half_bandwidth != 1 && horizontal.half_bandwidth != 3
+            ? static_cast<std::size_t>(padded_columns) : 0U);
     horizontal_cache.resize(detail::checked_size_product(
         cache_blocks, static_cast<std::size_t>(padded_columns),
         "AVX2 horizontal cache"));
     cache_rows.assign(cache_blocks, -1);
     cache_ages.assign(cache_blocks, 0U);
-    auto *transpose_data = transpose_scratch.front().lanes;
+    auto *transpose_data = detail::aligned_float_workspace<32>(
+        transpose_scratch, detail::checked_size_product(transpose_scratch_vectors, 8U,
+            "AVX2 2D scratch"), "AVX2 2D scratch");
     std::uint64_t age = 0U;
 
     const auto tail_block = vertical.source_size & 7
@@ -2259,9 +2342,13 @@ void inverse_rows_avx2(const AxisPlan &plan,
         return;
     }
 
-    thread_local std::vector<ScratchVector> scratch;
-    scratch.resize(static_cast<std::size_t>(packed.padded_source_size));
-    auto *scratch_data = scratch.front().lanes;
+    thread_local std::vector<float> scratch;
+    const auto scratch_vectors = static_cast<std::size_t>(packed.padded_source_size)
+        + (plan.half_bandwidth != 1 && plan.half_bandwidth != 3
+            ? static_cast<std::size_t>(packed.padded_destination_size) : 0U);
+    auto *scratch_data = detail::aligned_float_workspace<32>(
+        scratch, detail::checked_size_product(scratch_vectors, 8U,
+            "AVX2 row scratch"), "AVX2 row scratch");
     const bool use_output_scratch = plan.half_bandwidth != 1
         && plan.half_bandwidth != 3
         && plan.destination_size != packed.padded_destination_size;

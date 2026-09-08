@@ -157,9 +157,9 @@ struct MetalFloatExecutor::Impl {
             throw std::runtime_error(ns_error(error, "embedded metallib load failed"));
         }
 
-        const std::array<NSString *, 5> names{
+        const std::array<NSString *, 6> names{
             @"inverse_axis_generic", @"inverse_axis_h1", @"inverse_axis_h3",
-            @"inverse_axis_h5", @"inverse_axis_h7"};
+            @"inverse_axis_h5", @"inverse_axis_h7", @"inverse_axis_h11"};
         for (std::size_t index = 0U; index < names.size(); ++index) {
             pipelines[index] = make_pipeline(names[index]);
         }
@@ -256,6 +256,7 @@ struct MetalFloatExecutor::Impl {
         case 3U: return pipelines[2];
         case 5U: return pipelines[3];
         case 7U: return pipelines[4];
+        case 11U: return pipelines[5];
         default: return pipelines[0];
         }
     }
@@ -440,7 +441,7 @@ struct MetalFloatExecutor::Impl {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     id<MTLLibrary> library = nil;
-    std::array<id<MTLComputePipelineState>, 5> pipelines{};
+    std::array<id<MTLComputePipelineState>, 6> pipelines{};
     PlanBuffers horizontal_buffers;
     PlanBuffers vertical_buffers;
     id<MTLBuffer> input = nil;

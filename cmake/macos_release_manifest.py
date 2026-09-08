@@ -177,14 +177,17 @@ def main() -> int:
             f"plugin minos differs: {minos} != {options.deployment_target}"
         )
 
-    expected_symbols = sorted({
+    declared_symbols = [
         line.strip() for line in entrypoints_path.read_text(
             encoding="ascii").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
-    })
+    ]
+    expected_symbols = sorted(set(declared_symbols))
+    if not expected_symbols or len(expected_symbols) != len(declared_symbols):
+        raise RuntimeError("Metal entrypoint inventory must be nonempty and unique")
     metal_nm = run("xcrun", "--find", "metal-nm")
     actual_symbols = metal_symbols(run(metal_nm, str(metallib)))
-    if len(expected_symbols) != 32 or actual_symbols != expected_symbols:
+    if actual_symbols != expected_symbols:
         raise RuntimeError(
             f"Metal inventory differs: {actual_symbols} != {expected_symbols}"
         )

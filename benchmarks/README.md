@@ -237,3 +237,31 @@ and measure the aggregate wall time rather than one batch's FPS.
 For the complete Linux/macOS release procedure, see
 the release benchmark runners. Published Markdown reports are kept in
 [`docs/`](../docs/).
+
+## Compare CPU releases
+
+`release_cpu_version_ab.py` compares a release ref with a frozen copy of the
+current source on a Linux AVX2 host. It preserves both source manifests,
+compiler commands, binaries, timings, and logical output proofs under the
+required output directory:
+
+```sh
+CXX=g++ CC=gcc python3 benchmarks/release_cpu_version_ab.py \
+  --baseline v0.1.2 --output artifacts/release-cpu-ab
+```
+
+Set `DSMVC_VAPOURSYNTH_INCLUDE_DIR` or `DSMVC_VAPOURSYNTH_SDK` if the SDK is
+not discoverable. The workload follows the v0.1.2 release description:
+256 rows, 1920 to 1692, the original deterministic Float32 input, and the
+four published kernels. The legacy height fixture is also recorded with its
+actual automatic precision selection. Both sides use the same 16-byte
+address offset modulo 64.
+
+Results include the original five samples of three calls and a separate
+five-pair run with calibrated iteration counts for longer measurements.
+Pairs alternate baseline/candidate order. Only the longer pass with at least
+99% CPU1 idleness qualifies as timing evidence; short legacy samples remain
+available for recipe comparison. All case attempts, including disturbed
+ones, are retained. The driver verifies finite output, unchanged input, and
+AVX2 agreement; the runner verifies complete logical output hashes across
+versions. No speedup threshold selects the recorded samples.

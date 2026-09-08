@@ -1,0 +1,3208 @@
+{
+  "baseline_tag": "v0.1.2",
+  "baseline_revision": "0e9f5b444c8766702a11b5148b35659634226162",
+  "selection_rule": "First complete environment-valid stable group for each case, in chronological attempt order. Never select by speedup.",
+  "hosts": {
+    "intel": {
+      "model": "Xeon Platinum 8581C",
+      "machine_type": "c4-highcpu-2",
+      "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+      "source_fingerprints": {
+        "baseline": "9166d9ac5c571dd69265e35dd69faa8890a5a013d78849fa9e23f1fc82e017c2",
+        "candidate": "fd79494b340d237cc62d3dfae6b01edf1a508c3f7323097267fe878156397806"
+      },
+      "binaries": {
+        "baseline": {
+          "driver_sha256": "996f17e4c59b9d26ac31c03198284beed109102804281234b1eb74d1d3837349",
+          "engine_sha256": "d535c6f4d4847aeabb67cb74d4c1e6104067447cc55d77b517fabd1bd66060da",
+          "plugin_sha256": "130b4fd2c58ae0a5ccb5268d3861a3b3ff7b1e88a1c8208233e45bfa58270088",
+          "capabilities": {
+            "avx2": true,
+            "avx512": true
+          }
+        },
+        "candidate": {
+          "driver_sha256": "9979bcfebf89315845d16416a4df555ab9302ac0ab5abb051b0aa750f671a7d4",
+          "engine_sha256": "056e053d360edfb8654f7c13063e255592458831e8c5a298001650763ef0052a",
+          "plugin_sha256": "82ae2ec018fbe9b01b2b9af50f018df40b28fc5443e8109e06fd61e1abf5f273",
+          "capabilities": {
+            "avx2": true,
+            "avx512": true
+          }
+        }
+      },
+      "selected": [
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 3572,
+          "pairs": [
+            1.006762970430395,
+            1.0156239106228877,
+            1.0177002357974438,
+            1.0101382442507523,
+            1.011767660868166
+          ],
+          "speedup": 1.011767660868166,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.977546618999895,
+          "median_ms_per_call": {
+            "baseline": 0.27769461982082866,
+            "candidate": 0.2742866438969765
+          },
+          "output_sha256": "6de369aec3440496225bcc9803ea29b340dac03b9098b72c6a3a1ca635b612e4"
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 4617,
+          "pairs": [
+            1.0147338033201698,
+            1.0128726976317077,
+            1.0147981108573774,
+            1.011563574329373,
+            1.0117232603071795
+          ],
+          "speedup": 1.0128726976317077,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.872697979999884,
+          "median_ms_per_call": {
+            "baseline": 0.27786645765648693,
+            "candidate": 0.27433211197747454
+          },
+          "output_sha256": "6de369aec3440496225bcc9803ea29b340dac03b9098b72c6a3a1ca635b612e4"
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 2505,
+          "pairs": [
+            1.0009532168613298,
+            1.0039969590540647,
+            1.0064968441157431,
+            1.0041462360527051,
+            1.0050074820353219
+          ],
+          "speedup": 1.0041462360527051,
+          "timed_cpu1_idle_min": 99.21259842519684,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.743281298000056,
+          "median_ms_per_call": {
+            "baseline": 0.5045280618762474,
+            "candidate": 0.502885270259481
+          },
+          "output_sha256": "d381080ec2a15edf69d142af575d635677c29b4d58001483215b551e88aa2883"
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 2543,
+          "pairs": [
+            1.0020458750069103,
+            1.0080271349788057,
+            1.007579187215793,
+            1.008126063676277,
+            1.0087037267954049
+          ],
+          "speedup": 1.0080271349788057,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.935661118000098,
+          "median_ms_per_call": {
+            "baseline": 0.5051061789225324,
+            "candidate": 0.5012080460086512
+          },
+          "output_sha256": "d381080ec2a15edf69d142af575d635677c29b4d58001483215b551e88aa2883"
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1792,
+          "pairs": [
+            1.3996010146412916,
+            1.400774141485617,
+            1.3996890496102554,
+            1.3912294647280856,
+            1.3970951738991075
+          ],
+          "speedup": 1.3996010146412916,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.118751814000007,
+          "median_ms_per_call": {
+            "baseline": 0.7769423292410714,
+            "candidate": 0.5561126713169643
+          },
+          "output_sha256": "6a299bf6b81a6296310d1bfc1c1b8cf6c23b8efade8dffeeed6dd6392fd77331"
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 2035,
+          "pairs": [
+            1.295379633895719,
+            1.2958859292994813,
+            1.2999260126811114,
+            1.2961306785244422,
+            1.2946100750470857
+          ],
+          "speedup": 1.2958859292994813,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.81253958100001,
+          "median_ms_per_call": {
+            "baseline": 0.5903228461916462,
+            "candidate": 0.4555640825552825
+          },
+          "output_sha256": "6a299bf6b81a6296310d1bfc1c1b8cf6c23b8efade8dffeeed6dd6392fd77331"
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 1811,
+          "pairs": [
+            1.4202414425613434,
+            1.4255366341792626,
+            1.4221328751409068,
+            1.4242616400481287,
+            1.427138297032725
+          ],
+          "speedup": 1.4242616400481287,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 15.531533122999917,
+          "median_ms_per_call": {
+            "baseline": 0.9982504776366649,
+            "candidate": 0.7008304240750965
+          },
+          "output_sha256": "a0e0b17b8f904e011082d0206cdc2e5d7b9387e50a39b0a73c88b00ff573c56e"
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 1685,
+          "pairs": [
+            1.406487130562228,
+            1.4064007743428921,
+            1.3993684710971943,
+            1.405901151103726,
+            1.40153277655951
+          ],
+          "speedup": 1.405901151103726,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.29100746600011,
+          "median_ms_per_call": {
+            "baseline": 0.7696621133531156,
+            "candidate": 0.5483658071216617
+          },
+          "output_sha256": "a0e0b17b8f904e011082d0206cdc2e5d7b9387e50a39b0a73c88b00ff573c56e"
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 146,
+          "pairs": [
+            0.9982105396088886,
+            0.9972153624536582,
+            1.0144010304781075,
+            1.0121638753995401,
+            0.9990769463317508
+          ],
+          "speedup": 0.9990769463317508,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.551482823000015,
+          "median_ms_per_call": {
+            "baseline": 6.864050506849315,
+            "candidate": 6.848300952054795
+          },
+          "output_sha256": "0e7143ddfd4769ab2637a2628b6b78b9e211e709da869f19adbf7366452d1ee0"
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 148,
+          "pairs": [
+            1.0039348236353474,
+            1.0055840358961319,
+            0.9944683990224376,
+            1.0002415044406732,
+            0.998535161900731
+          ],
+          "speedup": 1.0002415044406732,
+          "timed_cpu1_idle_min": 99.01960784313725,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.675539723000156,
+          "median_ms_per_call": {
+            "baseline": 6.861268918918919,
+            "candidate": 6.834376851351351
+          },
+          "output_sha256": "0e7143ddfd4769ab2637a2628b6b78b9e211e709da869f19adbf7366452d1ee0"
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 130,
+          "pairs": [
+            0.9935147911891785,
+            0.9989040122444246,
+            0.9969151369508871,
+            0.9990784075004694,
+            0.9991176360022308
+          ],
+          "speedup": 0.9989040122444246,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.64550564000001,
+          "median_ms_per_call": {
+            "baseline": 7.742320261538461,
+            "candidate": 7.755860761538461
+          },
+          "output_sha256": "f153e35f1029e7acf4cd2db9e6b3012bfb3a1f16ec905b09f79be9977c08428e"
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 168,
+          "pairs": [
+            1.006510351514776,
+            0.9979712814363034,
+            1.0086020424084934,
+            0.9993098715398164,
+            1.0094108805843116
+          ],
+          "speedup": 1.006510351514776,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 13.571515813000133,
+          "median_ms_per_call": {
+            "baseline": 7.799038875,
+            "candidate": 7.738785255952381
+          },
+          "output_sha256": "f153e35f1029e7acf4cd2db9e6b3012bfb3a1f16ec905b09f79be9977c08428e"
+        },
+        {
+          "case": "height-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 119,
+          "pairs": [
+            0.9959030967473164,
+            0.9975720213431771,
+            0.9995138182305836,
+            0.9960642072015335,
+            0.9978547794333696
+          ],
+          "speedup": 0.9975720213431771,
+          "timed_cpu1_idle_min": 99.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.637626158000103,
+          "median_ms_per_call": {
+            "baseline": 8.41880350420168,
+            "candidate": 8.436902521008403
+          },
+          "output_sha256": "5cb2b3602688a713dac85c4a4e8bbbd113044d705414eb7c4715c7238b9798bb"
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 155,
+          "pairs": [
+            1.001814062372049,
+            0.9992976956944606,
+            0.9995370768176756,
+            0.9992098622136597,
+            1.0034457076198595
+          ],
+          "speedup": 0.9995370768176756,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 13.613440514000104,
+          "median_ms_per_call": {
+            "baseline": 8.423107232258065,
+            "candidate": 8.426953554838711
+          },
+          "output_sha256": "5cb2b3602688a713dac85c4a4e8bbbd113044d705414eb7c4715c7238b9798bb"
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 111,
+          "pairs": [
+            1.003504463241176,
+            0.990643737329469,
+            0.9917287855408647,
+            0.9976006425094851,
+            0.9941780972458414
+          ],
+          "speedup": 0.9941780972458414,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.734088961999987,
+          "median_ms_per_call": {
+            "baseline": 9.089238279279279,
+            "candidate": 9.142458531531531
+          },
+          "output_sha256": "d1437f1e4c05be8023a778d20200f5db19ddc0b93fc26af4eac2536993223ff1"
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 110,
+          "pairs": [
+            1.0110460580026066,
+            0.9927909814227337,
+            0.9943014937496875,
+            0.9979304760547462,
+            1.0012295552640342
+          ],
+          "speedup": 0.9979304760547462,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.680119860000104,
+          "median_ms_per_call": {
+            "baseline": 9.117453236363636,
+            "candidate": 9.146854936363637
+          },
+          "output_sha256": "d1437f1e4c05be8023a778d20200f5db19ddc0b93fc26af4eac2536993223ff1"
+        },
+        {
+          "case": "2d-lanczos3",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 518,
+          "pairs": [
+            2.1873321431343635,
+            2.1838888413984967,
+            2.187332960407732,
+            2.1886300093196644,
+            2.200359451952478
+          ],
+          "speedup": 2.187332960407732,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 21.843095542000356,
+          "median_ms_per_call": {
+            "baseline": 5.44003861003861,
+            "candidate": 2.484787644787645
+          },
+          "output_sha256": "6d99f591ad582cb5c10ba52b1f62ac7c96f6974246c118cfe4a1e28a8424f7ad"
+        },
+        {
+          "case": "2d-spline64",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 433,
+          "pairs": [
+            2.167849677256334,
+            2.1733810962981144,
+            2.168366289910453,
+            2.1747263193401,
+            2.1686327447882316
+          ],
+          "speedup": 2.1686327447882316,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 22.128820072000053,
+          "median_ms_per_call": {
+            "baseline": 6.538545034642032,
+            "candidate": 3.0110392609699765
+          },
+          "output_sha256": "b57da5e996be4e97bf5077b63e61323cb116ca9f98b033e99d814c3b84a04abb"
+        },
+        {
+          "case": "2d-lanczos6",
+          "mode": "supplemental",
+          "attempt": 1,
+          "iterations": 273,
+          "pairs": [
+            1.953988788601489,
+            1.95663898342847,
+            1.9547124373988605,
+            1.9535586151911932,
+            1.9594910612634235
+          ],
+          "speedup": 1.9547124373988605,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 21.05737101700015,
+          "median_ms_per_call": {
+            "baseline": 9.333553113553112,
+            "candidate": 4.7761538461538455
+          },
+          "output_sha256": "487f6a6d42cc26fe35e0f6bbe539c903c4c996551824f955ebe61cb82aade18d"
+        }
+      ],
+      "all_summary_groups": [
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.0113558322885667,
+            1.0174928361143036,
+            1.0155344637588426,
+            1.0075790564814244,
+            0.9893058268753265
+          ],
+          "speedup": 1.0113558322885667,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.13098917699994672
+        },
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 3572,
+          "pairs": [
+            1.006762970430395,
+            1.0156239106228877,
+            1.0177002357974438,
+            1.0101382442507523,
+            1.011767660868166
+          ],
+          "speedup": 1.011767660868166,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.977546618999895
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.984245959279348,
+            1.0314979233203612,
+            0.9810270210089707,
+            1.0350927486941013,
+            1.0069971081316105
+          ],
+          "speedup": 1.0069971081316105,
+          "timed_cpu1_idle_min": null,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.13535482499992213
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 3555,
+          "pairs": [
+            1.0112373792670926,
+            1.0116933663924852,
+            1.0109485016508988,
+            1.0114081930015586,
+            1.0142009697933643
+          ],
+          "speedup": 1.0114081930015586,
+          "timed_cpu1_idle_min": 98.9795918367347,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.930667098999947
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 3555,
+          "pairs": [
+            1.008869571216176,
+            1.0058263266997427,
+            1.0120318318498995,
+            1.0174906371772399,
+            1.0091904406849406
+          ],
+          "speedup": 1.0091904406849406,
+          "timed_cpu1_idle_min": 82.65306122448979,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.947227853999948
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 3555,
+          "pairs": [
+            1.0129172707775262,
+            1.0108928239075186,
+            1.0147209694135806,
+            1.0190824201851496,
+            1.009791311903023
+          ],
+          "speedup": 1.0129172707775262,
+          "timed_cpu1_idle_min": 98.96907216494846,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.945470772999897
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.0189392613775554,
+            1.0240071699331432,
+            1.007836345699041,
+            0.996257637177892,
+            1.0167825991662198
+          ],
+          "speedup": 1.0167825991662198,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.15648264200012818
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1955,
+          "pairs": [
+            1.0064107477736857,
+            1.0036409080757862,
+            1.0034551478670297,
+            1.0031533310383551,
+            1.0052736628582841
+          ],
+          "speedup": 1.0036409080757862,
+          "timed_cpu1_idle_min": 98.98989898989899,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.990214483000045
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 1955,
+          "pairs": [
+            1.0056368211243623,
+            1.0040009604343676,
+            1.0099110763114103,
+            1.0051970566738813,
+            1.0087935729120852
+          ],
+          "speedup": 1.0056368211243623,
+          "timed_cpu1_idle_min": 69.38775510204081,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.988013595999973
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 1955,
+          "pairs": [
+            1.0099404513380696,
+            1.0045385736945731,
+            1.0029042162263502,
+            1.0041325411596227,
+            1.0083929767686233
+          ],
+          "speedup": 1.0045385736945731,
+          "timed_cpu1_idle_min": 98.98989898989899,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.995940131999987
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9653034849707485,
+            0.957227655312551,
+            1.073585734141822,
+            1.0199908886208584,
+            0.975916716214935
+          ],
+          "speedup": 0.975916716214935,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.16298526000014135
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1894,
+          "pairs": [
+            1.0020882073246065,
+            1.0013927933166704,
+            1.0038249480188743,
+            1.0061213566678777,
+            1.0012932490113082
+          ],
+          "speedup": 1.0020882073246065,
+          "timed_cpu1_idle_min": 98.94736842105263,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.694224867999992
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 1894,
+          "pairs": [
+            1.0080353728101064,
+            1.0077089420951049,
+            1.0076441594024033,
+            1.007903052911215,
+            0.9989209475605536
+          ],
+          "speedup": 1.0077089420951049,
+          "timed_cpu1_idle_min": 61.05263157894737,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.70237790300007
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 1894,
+          "pairs": [
+            1.0008783777124555,
+            1.003519687088131,
+            0.99984768956002,
+            1.0058217409079968,
+            1.0063316499894885
+          ],
+          "speedup": 1.003519687088131,
+          "timed_cpu1_idle_min": 98.95833333333333,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.699118763000115
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.3951011463786127,
+            1.365893914110415,
+            1.3952882361688417,
+            1.3997742393669657,
+            1.3987603366721741
+          ],
+          "speedup": 1.3952882361688417,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.18272754999998142
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1792,
+          "pairs": [
+            1.3996010146412916,
+            1.400774141485617,
+            1.3996890496102554,
+            1.3912294647280856,
+            1.3970951738991075
+          ],
+          "speedup": 1.3996010146412916,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.118751814000007
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.2580116552680791,
+            1.2718184447355438,
+            1.2614052109709635,
+            1.271717204758322,
+            1.2839098403046807
+          ],
+          "speedup": 1.271717204758322,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.182228860999885
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2035,
+          "pairs": [
+            1.2999032852924557,
+            1.294448342149034,
+            1.3021058069309916,
+            1.293237901345876,
+            1.3228003473309118
+          ],
+          "speedup": 1.2999032852924557,
+          "timed_cpu1_idle_min": 45.744680851063826,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.838906726999994
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 2035,
+          "pairs": [
+            1.295379633895719,
+            1.2958859292994813,
+            1.2999260126811114,
+            1.2961306785244422,
+            1.2946100750470857
+          ],
+          "speedup": 1.2958859292994813,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.81253958100001
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.4456294427777185,
+            1.4167121671272855,
+            1.4244309676892164,
+            1.3979541245777478,
+            1.3916197589908246
+          ],
+          "speedup": 1.4167121671272855,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.20009032300004037
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1381,
+          "pairs": [
+            1.428147570352259,
+            1.4235292404040407,
+            1.4283036999384189,
+            1.4305920774530057,
+            1.4210020440730775
+          ],
+          "speedup": 1.428147570352259,
+          "timed_cpu1_idle_min": 74.82014388489209,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.906017054999893
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 1381,
+          "pairs": [
+            1.4178717047197493,
+            1.4220378619409142,
+            1.4285058627019525,
+            1.4226146941787885,
+            1.4205430111684763
+          ],
+          "speedup": 1.4220378619409142,
+          "timed_cpu1_idle_min": 98.96907216494846,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.91173116799996
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 1381,
+          "pairs": [
+            1.4272064609351696,
+            1.4231316003952978,
+            1.4259112564754697,
+            1.4235775897972454,
+            1.4221084946897389
+          ],
+          "speedup": 1.4235775897972454,
+          "timed_cpu1_idle_min": 97.91666666666667,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.903784320000113
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.3529301209994988,
+            1.3506035564521475,
+            1.3527979543184747,
+            1.353783894705697,
+            1.3692536556101123
+          ],
+          "speedup": 1.3529301209994988,
+          "timed_cpu1_idle_min": null,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.2015086290000454
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1685,
+          "pairs": [
+            1.4108558280925505,
+            1.44231375870528,
+            1.405177280592544,
+            1.4066100495750544,
+            1.4084794419739188
+          ],
+          "speedup": 1.4084794419739188,
+          "timed_cpu1_idle_min": 78.19548872180451,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.340131325999891
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 1685,
+          "pairs": [
+            1.406487130562228,
+            1.4064007743428921,
+            1.3993684710971943,
+            1.405901151103726,
+            1.40153277655951
+          ],
+          "speedup": 1.405901151103726,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.29100746600011
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.0058916118062018,
+            0.9970527856041611,
+            0.9987843367959451,
+            0.9974392054265871,
+            0.9982637680460493
+          ],
+          "speedup": 0.9982637680460493,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.7453802640000049
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 146,
+          "pairs": [
+            0.9982105396088886,
+            0.9972153624536582,
+            1.0144010304781075,
+            1.0121638753995401,
+            0.9990769463317508
+          ],
+          "speedup": 0.9990769463317508,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.551482823000015
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9987561989435815,
+            1.0019220626741834,
+            0.9966861350890255,
+            0.9958020434459104,
+            0.9874709346658537
+          ],
+          "speedup": 0.9966861350890255,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.748521492000009
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 148,
+          "pairs": [
+            1.0039348236353474,
+            1.0055840358961319,
+            0.9944683990224376,
+            1.0002415044406732,
+            0.998535161900731
+          ],
+          "speedup": 1.0002415044406732,
+          "timed_cpu1_idle_min": 99.01960784313725,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.675539723000156
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.001431197093123,
+            1.0022193753746802,
+            1.0030044171865582,
+            1.0067530138053085,
+            0.995306636388468
+          ],
+          "speedup": 1.0022193753746802,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8493548409999221
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 130,
+          "pairs": [
+            1.0015080558356548,
+            1.0021982241932947,
+            1.0011442793774883,
+            1.001333896884133,
+            0.9973640753251086
+          ],
+          "speedup": 1.001333896884133,
+          "timed_cpu1_idle_min": 83.16831683168317,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.67340305300013
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 130,
+          "pairs": [
+            1.0001322800129375,
+            0.9967113461870513,
+            0.9964579282175683,
+            0.999117809587068,
+            1.0003141055828557
+          ],
+          "speedup": 0.999117809587068,
+          "timed_cpu1_idle_min": 62.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.623199871999986
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 130,
+          "pairs": [
+            0.9935147911891785,
+            0.9989040122444246,
+            0.9969151369508871,
+            0.9990784075004694,
+            0.9991176360022308
+          ],
+          "speedup": 0.9989040122444246,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.64550564000001
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.997066698871348,
+            0.9982474818159308,
+            0.9978298809133804,
+            0.9983715302532693,
+            0.9994886428832632
+          ],
+          "speedup": 0.9982474818159308,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8070120820000284
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 130,
+          "pairs": [
+            1.0009617299367624,
+            0.9938254228550105,
+            0.99760287468812,
+            0.9982542917437301,
+            1.0046164639377848
+          ],
+          "speedup": 0.9982542917437301,
+          "timed_cpu1_idle_min": 93.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.697634593999965
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 130,
+          "pairs": [
+            0.9869352292865281,
+            0.9979634563034149,
+            0.9839567692553468,
+            1.0022578042269197,
+            1.0058607092788272
+          ],
+          "speedup": 0.9979634563034149,
+          "timed_cpu1_idle_min": 77.22772277227723,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.768007178000062
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 130,
+          "pairs": [
+            1.00120070078455,
+            0.9999635439148088,
+            1.0083394011148354,
+            1.007565261247564,
+            0.9987693730323223
+          ],
+          "speedup": 1.00120070078455,
+          "timed_cpu1_idle_min": 98.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.71025454100004
+        },
+        {
+          "case": "height-lanczos3-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.004973439137026,
+            1.0027910268441382,
+            0.990434716731028,
+            1.003563699245425,
+            0.995650026439696
+          ],
+          "speedup": 1.0027910268441382,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8496163720001277
+        },
+        {
+          "case": "height-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 119,
+          "pairs": [
+            0.9959030967473164,
+            0.9975720213431771,
+            0.9995138182305836,
+            0.9960642072015335,
+            0.9978547794333696
+          ],
+          "speedup": 0.9975720213431771,
+          "timed_cpu1_idle_min": 99.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.637626158000103
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9967093562624669,
+            1.0041574948193224,
+            0.9558757794172396,
+            1.0033509817764317,
+            1.0022752400356056
+          ],
+          "speedup": 1.0022752400356056,
+          "timed_cpu1_idle_min": 66.66666666666667,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8546282310001061
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 120,
+          "pairs": [
+            1.006932789868659,
+            0.9916788307639599,
+            1.0147917733959229,
+            1.0052212937694862,
+            1.0137661579184498
+          ],
+          "speedup": 1.006932789868659,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.45412890900002
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 120,
+          "pairs": [
+            0.9998136131147013,
+            1.0020622010620612,
+            1.0034359446944392,
+            0.999508860298044,
+            0.9983797477261969
+          ],
+          "speedup": 0.9998136131147013,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.329311204000078
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 120,
+          "pairs": [
+            1.0005916103581045,
+            0.9966583547376779,
+            1.0113730542627044,
+            1.0023152805753108,
+            1.001302334601777
+          ],
+          "speedup": 1.001302334601777,
+          "timed_cpu1_idle_min": 31.95876288659794,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.299820413999896
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9874902741340797,
+            0.9961144374195465,
+            0.9973681372107277,
+            0.9928614433484448,
+            0.9984887012908131
+          ],
+          "speedup": 0.9961144374195465,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.880927710999913
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 111,
+          "pairs": [
+            0.9930472610330128,
+            0.9976621875696898,
+            1.0028153892412832,
+            0.9898337859796673,
+            1.0017173006449351
+          ],
+          "speedup": 0.9976621875696898,
+          "timed_cpu1_idle_min": 66.33663366336634,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.727927847000046
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 111,
+          "pairs": [
+            1.003504463241176,
+            0.990643737329469,
+            0.9917287855408647,
+            0.9976006425094851,
+            0.9941780972458414
+          ],
+          "speedup": 0.9941780972458414,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.734088961999987
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9945023339780561,
+            0.9875137743124891,
+            1.009077834809152,
+            0.9884403576399773,
+            0.997171690929396
+          ],
+          "speedup": 0.9945023339780561,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8878911049998806
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 110,
+          "pairs": [
+            0.9998390062092585,
+            0.993245393316995,
+            0.993787751301205,
+            1.0014543478620326,
+            0.9982709971970349
+          ],
+          "speedup": 0.9982709971970349,
+          "timed_cpu1_idle_min": 57.42574257425743,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.836823113999799
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 110,
+          "pairs": [
+            1.0110460580026066,
+            0.9927909814227337,
+            0.9943014937496875,
+            0.9979304760547462,
+            1.0012295552640342
+          ],
+          "speedup": 0.9979304760547462,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.680119860000104
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 4617,
+          "pairs": [
+            1.0147338033201698,
+            1.0128726976317077,
+            1.0147981108573774,
+            1.011563574329373,
+            1.0117232603071795
+          ],
+          "speedup": 1.0128726976317077,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.872697979999884
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 2505,
+          "pairs": [
+            1.0009532168613298,
+            1.0039969590540647,
+            1.0064968441157431,
+            1.0041462360527051,
+            1.0050074820353219
+          ],
+          "speedup": 1.0041462360527051,
+          "timed_cpu1_idle_min": 99.21259842519684,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.743281298000056
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 2543,
+          "pairs": [
+            1.0020458750069103,
+            1.0080271349788057,
+            1.007579187215793,
+            1.008126063676277,
+            1.0087037267954049
+          ],
+          "speedup": 1.0080271349788057,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.935661118000098
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 1811,
+          "pairs": [
+            1.4202414425613434,
+            1.4255366341792626,
+            1.4221328751409068,
+            1.4242616400481287,
+            1.427138297032725
+          ],
+          "speedup": 1.4242616400481287,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 15.531533122999917
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 168,
+          "pairs": [
+            1.006510351514776,
+            0.9979712814363034,
+            1.0086020424084934,
+            0.9993098715398164,
+            1.0094108805843116
+          ],
+          "speedup": 1.006510351514776,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 13.571515813000133
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 155,
+          "pairs": [
+            1.001814062372049,
+            0.9992976956944606,
+            0.9995370768176756,
+            0.9992098622136597,
+            1.0034457076198595
+          ],
+          "speedup": 0.9995370768176756,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 13.613440514000104
+        },
+        {
+          "case": "2d-lanczos3",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 518,
+          "pairs": [
+            2.1873321431343635,
+            2.1838888413984967,
+            2.187332960407732,
+            2.1886300093196644,
+            2.200359451952478
+          ],
+          "speedup": 2.187332960407732,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 21.843095542000356
+        },
+        {
+          "case": "2d-spline64",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 433,
+          "pairs": [
+            2.167849677256334,
+            2.1733810962981144,
+            2.168366289910453,
+            2.1747263193401,
+            2.1686327447882316
+          ],
+          "speedup": 2.1686327447882316,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 22.128820072000053
+        },
+        {
+          "case": "2d-lanczos6",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 273,
+          "pairs": [
+            1.9548259669994388,
+            1.9643728122475668,
+            1.9594639222764103,
+            1.9460126707281875,
+            1.9538095603468124
+          ],
+          "speedup": 1.9548259669994388,
+          "timed_cpu1_idle_min": 98.828125,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 21.072208617999877
+        },
+        {
+          "case": "2d-lanczos6",
+          "mode": "supplemental",
+          "attempt": 1,
+          "iterations": 273,
+          "pairs": [
+            1.953988788601489,
+            1.95663898342847,
+            1.9547124373988605,
+            1.9535586151911932,
+            1.9594910612634235
+          ],
+          "speedup": 1.9547124373988605,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 21.05737101700015
+        }
+      ]
+    },
+    "amd": {
+      "model": "EPYC 9B45",
+      "machine_type": "c4d-highcpu-2",
+      "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+      "source_fingerprints": {
+        "baseline": "9166d9ac5c571dd69265e35dd69faa8890a5a013d78849fa9e23f1fc82e017c2",
+        "candidate": "fd79494b340d237cc62d3dfae6b01edf1a508c3f7323097267fe878156397806"
+      },
+      "binaries": {
+        "baseline": {
+          "driver_sha256": "996f17e4c59b9d26ac31c03198284beed109102804281234b1eb74d1d3837349",
+          "engine_sha256": "d535c6f4d4847aeabb67cb74d4c1e6104067447cc55d77b517fabd1bd66060da",
+          "plugin_sha256": "130b4fd2c58ae0a5ccb5268d3861a3b3ff7b1e88a1c8208233e45bfa58270088",
+          "capabilities": {
+            "avx2": true,
+            "avx512": true
+          }
+        },
+        "candidate": {
+          "driver_sha256": "9979bcfebf89315845d16416a4df555ab9302ac0ab5abb051b0aa750f671a7d4",
+          "engine_sha256": "056e053d360edfb8654f7c13063e255592458831e8c5a298001650763ef0052a",
+          "plugin_sha256": "82ae2ec018fbe9b01b2b9af50f018df40b28fc5443e8109e06fd61e1abf5f273",
+          "capabilities": {
+            "avx2": true,
+            "avx512": true
+          }
+        }
+      },
+      "selected": [
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 4026,
+          "pairs": [
+            0.995251751016509,
+            0.9943724307554909,
+            0.9992493043048194,
+            0.993352089062885,
+            0.9980700737188917
+          ],
+          "speedup": 0.995251751016509,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.923175618999949,
+          "median_ms_per_call": {
+            "baseline": 0.24248354893194238,
+            "candidate": 0.24321681967213116
+          },
+          "output_sha256": "6de369aec3440496225bcc9803ea29b340dac03b9098b72c6a3a1ca635b612e4"
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 4060,
+          "pairs": [
+            0.9993058742365194,
+            0.9946379862733394,
+            1.0020665138441298,
+            0.9967277417825281,
+            1.0039321361023699
+          ],
+          "speedup": 0.9993058742365194,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.118207158999894,
+          "median_ms_per_call": {
+            "baseline": 0.24520755024630542,
+            "candidate": 0.24524852536945813
+          },
+          "output_sha256": "6de369aec3440496225bcc9803ea29b340dac03b9098b72c6a3a1ca635b612e4"
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 2281,
+          "pairs": [
+            0.9887725398813745,
+            0.9895571319712929,
+            0.9824409236114721,
+            0.9856099664935248,
+            0.9847688472699875
+          ],
+          "speedup": 0.9856099664935248,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.966826480000009,
+          "median_ms_per_call": {
+            "baseline": 0.4267912349846559,
+            "candidate": 0.4330235646646208
+          },
+          "output_sha256": "d381080ec2a15edf69d142af575d635677c29b4d58001483215b551e88aa2883"
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2304,
+          "pairs": [
+            0.9949392472725581,
+            0.9883302347312426,
+            0.993095922660037,
+            0.9929611589352252,
+            0.994106814791156
+          ],
+          "speedup": 0.993095922660037,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.141424256999926,
+          "median_ms_per_call": {
+            "baseline": 0.42947286892361114,
+            "candidate": 0.432982546875
+          },
+          "output_sha256": "d381080ec2a15edf69d142af575d635677c29b4d58001483215b551e88aa2883"
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 2305,
+          "pairs": [
+            1.5733652667806488,
+            1.5771294455738512,
+            1.573888778718674,
+            1.5793511331728554,
+            1.5749400585373796
+          ],
+          "speedup": 1.5749400585373796,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 13.991556470999967,
+          "median_ms_per_call": {
+            "baseline": 0.7335573783080261,
+            "candidate": 0.4660008303687636
+          },
+          "output_sha256": "6a299bf6b81a6296310d1bfc1c1b8cf6c23b8efade8dffeeed6dd6392fd77331"
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2751,
+          "pairs": [
+            1.3453986724364713,
+            1.3271931473900995,
+            1.349824298363578,
+            1.360326989940346,
+            1.360305429853228
+          ],
+          "speedup": 1.349824298363578,
+          "timed_cpu1_idle_min": 99.01960784313725,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.028529856999967,
+          "median_ms_per_call": {
+            "baseline": 0.49337201781170487,
+            "candidate": 0.36736802435478005
+          },
+          "output_sha256": "6a299bf6b81a6296310d1bfc1c1b8cf6c23b8efade8dffeeed6dd6392fd77331"
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1768,
+          "pairs": [
+            1.6519039281134655,
+            1.606234870034004,
+            1.6446430807416486,
+            1.6504074017908068,
+            1.6397260118690764
+          ],
+          "speedup": 1.6446430807416486,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 13.419414755999924,
+          "median_ms_per_call": {
+            "baseline": 0.9294366272624434,
+            "candidate": 0.5635487341628959
+          },
+          "output_sha256": "a0e0b17b8f904e011082d0206cdc2e5d7b9387e50a39b0a73c88b00ff573c56e"
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 2191,
+          "pairs": [
+            1.4930013758361556,
+            1.5007441529744414,
+            1.4891200957486517,
+            1.5064452091269773,
+            1.4848458973584135
+          ],
+          "speedup": 1.4930013758361556,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.609347234000097,
+          "median_ms_per_call": {
+            "baseline": 0.6784104504792332,
+            "candidate": 0.45470120766773164
+          },
+          "output_sha256": "a0e0b17b8f904e011082d0206cdc2e5d7b9387e50a39b0a73c88b00ff573c56e"
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 173,
+          "pairs": [
+            1.025431177511672,
+            1.0562889598314724,
+            0.9951513274103214,
+            1.0448072328620788,
+            0.9751400702299239
+          ],
+          "speedup": 1.025431177511672,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.320404125999858,
+          "median_ms_per_call": {
+            "baseline": 5.729850306358381,
+            "candidate": 5.550730988439307
+          },
+          "output_sha256": "0e7143ddfd4769ab2637a2628b6b78b9e211e709da869f19adbf7366452d1ee0"
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 153,
+          "pairs": [
+            1.0050214894324985,
+            0.9562814752281662,
+            0.9245335507570877,
+            0.998386201148985,
+            1.0081730883138005
+          ],
+          "speedup": 0.998386201148985,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 15.350987081999847,
+          "median_ms_per_call": {
+            "baseline": 9.430519267973857,
+            "candidate": 9.69518443137255
+          },
+          "output_sha256": "0e7143ddfd4769ab2637a2628b6b78b9e211e709da869f19adbf7366452d1ee0"
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 159,
+          "pairs": [
+            1.0596667515073275,
+            1.0004264895814963,
+            1.0840665441348096,
+            0.9766467234639736,
+            1.0409259034301377
+          ],
+          "speedup": 1.0409259034301377,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.122707218999949,
+          "median_ms_per_call": {
+            "baseline": 6.071331635220126,
+            "candidate": 5.992891201257861
+          },
+          "output_sha256": "f153e35f1029e7acf4cd2db9e6b3012bfb3a1f16ec905b09f79be9977c08428e"
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 175,
+          "pairs": [
+            1.0022958635713533,
+            0.9569509081364058,
+            1.0097293292536877,
+            0.9876949852698943,
+            0.9979269597783708
+          ],
+          "speedup": 0.9979269597783708,
+          "timed_cpu1_idle_min": 99.07407407407408,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.216421898000135,
+          "median_ms_per_call": {
+            "baseline": 6.044776977142857,
+            "candidate": 6.030930782857142
+          },
+          "output_sha256": "f153e35f1029e7acf4cd2db9e6b3012bfb3a1f16ec905b09f79be9977c08428e"
+        },
+        {
+          "case": "height-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 159,
+          "pairs": [
+            0.9932098375589948,
+            1.0713443030447263,
+            1.0565228848602155,
+            1.0100922413168727,
+            0.9473247242736071
+          ],
+          "speedup": 1.0100922413168727,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.612541520999912,
+          "median_ms_per_call": {
+            "baseline": 6.886642144654088,
+            "candidate": 6.784400924528303
+          },
+          "output_sha256": "5cb2b3602688a713dac85c4a4e8bbbd113044d705414eb7c4715c7238b9798bb"
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 148,
+          "pairs": [
+            1.0237077481639225,
+            0.9440337555642226,
+            1.0204644124689652,
+            1.0667872600884272,
+            0.979125913911651
+          ],
+          "speedup": 1.0204644124689652,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.55426158299997,
+          "median_ms_per_call": {
+            "baseline": 6.764019317567567,
+            "candidate": 6.764659
+          },
+          "output_sha256": "5cb2b3602688a713dac85c4a4e8bbbd113044d705414eb7c4715c7238b9798bb"
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 103,
+          "pairs": [
+            0.968642686481478,
+            1.0069772013235458,
+            1.0157053035532047,
+            0.9342724332835617,
+            0.9295523259953071
+          ],
+          "speedup": 0.968642686481478,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 13.40220232999991,
+          "median_ms_per_call": {
+            "baseline": 12.183971533980582,
+            "candidate": 12.411140446601943
+          },
+          "output_sha256": "d1437f1e4c05be8023a778d20200f5db19ddc0b93fc26af4eac2536993223ff1"
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 92,
+          "pairs": [
+            1.026307223816507,
+            0.983773896366758,
+            1.0064890463183964,
+            1.0168837422293797,
+            0.9051240622679063
+          ],
+          "speedup": 1.0064890463183964,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 7.584963687000027,
+          "median_ms_per_call": {
+            "baseline": 7.571488706521739,
+            "candidate": 7.52267372826087
+          },
+          "output_sha256": "d1437f1e4c05be8023a778d20200f5db19ddc0b93fc26af4eac2536993223ff1"
+        },
+        {
+          "case": "2d-lanczos3",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 395,
+          "pairs": [
+            1.7526191367053305,
+            1.8189642767205096,
+            1.6783526293416018,
+            1.690386868882725,
+            1.829391846133008
+          ],
+          "speedup": 1.7526191367053305,
+          "timed_cpu1_idle_min": 99.50738916256158,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 17.52395678799985,
+          "median_ms_per_call": {
+            "baseline": 5.120177215189874,
+            "candidate": 2.9771139240506326
+          },
+          "output_sha256": "6d99f591ad582cb5c10ba52b1f62ac7c96f6974246c118cfe4a1e28a8424f7ad"
+        },
+        {
+          "case": "2d-spline64",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 334,
+          "pairs": [
+            1.7401318346470158,
+            1.675432260727289,
+            1.7154306958262466,
+            1.7643979057591623,
+            1.7981121729594232
+          ],
+          "speedup": 1.7401318346470158,
+          "timed_cpu1_idle_min": 99.56140350877193,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 19.651534594000168,
+          "median_ms_per_call": {
+            "baseline": 6.806167664670659,
+            "candidate": 3.851676646706587
+          },
+          "output_sha256": "b57da5e996be4e97bf5077b63e61323cb116ca9f98b033e99d814c3b84a04abb"
+        },
+        {
+          "case": "2d-lanczos6",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 199,
+          "pairs": [
+            1.4284890907849932,
+            1.4638048857120416,
+            1.4514530548475928,
+            1.4732260995711712,
+            1.4386393952867942
+          ],
+          "speedup": 1.4514530548475928,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 18.112150106000172,
+          "median_ms_per_call": {
+            "baseline": 9.364673366834172,
+            "candidate": 6.397487437185929
+          },
+          "output_sha256": "487f6a6d42cc26fe35e0f6bbe539c903c4c996551824f955ebe61cb82aade18d"
+        }
+      ],
+      "all_summary_groups": [
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9545553705723636,
+            1.075750026524059,
+            1.0174566247684589,
+            0.9694524317869525,
+            0.9957867254903765
+          ],
+          "speedup": 0.9957867254903765,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.13021024600016062
+        },
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 4026,
+          "pairs": [
+            1.002398667516794,
+            0.9967355755571756,
+            0.9945835259346687,
+            0.9933722118725264,
+            0.9963486074892683
+          ],
+          "speedup": 0.9963486074892683,
+          "timed_cpu1_idle_min": 98.9795918367347,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.82508722700004
+        },
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 4026,
+          "pairs": [
+            0.9997343848549434,
+            0.992831782625535,
+            0.995629282124872,
+            0.997419959757343,
+            0.9978744561498167
+          ],
+          "speedup": 0.997419959757343,
+          "timed_cpu1_idle_min": 76.28865979381443,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.836202359000026
+        },
+        {
+          "case": "width-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 4026,
+          "pairs": [
+            0.995251751016509,
+            0.9943724307554909,
+            0.9992493043048194,
+            0.993352089062885,
+            0.9980700737188917
+          ],
+          "speedup": 0.995251751016509,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.923175618999949
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9861105959527986,
+            1.007063493220876,
+            0.9937715102701432,
+            0.8402093155173888,
+            0.9995829591912536
+          ],
+          "speedup": 0.9937715102701432,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.1428745720002098
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 4060,
+          "pairs": [
+            0.9990741703076513,
+            1.0039732689345713,
+            0.998731383866775,
+            0.9931408408279967,
+            1.0000478586940347
+          ],
+          "speedup": 0.9990741703076513,
+          "timed_cpu1_idle_min": 98.98989898989899,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.031581908999897
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 4060,
+          "pairs": [
+            0.9954505113799229,
+            0.9988206795465204,
+            0.9958524155236265,
+            0.9930318621958978,
+            0.9953394841270606
+          ],
+          "speedup": 0.9954505113799229,
+          "timed_cpu1_idle_min": 85.85858585858585,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.03697867400001
+        },
+        {
+          "case": "width-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 4060,
+          "pairs": [
+            0.9993058742365194,
+            0.9946379862733394,
+            1.0020665138441298,
+            0.9967277417825281,
+            1.0039321361023699
+          ],
+          "speedup": 0.9993058742365194,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.118207158999894
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9892860326632921,
+            0.9791839688070788,
+            1.0847714419976342,
+            0.9747302910911384,
+            0.9989101343007493
+          ],
+          "speedup": 0.9892860326632921,
+          "timed_cpu1_idle_min": null,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.16731560400012313
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2281,
+          "pairs": [
+            0.9919304197875305,
+            0.994769415376719,
+            0.9925939801531648,
+            0.9841212615967952,
+            0.9852430879465433
+          ],
+          "speedup": 0.9919304197875305,
+          "timed_cpu1_idle_min": 64.28571428571429,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.937335985000118
+        },
+        {
+          "case": "width-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 2281,
+          "pairs": [
+            0.9887725398813745,
+            0.9895571319712929,
+            0.9824409236114721,
+            0.9856099664935248,
+            0.9847688472699875
+          ],
+          "speedup": 0.9856099664935248,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 9.966826480000009
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.0009611675050143,
+            1.1014935329489357,
+            0.9935828103823292,
+            0.9475575907719472,
+            0.9681931103297213
+          ],
+          "speedup": 0.9935828103823292,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.17752359599990086
+        },
+        {
+          "case": "width-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2304,
+          "pairs": [
+            0.9949392472725581,
+            0.9883302347312426,
+            0.993095922660037,
+            0.9929611589352252,
+            0.994106814791156
+          ],
+          "speedup": 0.993095922660037,
+          "timed_cpu1_idle_min": 99.00990099009901,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 10.141424256999926
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.5442558982221775,
+            1.5457863772315386,
+            1.414916529588535,
+            1.542036919401298,
+            1.4813408055402508
+          ],
+          "speedup": 1.542036919401298,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.18948166200016203
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1959,
+          "pairs": [
+            1.5759544156403733,
+            1.5732731884755158,
+            1.5859053824237122,
+            1.5906520401647053,
+            1.563468620879306
+          ],
+          "speedup": 1.5759544156403733,
+          "timed_cpu1_idle_min": 74.48275862068965,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.9986628260001
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 1959,
+          "pairs": [
+            1.5813714012072186,
+            1.4822728567315369,
+            1.5721199734037874,
+            1.5754684271267765,
+            1.6160856726673194
+          ],
+          "speedup": 1.5754684271267765,
+          "timed_cpu1_idle_min": 97.95918367346938,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.932220634000032
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 1959,
+          "pairs": [
+            1.569987805068354,
+            1.6045896301179305,
+            1.502276558475741,
+            1.512538346565065,
+            1.5733912145390014
+          ],
+          "speedup": 1.569987805068354,
+          "timed_cpu1_idle_min": 74.15730337078652,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 11.93832483899996
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.3378104210385318,
+            1.3639821654882227,
+            1.337310816493659,
+            1.3232185147390108,
+            1.3036090163397904
+          ],
+          "speedup": 1.337310816493659,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.18012146199998824
+        },
+        {
+          "case": "width-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2751,
+          "pairs": [
+            1.3453986724364713,
+            1.3271931473900995,
+            1.349824298363578,
+            1.360326989940346,
+            1.360305429853228
+          ],
+          "speedup": 1.349824298363578,
+          "timed_cpu1_idle_min": 99.01960784313725,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.028529856999967
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.5972339369405055,
+            1.6251352352642128,
+            1.5587422405872544,
+            1.5477824595275056,
+            1.5411259150489105
+          ],
+          "speedup": 1.5587422405872544,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.21032341599993742
+        },
+        {
+          "case": "width-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 1768,
+          "pairs": [
+            1.6519039281134655,
+            1.606234870034004,
+            1.6446430807416486,
+            1.6504074017908068,
+            1.6397260118690764
+          ],
+          "speedup": 1.6446430807416486,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 13.419414755999924
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.4379678091450405,
+            1.4982864453378184,
+            1.485661914431831,
+            1.456354082209796,
+            1.4541310868853528
+          ],
+          "speedup": 1.456354082209796,
+          "timed_cpu1_idle_min": null,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 0.19953575299996373
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 2191,
+          "pairs": [
+            1.4768954431564414,
+            1.4873366804709078,
+            1.4841514368804025,
+            1.481576597799918,
+            1.4914206983477134
+          ],
+          "speedup": 1.4841514368804025,
+          "timed_cpu1_idle_min": 61.904761904761905,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.549265230999936
+        },
+        {
+          "case": "width-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 2191,
+          "pairs": [
+            1.4930013758361556,
+            1.5007441529744414,
+            1.4891200957486517,
+            1.5064452091269773,
+            1.4848458973584135
+          ],
+          "speedup": 1.4930013758361556,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 12.609347234000097
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9438479733927236,
+            1.0338253298631435,
+            1.1403397261431687,
+            0.9822536122967447,
+            1.0227501541998094
+          ],
+          "speedup": 1.0227501541998094,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.7118566359999932
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 173,
+          "pairs": [
+            0.986492654437789,
+            1.0965717231651297,
+            1.0261925336233237,
+            0.9679609683030039,
+            0.9945654742212516
+          ],
+          "speedup": 0.9945654742212516,
+          "timed_cpu1_idle_min": 60.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.40878158800001
+        },
+        {
+          "case": "height-bilinear-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 173,
+          "pairs": [
+            1.025431177511672,
+            1.0562889598314724,
+            0.9951513274103214,
+            1.0448072328620788,
+            0.9751400702299239
+          ],
+          "speedup": 1.025431177511672,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.320404125999858
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.1842486530171927,
+            1.0129056577791462,
+            0.9894813074308323,
+            0.9702834704597686,
+            1.0058426006409198
+          ],
+          "speedup": 1.0058426006409198,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.7457280870000886
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 184,
+          "pairs": [
+            0.931194747222592,
+            0.9915203440785877,
+            1.036462083898096,
+            1.0230017074374298,
+            0.9970072925772172
+          ],
+          "speedup": 0.9970072925772172,
+          "timed_cpu1_idle_min": 77.77777777777777,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.41738379200001
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 184,
+          "pairs": [
+            0.9919668214680968,
+            0.9718920734598295,
+            0.9931448267861375,
+            1.044790827697131,
+            0.9601351813887026
+          ],
+          "speedup": 0.9919668214680968,
+          "timed_cpu1_idle_min": 69.1588785046729,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.383535050000091
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 184,
+          "pairs": [
+            0.9011873482627865,
+            0.9601655275662682,
+            1.010127522252143,
+            1.0208100644258846,
+            0.97357036166521
+          ],
+          "speedup": 0.97357036166521,
+          "timed_cpu1_idle_min": 96.19047619047619,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.409719786000096
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.03150774194125,
+            0.9632598596216304,
+            1.089741189001694,
+            1.024834530421487,
+            0.9843270457006045
+          ],
+          "speedup": 1.024834530421487,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.7692059350001728
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 159,
+          "pairs": [
+            0.9917623961798224,
+            1.0965955038738062,
+            1.0458179239706096,
+            1.0191637143962164,
+            0.972780829774724
+          ],
+          "speedup": 1.0191637143962164,
+          "timed_cpu1_idle_min": 86.66666666666667,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.995814055999972
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 159,
+          "pairs": [
+            1.0391815387710495,
+            1.000441405366053,
+            0.9245459656638445,
+            1.0034099413370174,
+            1.0447332314791122
+          ],
+          "speedup": 1.0034099413370174,
+          "timed_cpu1_idle_min": 67.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.662092049999956
+        },
+        {
+          "case": "height-bicubic-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 159,
+          "pairs": [
+            1.0596667515073275,
+            1.0004264895814963,
+            1.0840665441348096,
+            0.9766467234639736,
+            1.0409259034301377
+          ],
+          "speedup": 1.0409259034301377,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.122707218999949
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9710797524486176,
+            0.9769983711516224,
+            0.9811553592367884,
+            1.0636370622351825,
+            1.048660558667701
+          ],
+          "speedup": 0.9811553592367884,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8271899000001213
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 175,
+          "pairs": [
+            0.9842761573075773,
+            0.9809715135123531,
+            1.071924446926898,
+            1.0140681866565853,
+            0.9855260208054829
+          ],
+          "speedup": 0.9855260208054829,
+          "timed_cpu1_idle_min": 66.66666666666667,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.04318506200002
+        },
+        {
+          "case": "height-bicubic-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 175,
+          "pairs": [
+            1.0022958635713533,
+            0.9569509081364058,
+            1.0097293292536877,
+            0.9876949852698943,
+            0.9979269597783708
+          ],
+          "speedup": 0.9979269597783708,
+          "timed_cpu1_idle_min": 99.07407407407408,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.216421898000135
+        },
+        {
+          "case": "height-lanczos3-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.8125947362459052,
+            0.9381364440846123,
+            0.8735378378322317,
+            0.9450867939748696,
+            1.018139814027734
+          ],
+          "speedup": 0.9381364440846123,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.7594170700001541
+        },
+        {
+          "case": "height-lanczos3-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 159,
+          "pairs": [
+            0.9932098375589948,
+            1.0713443030447263,
+            1.0565228848602155,
+            1.0100922413168727,
+            0.9473247242736071
+          ],
+          "speedup": 1.0100922413168727,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.612541520999912
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.0023037010703522,
+            1.0393759942953726,
+            0.8623184158264415,
+            0.896977397062894,
+            1.0136653861412583
+          ],
+          "speedup": 1.0023037010703522,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.7775689979998788
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 148,
+          "pairs": [
+            1.0491201504400207,
+            0.9949610960195594,
+            0.9748607233104275,
+            0.9801482882118346,
+            1.010612371302218
+          ],
+          "speedup": 0.9949610960195594,
+          "timed_cpu1_idle_min": 50.495049504950494,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.513679249000006
+        },
+        {
+          "case": "height-lanczos3-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 148,
+          "pairs": [
+            1.0237077481639225,
+            0.9440337555642226,
+            1.0204644124689652,
+            1.0667872600884272,
+            0.979125913911651
+          ],
+          "speedup": 1.0204644124689652,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 10.55426158299997
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            0.9062015719446558,
+            1.0112732788871908,
+            0.8263888957054096,
+            1.1371697498974311,
+            1.0048048745156613
+          ],
+          "speedup": 1.0048048745156613,
+          "timed_cpu1_idle_min": 0.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.8984270559999459
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 129,
+          "pairs": [
+            1.0621198107372976,
+            0.8673634805926275,
+            0.981589703426682,
+            1.0147775929457639,
+            0.9782625531117634
+          ],
+          "speedup": 0.981589703426682,
+          "timed_cpu1_idle_min": 77.31958762886597,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.110481206999793
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 129,
+          "pairs": [
+            0.9892085648503526,
+            0.9500404445935008,
+            1.0298878204669488,
+            0.9768293950978056,
+            0.9779305015045614
+          ],
+          "speedup": 0.9779305015045614,
+          "timed_cpu1_idle_min": 70.27027027027027,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.375765465000086
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 129,
+          "pairs": [
+            0.8368119508342108,
+            1.0192221358361204,
+            1.1334655976979042,
+            0.8153741222657311,
+            1.1076909555141443
+          ],
+          "speedup": 1.0192221358361204,
+          "timed_cpu1_idle_min": 97.97979797979798,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 11.887567441000101
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "legacy",
+          "attempt": 0,
+          "iterations": 3,
+          "pairs": [
+            1.011332442560921,
+            0.9617288001636791,
+            1.0216810163532395,
+            0.9639304677903805,
+            0.7907735531499424
+          ],
+          "speedup": 0.9639304677903805,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 0.9513255350000236
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 0,
+          "iterations": 92,
+          "pairs": [
+            0.8789023392962965,
+            1.1879118267019773,
+            0.9423765368458435,
+            0.9610743150868138,
+            0.9987292310129903
+          ],
+          "speedup": 0.9610743150868138,
+          "timed_cpu1_idle_min": 83.33333333333333,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 8.359738102999927
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 1,
+          "iterations": 92,
+          "pairs": [
+            0.981520348992473,
+            1.003947055026073,
+            0.9246885734870295,
+            0.9619481412012463,
+            1.015443618573736
+          ],
+          "speedup": 0.981520348992473,
+          "timed_cpu1_idle_min": 50.72463768115942,
+          "environment_valid": false,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 7.71532824399992
+        },
+        {
+          "case": "height-spline64-avx512-to-avx512",
+          "mode": "stable",
+          "attempt": 2,
+          "iterations": 92,
+          "pairs": [
+            1.026307223816507,
+            0.983773896366758,
+            1.0064890463183964,
+            1.0168837422293797,
+            0.9051240622679063
+          ],
+          "speedup": 1.0064890463183964,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 7.584963687000027
+        },
+        {
+          "case": "width-lanczos3-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 2305,
+          "pairs": [
+            1.5733652667806488,
+            1.5771294455738512,
+            1.573888778718674,
+            1.5793511331728554,
+            1.5749400585373796
+          ],
+          "speedup": 1.5749400585373796,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 13.991556470999967
+        },
+        {
+          "case": "height-bilinear-avx512-to-avx512",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 153,
+          "pairs": [
+            1.0050214894324985,
+            0.9562814752281662,
+            0.9245335507570877,
+            0.998386201148985,
+            1.0081730883138005
+          ],
+          "speedup": 0.998386201148985,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 15.350987081999847
+        },
+        {
+          "case": "height-spline64-avx2-to-avx2",
+          "mode": "stable-repair",
+          "attempt": 0,
+          "iterations": 103,
+          "pairs": [
+            0.968642686481478,
+            1.0069772013235458,
+            1.0157053035532047,
+            0.9342724332835617,
+            0.9295523259953071
+          ],
+          "speedup": 0.968642686481478,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": true,
+          "wall_seconds": 13.40220232999991
+        },
+        {
+          "case": "2d-lanczos3",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 395,
+          "pairs": [
+            1.7526191367053305,
+            1.8189642767205096,
+            1.6783526293416018,
+            1.690386868882725,
+            1.829391846133008
+          ],
+          "speedup": 1.7526191367053305,
+          "timed_cpu1_idle_min": 99.50738916256158,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 17.52395678799985
+        },
+        {
+          "case": "2d-spline64",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 334,
+          "pairs": [
+            1.7401318346470158,
+            1.675432260727289,
+            1.7154306958262466,
+            1.7643979057591623,
+            1.7981121729594232
+          ],
+          "speedup": 1.7401318346470158,
+          "timed_cpu1_idle_min": 99.56140350877193,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 19.651534594000168
+        },
+        {
+          "case": "2d-lanczos6",
+          "mode": "supplemental",
+          "attempt": 0,
+          "iterations": 199,
+          "pairs": [
+            1.4284890907849932,
+            1.4638048857120416,
+            1.4514530548475928,
+            1.4732260995711712,
+            1.4386393952867942
+          ],
+          "speedup": 1.4514530548475928,
+          "timed_cpu1_idle_min": 100.0,
+          "environment_valid": true,
+          "bit_exact": true,
+          "actual_f64": false,
+          "wall_seconds": 18.112150106000172
+        }
+      ]
+    }
+  }
+}

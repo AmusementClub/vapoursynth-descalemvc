@@ -136,7 +136,8 @@ private:
 
 [[nodiscard]] dsmvc::AxisPlan make_plan(
     std::int32_t source, std::int32_t destination, double shift = 0.125,
-    dsmvc::KernelKind kernel = dsmvc::KernelKind::bicubic) {
+    dsmvc::KernelKind kernel = dsmvc::KernelKind::bicubic,
+    std::int32_t taps = 3) {
     dsmvc::AxisRequest request;
     request.source_size = source;
     request.destination_size = destination;
@@ -145,7 +146,7 @@ private:
     request.kernel.kind = kernel;
     request.kernel.b = 0.0;
     request.kernel.c = 0.5;
-    if (kernel == dsmvc::KernelKind::lanczos) request.kernel.taps = 3;
+    if (kernel == dsmvc::KernelKind::lanczos) request.kernel.taps = taps;
     request.border = dsmvc::BorderMode::symmetric;
     request.f64_mode = dsmvc::F64Mode::float32_only;
     return dsmvc::build_axis_plan(request);
@@ -333,9 +334,15 @@ void test_float_2d(
 template <class Sample>
 void test_integer_2d(
     dsmvc::CpuPath path, std::int32_t lanes, std::int32_t residue,
-    const dsmvc::IntegerConversion &conversion, std::uint32_t input_maximum) {
-    const auto horizontal = make_plan(2 * lanes + residue, lanes + residue);
-    const auto vertical = make_plan(2 * lanes + 3, lanes + 1, -0.25);
+    const dsmvc::IntegerConversion &conversion, std::uint32_t input_maximum,
+    std::int32_t taps = 0, std::int32_t vertical_taps = 0) {
+    const auto horizontal = make_plan(
+        2 * lanes + residue, lanes + residue, 0.125,
+        taps ? dsmvc::KernelKind::lanczos : dsmvc::KernelKind::bicubic,
+        taps ? taps : 3);
+    const auto vertical = make_plan(2 * lanes + 3, lanes + 1, -0.25,
+        vertical_taps ? dsmvc::KernelKind::lanczos : dsmvc::KernelKind::bicubic,
+        vertical_taps ? vertical_taps : 3);
     const std::ptrdiff_t input_stride = horizontal.source_size + 3;
     const std::ptrdiff_t output_stride = horizontal.destination_size + 5;
     GuardPageBuffer<Sample> input(matrix_elements(
@@ -481,11 +488,187 @@ void test_short_strides(ExecutorType &executor, std::string_view label) {
     }, std::string{label} + " parallel columns pre-dispatch stride");
 }
 
+void test_wide_rhs_guarded_buffers(dsmvc::CpuPath path, std::int32_t lanes) {
+    struct Fixture {
+        dsmvc::KernelKind kernel;
+        std::int32_t taps;
+        std::int32_t first_span;
+        std::int32_t second_span;
+    };
+    const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
+    const dsmvc::CpuExecutor executor(path);
+    for (const auto fixture : {
+             Fixture{dsmvc::KernelKind::lanczos, 3, 6, 7},
+             Fixture{dsmvc::KernelKind::spline64, 4, 9, 10},
+             Fixture{dsmvc::KernelKind::lanczos, 6, 13, 14}}) {
+        for (const std::int32_t width : {169, 170}) {
+            const auto horizontal = make_plan(
+                192, width, 0.125, fixture.kernel, fixture.taps);
+            const auto vertical = make_plan(
+                64, 56, -0.125, fixture.kernel, fixture.taps);
+            bool first_seen = false;
+            bool second_seen = false;
+            for (std::int32_t i = 0; i < width; ++i) {
+                const auto begin = horizontal.transpose_offsets[i];
+                const auto end = horizontal.transpose_offsets[i + 1];
+                if (begin == end) continue;
+                const auto span = horizontal.transpose_indices[end - 1]
+                    - horizontal.transpose_indices[begin] + 1;
+                first_seen |= span == fixture.first_span;
+                second_seen |= span == fixture.second_span;
+            }
+            require(first_seen && second_seen,
+                    "wide RHS fixture must cover both specialized spans");
+            for (const bool two_dimensional : {false, true}) {
+                const auto input_rows = two_dimensional
+                    ? vertical.source_size : 2 * lanes + 1;
+                const auto output_rows = two_dimensional
+                    ? vertical.destination_size : input_rows;
+                const std::ptrdiff_t input_stride = 192 + 3;
+                const std::ptrdiff_t output_stride = width + 5;
+                GuardPageBuffer<float> input(matrix_elements(
+                    input_rows, input_stride, horizontal.source_size));
+                GuardPageBuffer<float> output(matrix_elements(
+                    output_rows, output_stride, width));
+                std::vector<float> reference(output.size());
+                for (std::uint32_t revision : {0U, 1U}) {
+                    fill_input(input.data(), input_rows, input_stride,
+                               horizontal.source_size, revision);
+                    std::fill_n(output.data(), output.size(),
+                                output_sentinel<float>());
+                    std::fill(reference.begin(), reference.end(),
+                              output_sentinel<float>());
+                    const auto execute = [&](const dsmvc::CpuExecutor &e,
+                                             float *destination) {
+                        if (two_dimensional) {
+                            e.inverse_2d(horizontal, vertical, input.data(),
+                                input_stride, destination, output_stride);
+                        } else {
+                            e.inverse_rows(horizontal, input.data(), input_stride,
+                                destination, output_stride, input_rows);
+                        }
+                    };
+                    execute(scalar, reference.data());
+                    execute(executor, output.data());
+                    require_float_agreement(reference.data(), output.data(),
+                        output_rows, width, output_stride, "wide RHS buffers");
+                    require_padding_unchanged(output.data(), output_rows,
+                        output_stride, width, output_sentinel<float>(),
+                        "wide RHS buffers");
+                }
+            }
+        }
+    }
+}
+
+void test_wide_column_groups(dsmvc::CpuPath path) {
+    const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
+    const dsmvc::CpuExecutor executor(path);
+    std::vector<std::int32_t> widths;
+    for (std::int32_t width = 1; width <= 35; ++width) widths.push_back(width);
+    for (const auto width : {63, 64, 65, 1023, 1024, 1025, 1041}) {
+        widths.push_back(width);
+    }
+    for (const auto destination : {12, 13, 56}) {
+        const auto plan = make_plan(64, destination, -0.125,
+                                   dsmvc::KernelKind::lanczos, 6);
+        require(plan.half_bandwidth == 11,
+                "column group fixture must exercise B11");
+        for (const auto columns : widths) {
+            const std::ptrdiff_t stride = columns + 3;
+            GuardPageBuffer<float> input(matrix_elements(
+                plan.source_size, stride, columns));
+            GuardPageBuffer<float> output(matrix_elements(
+                plan.destination_size, stride, columns));
+            std::vector<float> reference(output.size());
+            fill_input(input.data(), plan.source_size, stride, columns, 0U);
+            for (const auto revision : {0, 1}) {
+                if (revision != 0) {
+                    for (std::int32_t row = 0; row < plan.source_size; ++row) {
+                        for (std::int32_t column = 0; column < columns; ++column) {
+                            auto &value = input.data()[row * stride + column];
+                            value = 0.25F - value;
+                        }
+                    }
+                }
+                std::fill_n(output.data(), output.size(), output_sentinel<float>());
+                std::fill(reference.begin(), reference.end(), output_sentinel<float>());
+                scalar.inverse_columns(plan, input.data(), stride,
+                                       reference.data(), stride, columns);
+                executor.inverse_columns(plan, input.data(), stride,
+                                         output.data(), stride, columns);
+                require_float_agreement(reference.data(), output.data(),
+                    plan.destination_size, columns, stride, "wide column groups");
+                require_padding_unchanged(output.data(), plan.destination_size,
+                    stride, columns, output_sentinel<float>(), "wide column groups");
+            }
+        }
+    }
+}
+
+void test_simd_workspace_reuse(dsmvc::CpuPath path, std::int32_t lanes) {
+    test_wide_rhs_guarded_buffers(path, lanes);
+    test_wide_column_groups(path);
+    const dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
+    const dsmvc::CpuExecutor executor(path);
+    // Exercise B5/B7/B9/B11 while both private buffers grow
+    // and shrink. Include short rows, SIMD block tails, and minimal systems.
+    for (const auto residue : {1, 3, 15, 31}) {
+        test_integer_2d<std::uint8_t>(path, 32, residue,
+            {0.0F, 1.0F / 255.0F, 255.0F, 0.0F, 255U}, 255U, 6, 6);
+        test_integer_2d<std::uint16_t>(path, 32, residue,
+            {0.0F, 1.0F / 65535.0F, 65535.0F, 0.0F, 65535U}, 65535U, 6, 6);
+    }
+    for (const std::int32_t taps : {3, 4, 5, 6}) {
+        for (const std::int32_t width :
+             {2 * taps, 17, 2 * taps + 1, 31, 16, 33, 2 * taps + 2}) {
+            const auto plan = make_plan(40 + width, width, 0.125,
+                                        dsmvc::KernelKind::lanczos, taps);
+            require(plan.half_bandwidth == 2 * taps - 1,
+                    "workspace fixture must use the requested wide band");
+            for (const std::int32_t rows :
+                 {lanes - 1, lanes, lanes + 1, 2 * lanes - 1,
+                  2 * lanes, 2 * lanes + 1}) {
+                const std::ptrdiff_t input_stride = plan.source_size + 3;
+                const std::ptrdiff_t output_stride = width + 5;
+                GuardPageBuffer<float> input(matrix_elements(
+                    rows, input_stride, plan.source_size));
+                GuardPageBuffer<float> output(matrix_elements(
+                    rows, output_stride, width));
+                std::fill_n(output.data(), output.size(), output_sentinel<float>());
+                fill_input(input.data(), rows, input_stride, plan.source_size, 0U);
+                std::vector<float> reference(output.size(), output_sentinel<float>());
+                scalar.inverse_rows(plan, input.data(), input_stride,
+                                    reference.data(), output_stride, rows);
+                executor.inverse_rows(plan, input.data(), input_stride,
+                                      output.data(), output_stride, rows);
+                require_float_agreement(reference.data(), output.data(), rows,
+                                        width, output_stride, "SIMD workspace reuse");
+                require_padding_unchanged(output.data(), rows, output_stride,
+                                          width, output_sentinel<float>(),
+                                          "SIMD workspace reuse");
+            }
+        }
+    }
+    for (const std::int32_t taps : {3, 4, 5, 6}) {
+        for (const std::int32_t residue : {1, lanes - 1}) {
+            test_integer_2d<std::uint8_t>(
+                path, 2 * lanes + 8, residue,
+                {0.0F, 1.0F / 255.0F, 255.0F, 0.0F, 255U}, 255U, taps);
+            test_integer_2d<std::uint16_t>(
+                path, 2 * lanes + 8, residue,
+                {0.0F, 1.0F / 65535.0F, 65535.0F, 0.0F, 65535U},
+                65535U, taps);
+        }
+    }
+}
+
 void test_cpu_paths_and_strides() {
     dsmvc::CpuExecutor scalar(dsmvc::CpuPath::scalar);
     test_short_strides(scalar, "scalar");
 
     if (dsmvc::cpu_avx512_available()) {
+        test_simd_workspace_reuse(dsmvc::CpuPath::avx512, 16);
         dsmvc::CpuExecutor avx512(dsmvc::CpuPath::avx512);
         test_short_strides(avx512, "AVX-512");
         for (std::int32_t residue = 1; residue < 16; ++residue) {
@@ -500,6 +683,7 @@ void test_cpu_paths_and_strides() {
         }
     }
     if (dsmvc::cpu_avx2_available()) {
+        test_simd_workspace_reuse(dsmvc::CpuPath::avx2, 8);
         dsmvc::CpuExecutor avx2(dsmvc::CpuPath::avx2);
         test_short_strides(avx2, "AVX2");
         for (std::int32_t residue = 1; residue < 8; ++residue) {
@@ -524,6 +708,7 @@ void test_cpu_paths_and_strides() {
         }
     }
     if (dsmvc::cpu_neon_available()) {
+        test_simd_workspace_reuse(dsmvc::CpuPath::neon, 4);
         dsmvc::CpuExecutor neon(dsmvc::CpuPath::neon);
         test_short_strides(neon, "NEON");
         for (std::int32_t residue = 1; residue < 4; ++residue) {

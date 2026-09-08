@@ -14,6 +14,51 @@ __device__ __forceinline__ std::uint32_t minimum(
     return left < right ? left : right;
 }
 
+template <std::uint32_t Count>
+__device__ __forceinline__ float accumulate_rhs_fixed(
+    const std::int32_t *__restrict__ indices,
+    const float *__restrict__ weights, const float *__restrict__ input,
+    std::uint32_t input_stride, std::uint32_t begin) {
+    float sum = 0.0F;
+#pragma unroll
+    for (std::uint32_t tap = 0U; tap < Count; ++tap) {
+        const auto source = static_cast<std::uint32_t>(indices[begin + tap]);
+        sum = fmaf(weights[begin + tap], input[source * input_stride], sum);
+    }
+    return sum;
+}
+
+// Count sparse entries, not the CPU's dense source span. Keep the original
+// entry order and one accumulator; neither zero padding nor reassociation is
+// permitted. Unlisted bands/counts retain the original dynamic loop. This is
+// limited to fused inverse kernels; standalone RHS kernels keep their smaller
+// register footprint.
+template <std::uint32_t FixedBandwidth>
+__device__ __forceinline__ float accumulate_rhs_span(
+    const std::int32_t *__restrict__ indices,
+    const float *__restrict__ weights, const float *__restrict__ input,
+    std::uint32_t input_stride, std::uint32_t begin, std::uint32_t end) {
+    const std::uint32_t count = end - begin;
+    if constexpr (FixedBandwidth == 5U) {
+        if (count == 7U) return accumulate_rhs_fixed<7U>(
+            indices, weights, input, input_stride, begin);
+        if (count == 6U) return accumulate_rhs_fixed<6U>(
+            indices, weights, input, input_stride, begin);
+    }
+    if constexpr (FixedBandwidth == 7U) {
+        if (count == 9U) return accumulate_rhs_fixed<9U>(
+            indices, weights, input, input_stride, begin);
+        if (count == 10U) return accumulate_rhs_fixed<10U>(
+            indices, weights, input, input_stride, begin);
+    }
+    float sum = 0.0F;
+    for (std::uint32_t position = begin; position < end; ++position) {
+        const auto source = static_cast<std::uint32_t>(indices[position]);
+        sum = fmaf(weights[position], input[source * input_stride], sum);
+    }
+    return sum;
+}
+
 template <std::uint32_t Bandwidth, bool UpperAscending, bool Precomputed>
 __device__ __forceinline__ void inverse_axis_ring(
     const kernel::AxisPlanDescriptor &plan,
@@ -36,13 +81,9 @@ __device__ __forceinline__ void inverse_axis_ring(
         } else {
             const std::uint32_t begin = transpose_offsets[index];
             const std::uint32_t end = transpose_offsets[index + 1U];
-            for (std::uint32_t position = begin; position < end; ++position) {
-                const auto source = static_cast<std::uint32_t>(
-                    transpose_indices[position]);
-                sum = fmaf(
-                    transpose_weights[position],
-                    input[source * input_stride], sum);
-            }
+            sum = accumulate_rhs_span<Bandwidth>(
+                transpose_indices, transpose_weights, input, input_stride,
+                begin, end);
         }
         const std::uint32_t available = minimum(Bandwidth, index);
 #pragma unroll
@@ -140,14 +181,9 @@ __device__ __forceinline__ void inverse_axis_row_major_tiled(
                 } else {
                     const std::uint32_t begin = transpose_offsets[index];
                     const std::uint32_t end = transpose_offsets[index + 1U];
-                    for (std::uint32_t position = begin; position < end;
-                         ++position) {
-                        const auto source = static_cast<std::uint32_t>(
-                            transpose_indices[position]);
-                        sum = fmaf(
-                            transpose_weights[position],
-                            input[source * input_stride], sum);
-                    }
+                    sum = accumulate_rhs_span<Bandwidth>(
+                        transpose_indices, transpose_weights, input,
+                        input_stride, begin, end);
                 }
                 const std::uint32_t available = minimum(Bandwidth, index);
 #pragma unroll
@@ -316,6 +352,8 @@ __device__ __forceinline__ void inverse_axis(
         float sum = 0.0F;
         const std::uint32_t begin = transpose_offsets[index];
         const std::uint32_t end = transpose_offsets[index + 1U];
+        // Wide and uncommon bands keep the compact dynamic RHS. Expanding
+        // this shared path regresses large downscales and unrelated bands.
         for (std::uint32_t position = begin; position < end; ++position) {
             const auto source = static_cast<std::uint32_t>(
                 transpose_indices[position]);

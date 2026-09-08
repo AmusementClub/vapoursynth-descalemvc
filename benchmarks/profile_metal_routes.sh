@@ -138,7 +138,7 @@ cmake -S "$repo_root" -B "$build_dir" -G Ninja \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_SYSROOT="$macos_sdk" \
     -DDSMVC_VAPOURSYNTH_SDK="$vapoursynth_sdk" \
-    -DDSMVC_BUILD_METAL_EXPERIMENTS=ON \
+    -DDSMVC_ENABLE_METAL=ON \
     -DBUILD_TESTING=ON \
     > "$run_dir/cmake-configure.log"
 cmake --build "$build_dir" \
