@@ -136,3 +136,25 @@ python3 benchmarks/release_cpu_version_ab.py \
 Run on an otherwise idle Linux x86 host with AVX2, two visible CPUs, and the baseline tag available. The runner freezes both sources, builds/tests both, records capabilities and hashes, and retains numerical proofs. An AVX-512 host also compares the explicit AVX-512 route. The compatibility wrappers accept `DSMVC_BASELINE_REF`; the v0.1.1 wrapper remains available for historical comparisons.
 
 The supplemental driver and paired orchestration are preserved with the evidence as `matrix_timed_driver.cpp` and `followup.py`; their compiled libraries are exactly those used in the release-description workload. This supplemental experiment does not replace the maintained public runner above.
+
+## Prerelease CI correction: Vulkan RHS oracle
+
+The first Linux and Windows CI runs found the same new-test failure on
+Lavapipe: the ordered CPU `std::fma` oracle differed from Vulkan's separate
+multiply/add result. Vulkan's existing GLSL.std.450 `Fma` instruction does not
+require a fused, correctly rounded operation; see the
+[Khronos precision rules](https://docs.vulkan.org/spec/latest/appendices/spirvenv.html)
+and [shader FMA extension rationale](https://docs.vulkan.org/features/latest/features/proposals/VK_KHR_shader_fma.html).
+
+A fresh v0.1.2/candidate replay of all 14 synthetic RHS routes produced identical
+buffers on each driver. Lavapipe matched the separate multiply/add oracle exactly
+(maximum difference from the fused oracle: 1.78814e-7); NVIDIA matched the fused
+oracle exactly. The complete proof hashes were
+`f875c396ec7f244a5247f9bce663551ff2ef33f2436fb010c2e6703c68a5715f` on Lavapipe and
+`28fd9973a797863d8c0acc332b09b98471f8c306db8c10c7bb2e143db9cb1221` on NVIDIA.
+
+The test now requires the whole buffer, including guards, to match one exact
+ordered oracle consistently. It also checks repeated Vulkan execution bitwise.
+Metal retains the fused oracle. Deliberate logical-output and guard corruption
+both fail the corrected test. This changes only the test and documentation;
+production CPU/GPU sources and the benchmark libraries are unchanged.

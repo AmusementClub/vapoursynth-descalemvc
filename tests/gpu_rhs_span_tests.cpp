@@ -5,6 +5,7 @@
 #include "vulkan/vulkan_executor.hpp"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -48,6 +49,13 @@ std::shared_ptr<const dsmvc::AxisPlan> sparse_plan(int bandwidth) {
     return plan;
 }
 
+bool equal_bits(const std::vector<float> &left, const std::vector<float> &right) {
+    return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(),
+        [](float a, float b) {
+            return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+        });
+}
+
 void test(int bandwidth, bool vertical) {
     const auto plan = sparse_plan(bandwidth);
     const int input_stride = (vertical ? vectors : sources) + padding;
@@ -60,21 +68,31 @@ void test(int bandwidth, bool vertical) {
         input[i] = std::bit_cast<float>(0x3f000000U | ((i * 2654435761U) & 0x007fffffU));
     }
     std::vector<float> expected(2 * guard + output_rows * output_stride, sentinel);
+    auto separate_expected = expected;
     for (int vector = 0; vector < vectors; ++vector) {
         for (int index = 0; index < destinations; ++index) {
             float sum = 0.0F;
+            float separate_sum = 0.0F;
             for (auto entry = plan->transpose_offsets[index];
                  entry < plan->transpose_offsets[index + 1]; ++entry) {
                 const auto source = plan->transpose_indices[entry];
-                sum = std::fma(plan->transpose_weights[entry],
-                    input[vertical ? source * input_stride + vector
-                                   : vector * input_stride + source], sum);
+                const float value = input[vertical ? source * input_stride + vector
+                                                   : vector * input_stride + source];
+                sum = std::fma(plan->transpose_weights[entry], value, sum);
+                // GLSL.std.450 Fma may round the multiply and add separately.
+                // Keep this second ordered oracle exact instead of accepting
+                // a blanket tolerance or weakening the guard checks.
+                volatile float product = plan->transpose_weights[entry] * value;
+                separate_sum = product + separate_sum;
             }
-            expected[guard + (vertical ? index * output_stride + vector
-                                      : vector * output_stride + index)] = sum;
+            const auto output_index = guard + (vertical ? index * output_stride + vector
+                                                       : vector * output_stride + index);
+            expected[output_index] = sum;
+            separate_expected[output_index] = separate_sum;
         }
     }
     std::vector<float> output(expected.size(), sentinel);
+    std::vector<float> second(expected.size(), sentinel);
 #ifdef DSMVC_TEST_METAL
     dsmvc::AxisRequest request;
     request.source_size = request.destination_size = vectors;
@@ -84,7 +102,6 @@ void test(int bandwidth, bool vertical) {
     const auto identity = std::make_shared<const dsmvc::AxisPlan>(dsmvc::build_axis_plan(request));
     dsmvc::experimental::MetalFloatExecutor executor(
         vertical ? identity : plan, vertical ? plan : identity, 2U);
-    std::vector<float> second(expected.size(), sentinel);
     std::array frames{
         dsmvc::experimental::MetalFloatFrame{input.data(), input_stride * 4,
                                              output.data() + guard, output_stride * 4},
@@ -92,25 +109,36 @@ void test(int bandwidth, bool vertical) {
                                              second.data() + guard, output_stride * 4},
     };
     executor.execute(frames);
-    if (output != second) throw std::runtime_error("Metal batch output mismatch");
 #else
     dsmvc::vulkan_detail::VulkanExecutor executor;
     executor.prepare(plan);
     executor.seal();
-    if (vertical) {
-        executor.inverse_columns(*plan, input.data(), input_stride,
-                                 output.data() + guard, output_stride, vectors, {});
-    } else {
-        executor.inverse_rows(*plan, input.data(), input_stride,
-                              output.data() + guard, output_stride, vectors, {});
-    }
-#endif
-    for (std::size_t i = 0; i < output.size(); ++i) {
-        if (std::bit_cast<std::uint32_t>(output[i]) != std::bit_cast<std::uint32_t>(expected[i])) {
-            throw std::runtime_error("RHS mismatch or guard write: bandwidth="
-                + std::to_string(bandwidth) + " vertical=" + std::to_string(vertical)
-                + " index=" + std::to_string(i));
+    const auto execute = [&](std::vector<float> &destination) {
+        if (vertical) {
+            executor.inverse_columns(*plan, input.data(), input_stride,
+                                     destination.data() + guard, output_stride, vectors, {});
+        } else {
+            executor.inverse_rows(*plan, input.data(), input_stride,
+                                  destination.data() + guard, output_stride, vectors, {});
         }
+    };
+    execute(output);
+    execute(second);
+#endif
+    if (!equal_bits(output, second)) {
+        throw std::runtime_error("repeated RHS output or batch mismatch");
+    }
+    const bool fused_match = equal_bits(output, expected);
+#ifdef DSMVC_TEST_METAL
+    const bool separate_match = false;
+#else
+    // Require one consistent arithmetic model for the entire route, including
+    // all sparse counts and all guards. No per-element choice is permitted.
+    const bool separate_match = equal_bits(output, separate_expected);
+#endif
+    if (!fused_match && !separate_match) {
+        throw std::runtime_error("RHS matches neither ordered oracle, or guard write: bandwidth="
+            + std::to_string(bandwidth) + " vertical=" + std::to_string(vertical));
     }
 }
 } // namespace

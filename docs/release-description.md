@@ -15,7 +15,8 @@ preserving the existing API, precision policy, and automatic backend selection.
   Other routes retain their dynamic loops. This release adds no tuning switches.
 - Consolidates the Metal build option, propagates the macOS deployment target
   to the Metal compiler, and keeps Vulkan policy assertions active in Release.
-- Adds buffer-boundary and GPU RHS coverage, serializes Metal tests that share
+- Adds buffer-boundary and GPU RHS coverage, including the permitted Vulkan
+  fused or separate multiply/add rounding models, and serializes Metal tests that share
   the device, and packages macOS arm64 with a verified 36-entry Metal library.
 
 ## CPU vs v0.1.2
