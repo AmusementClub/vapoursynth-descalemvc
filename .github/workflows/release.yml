@@ -111,9 +111,11 @@ jobs:
             sdk_root="$(cygpath -u "$VULKAN_SDK")"
             layer_manifest="$(find "$sdk_root" -iname 'VkLayer_khronos_validation.json' -print -quit)"
             test -n "$layer_manifest"
-            export VK_LAYER_PATH="$(cygpath -w "$(dirname "$layer_manifest")")"
+            VK_LAYER_PATH="$(cygpath -w "$(dirname "$layer_manifest")")"
+            export VK_LAYER_PATH
           else
-            export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
+            VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp*.json' -print -quit)"
+            export VK_DRIVER_FILES
             test -n "$VK_DRIVER_FILES"
           fi
           vulkaninfo --summary
@@ -225,7 +227,6 @@ jobs:
       - name: Check out release notes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: README.md
           persist-credentials: false
 
       - name: Download package archives
@@ -243,11 +244,26 @@ jobs:
           version="${RELEASE_VERSION#v}"
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
+          (cd release-assets && sha256sum ./*.tar.gz > SHA256SUMS)
 
       - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          test -s docs/release-description.md
+          grep -Fx "# dsmvc v${RELEASE_VERSION}" docs/release-description.md
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          existing_sha=$(git ls-remote --tags origin \
+            "refs/tags/v${RELEASE_VERSION}" "refs/tags/v${RELEASE_VERSION}^{}" \
+            | awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }')
+          if [[ -n "$existing_sha" && "$existing_sha" != "$GITHUB_SHA" ]]; then
+            echo "The release tag already points to another commit: $existing_sha" >&2
+            exit 1
+          fi
           gh release create "v${RELEASE_VERSION}" release-assets/* \
-            --draft --title "dsmvc ${RELEASE_VERSION}" --generate-notes
+            --draft --target "$GITHUB_SHA" --title "dsmvc ${RELEASE_VERSION}" \
+            --notes-file docs/release-description.md
+          gh release view "v${RELEASE_VERSION}" \
+            --json isDraft,publishedAt,targetCommitish,url \
+            --jq 'if .isDraft and .publishedAt == null then . else error("release must remain an unpublished draft") end'

@@ -1,8 +1,8 @@
 #include "vulkan_f64.hpp"
 
-#include <cassert>
 #include <cstdint>
 #include <limits>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 
@@ -10,31 +10,44 @@ using dsmvc::vulkan_detail::VulkanF64WordLayout;
 using dsmvc::vulkan_detail::VulkanFloat64Capabilities;
 using dsmvc::vulkan_detail::VulkanPlanWordLayout;
 
+namespace {
+
+void require(bool condition, const std::source_location location =
+                 std::source_location::current()) {
+    if (!condition) {
+        throw std::runtime_error(
+            "Vulkan Float64 policy check failed at line "
+            + std::to_string(location.line()));
+    }
+}
+
+} // namespace
+
 int main() {
     VulkanFloat64Capabilities supported{
         true, true, true, true, 256U, 1U << 27U};
-    assert(supported.strict_supported());
-    assert(supported.missing_requirements().empty());
-    assert(supported.requirement_error().empty());
+    require(supported.strict_supported());
+    require(supported.missing_requirements().empty());
+    require(supported.requirement_error().empty());
 
     VulkanFloat64Capabilities missing{};
-    assert(!missing.strict_supported());
-    assert(missing.requirement_error()
+    require(!missing.strict_supported());
+    require(missing.requirement_error()
            == "Vulkan Float64 capability contract failed: missing shaderFloat64, "
               "shaderRoundingModeRTEFloat64, "
               "shaderSignedZeroInfNanPreserveFloat64");
     missing = supported;
     missing.denorm_preserve_float64 = false;
-    assert(missing.strict_supported());
-    assert(missing.missing_requirements().empty());
-    assert(missing.requirement_error().empty());
+    require(missing.strict_supported());
+    require(missing.missing_requirements().empty());
+    require(missing.requirement_error().empty());
 
     const auto check_single_missing = [&](auto clear, const char *name) {
         auto capabilities = supported;
         clear(capabilities);
-        assert(!capabilities.strict_supported());
-        assert(capabilities.missing_requirements() == name);
-        assert(capabilities.requirement_error()
+        require(!capabilities.strict_supported());
+        require(capabilities.missing_requirements() == name);
+        require(capabilities.requirement_error()
                == std::string{"Vulkan Float64 capability contract failed: missing "}
                     + name);
     };
@@ -49,35 +62,35 @@ int main() {
         },
         "shaderSignedZeroInfNanPreserveFloat64");
     VulkanF64WordLayout layout;
-    assert(layout.add_words(3U, "offsets") == 0U);
-    assert(layout.add_doubles(2U, "weights") == 4U);
-    assert(layout.add_words(1U, "tail") == 8U);
-    assert(layout.words() == 9U);
-    assert(layout.bytes() == 36U);
+    require(layout.add_words(3U, "offsets") == 0U);
+    require(layout.add_doubles(2U, "weights") == 4U);
+    require(layout.add_words(1U, "tail") == 8U);
+    require(layout.words() == 9U);
+    require(layout.bytes() == 36U);
 
     const auto retained = VulkanPlanWordLayout::make(
         4U, 5U, 5U, 6U, 3U, 9U, true, true);
-    assert(retained.offsets == 0U);
-    assert(retained.indices == 4U);
-    assert(retained.weights_f32 == 9U);
-    assert(retained.diagonal_f32 == 26U);
-    assert((retained.weights_f64 & 1U) == 0U);
-    assert((retained.lower_f64 & 1U) == 0U);
-    assert(retained.lower_f64 == retained.upper_f64);
-    assert((retained.diagonal_f64 & 1U) == 0U);
-    assert(retained.storage_bytes()
+    require(retained.offsets == 0U);
+    require(retained.indices == 4U);
+    require(retained.weights_f32 == 9U);
+    require(retained.diagonal_f32 == 26U);
+    require((retained.weights_f64 & 1U) == 0U);
+    require((retained.lower_f64 & 1U) == 0U);
+    require(retained.lower_f64 == retained.upper_f64);
+    require((retained.diagonal_f64 & 1U) == 0U);
+    require(retained.storage_bytes()
            == static_cast<std::size_t>(retained.storage_words) * 4U);
 
     const auto promoted = VulkanPlanWordLayout::make(
         4U, 5U, 5U, 6U, 3U, 0U, false, true);
-    assert(promoted.lower_f64 != promoted.upper_f64);
-    assert((promoted.lower_f64 & 1U) == 0U);
-    assert((promoted.upper_f64 & 1U) == 0U);
+    require(promoted.lower_f64 != promoted.upper_f64);
+    require((promoted.lower_f64 & 1U) == 0U);
+    require((promoted.upper_f64 & 1U) == 0U);
 
     const auto float32_only = VulkanPlanWordLayout::make(
         4U, 5U, 5U, 6U, 3U, 0U, false, false);
-    assert(float32_only.storage_words == 29U);
-    assert(float32_only.weights_f64 == 0U);
+    require(float32_only.storage_words == 29U);
+    require(float32_only.weights_f64 == 0U);
 
     bool overflow_rejected = false;
     try {
@@ -87,5 +100,5 @@ int main() {
     } catch (const std::length_error &) {
         overflow_rejected = true;
     }
-    assert(overflow_rejected);
+    require(overflow_rejected);
 }

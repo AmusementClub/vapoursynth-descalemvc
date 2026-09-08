@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "axis_plan_internal.hpp"
+#include "cpu_horizontal_window.hpp"
+#include "cpu_rhs_span.hpp"
+#include "cpu_float_workspace.hpp"
 #include "cpu_packed.hpp"
 
 namespace dsmvc {
@@ -43,6 +47,7 @@ void transpose8(__m256 (&rows)[8]) noexcept {
     rows[6] = _mm256_permute2f128_ps(s2, s6, 0x31);
     rows[7] = _mm256_permute2f128_ps(s3, s7, 0x31);
 }
+
 
 void pack_rows_16(const AxisPlan &plan, const float *input,
                   std::ptrdiff_t input_row_stride, float *scratch) noexcept {
@@ -119,6 +124,18 @@ void unpack_rows_16(const AxisPlan &plan, const float *work,
     }
 }
 
+template <std::int32_t Tap, std::int32_t Count>
+[[nodiscard]] DSMVC_FORCE_INLINE __m512 accumulate_fixed_taps(
+    const float *weights, const float *source, __m512 value) noexcept {
+    value = _mm512_fmadd_ps(_mm512_set1_ps(weights[Tap]),
+                           _mm512_loadu_ps(source + Tap * 16U), value);
+    if constexpr (Tap + 1 < Count) {
+        return accumulate_fixed_taps<Tap + 1, Count>(weights, source, value);
+    }
+    return value;
+}
+
+template <std::int32_t Bandwidth>
 [[nodiscard]] DSMVC_FORCE_INLINE __m512 multiply_transposed_row(
     const detail::PackedCpuPlan &packed, const float *scratch,
     std::int32_t destination) noexcept {
@@ -129,6 +146,22 @@ void unpack_rows_16(const AxisPlan &plan, const float *work,
         static_cast<std::size_t>(destination)];
     const auto base = static_cast<std::size_t>(destination)
         * static_cast<std::size_t>(packed.weights_columns);
+    const auto *weights = packed.weights.data() + base;
+    const auto *source_base = scratch + static_cast<std::size_t>(left) * 16U;
+    if (detail::try_accumulate_rhs_span<Bandwidth>(
+            right - left, [&]<int Tap>() noexcept {
+                value = _mm512_fmadd_ps(_mm512_set1_ps(weights[Tap]),
+                    _mm512_loadu_ps(source_base + Tap * 16U), value);
+            })) {
+        return value;
+    }
+    switch (right - left) {
+    case 2: return accumulate_fixed_taps<0, 2>(weights, source_base, value);
+    case 4: return accumulate_fixed_taps<0, 4>(weights, source_base, value);
+    case 6: return accumulate_fixed_taps<0, 6>(weights, source_base, value);
+    case 8: return accumulate_fixed_taps<0, 8>(weights, source_base, value);
+    default: break;
+    }
     for (std::int32_t source = left; source < right; ++source) {
         value = _mm512_fmadd_ps(
             _mm512_set1_ps(packed.weights[
@@ -139,98 +172,37 @@ void unpack_rows_16(const AxisPlan &plan, const float *work,
     return value;
 }
 
-template <std::int32_t Distance>
-[[nodiscard]] DSMVC_FORCE_INLINE __m512 forward_fixed_b5(
-    const detail::PackedCpuPlan &packed, const float *work,
-    std::size_t factor_stride, std::int32_t destination,
-    __m512 value) noexcept {
-    value = _mm512_fnmadd_ps(
-        _mm512_set1_ps(packed.lower_ld[
-            static_cast<std::size_t>(Distance - 1) * factor_stride
-            + static_cast<std::size_t>(destination)]),
-        _mm512_loadu_ps(work
-            + static_cast<std::size_t>(destination - Distance) * 16U), value);
-    if constexpr (Distance > 1) {
-        return forward_fixed_b5<Distance - 1>(
-            packed, work, factor_stride, destination, value);
+struct HorizontalOps {
+    using Vector = __m512;
+    static constexpr std::size_t lanes = 16;
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector zero() noexcept {
+        return _mm512_setzero_ps();
     }
-    return value;
-}
-
-template <std::int32_t Distance>
-[[nodiscard]] DSMVC_FORCE_INLINE __m512 backward_fixed_b5(
-    const detail::PackedCpuPlan &packed, const float *work,
-    std::size_t factor_stride, std::int32_t destination,
-    __m512 value) noexcept {
-    value = _mm512_fnmadd_ps(
-        _mm512_set1_ps(packed.upper_l[
-            static_cast<std::size_t>(Distance - 1) * factor_stride
-            + static_cast<std::size_t>(destination)]),
-        _mm512_loadu_ps(work
-            + static_cast<std::size_t>(destination + Distance) * 16U), value);
-    if constexpr (Distance > 1) {
-        return backward_fixed_b5<Distance - 1>(
-            packed, work, factor_stride, destination, value);
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector load(const float *p) noexcept {
+        return _mm512_loadu_ps(p);
     }
-    return value;
-}
+    static DSMVC_FORCE_INLINE void store(float *p, Vector v) noexcept {
+        _mm512_storeu_ps(p, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector subtract_product(
+        Vector v, float c, Vector previous) noexcept {
+        return _mm512_fnmadd_ps(_mm512_set1_ps(c), previous, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector multiply(
+        Vector v, float c) noexcept {
+        return _mm512_mul_ps(v, _mm512_set1_ps(c));
+    }
+};
 
-void solve_horizontal_b5(const AxisPlan &plan,
+template <std::int32_t Bandwidth>
+void solve_horizontal_fixed(const AxisPlan &plan,
                          const detail::PackedCpuPlan &packed,
                          const float *scratch, float *work) noexcept {
-    constexpr std::int32_t bandwidth = 5;
-    const auto n = plan.destination_size;
-    const auto factor_stride = static_cast<std::size_t>(
-        packed.padded_destination_size);
-    const auto forward_boundary = std::min(bandwidth, n);
-    for (std::int32_t i = 0; i < forward_boundary; ++i) {
-        __m512 value = multiply_transposed_row(packed, scratch, i);
-        for (std::int32_t distance = i; distance >= 1; --distance) {
-            value = _mm512_fnmadd_ps(
-                _mm512_set1_ps(packed.lower_ld[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                _mm512_loadu_ps(work
-                    + static_cast<std::size_t>(i - distance) * 16U), value);
-        }
-        value = _mm512_mul_ps(value, _mm512_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        _mm512_storeu_ps(work + static_cast<std::size_t>(i) * 16U, value);
-    }
-    for (std::int32_t i = bandwidth; i < n; ++i) {
-        __m512 value = forward_fixed_b5<bandwidth>(
-            packed, work, factor_stride, i,
-            multiply_transposed_row(packed, scratch, i));
-        value = _mm512_mul_ps(value, _mm512_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        _mm512_storeu_ps(work + static_cast<std::size_t>(i) * 16U, value);
-    }
-    for (std::int32_t i = n; i < packed.padded_destination_size; ++i) {
-        _mm512_storeu_ps(
-            work + static_cast<std::size_t>(i) * 16U, _mm512_setzero_ps());
-    }
-
-    const auto backward_boundary = std::max(n - bandwidth, 0);
-    for (std::int32_t i = n - 2; i >= backward_boundary; --i) {
-        __m512 value = _mm512_loadu_ps(
-            work + static_cast<std::size_t>(i) * 16U);
-        const auto available = n - i - 1;
-        for (std::int32_t distance = available; distance >= 1; --distance) {
-            value = _mm512_fnmadd_ps(
-                _mm512_set1_ps(packed.upper_l[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                _mm512_loadu_ps(work
-                    + static_cast<std::size_t>(i + distance) * 16U), value);
-        }
-        _mm512_storeu_ps(work + static_cast<std::size_t>(i) * 16U, value);
-    }
-    for (std::int32_t i = n - bandwidth - 1; i >= 0; --i) {
-        const __m512 value = backward_fixed_b5<bandwidth>(
-            packed, work, factor_stride, i,
-            _mm512_loadu_ps(work + static_cast<std::size_t>(i) * 16U));
-        _mm512_storeu_ps(work + static_cast<std::size_t>(i) * 16U, value);
-    }
+    detail::solve_horizontal_window<Bandwidth, HorizontalOps>(
+        packed, plan.destination_size, work,
+        [&](std::int32_t i) noexcept {
+            return multiply_transposed_row<Bandwidth>(packed, scratch, i);
+        });
 }
 
 } // namespace
@@ -255,22 +227,28 @@ void inverse_rows_avx512(
     const auto factor_stride = static_cast<std::size_t>(destination_size);
     thread_local std::vector<float> scratch;
     thread_local std::vector<float> work;
-    scratch.resize(static_cast<std::size_t>(source_size) * 16U);
-    work.resize(static_cast<std::size_t>(destination_size) * 16U);
+    auto *scratch_data = detail::aligned_float_workspace<64>(
+        scratch, static_cast<std::size_t>(source_size) * 16U,
+        "AVX-512 row scratch");
+    auto *work_data = detail::aligned_float_workspace<64>(
+        work, static_cast<std::size_t>(destination_size) * 16U,
+        "AVX-512 row work");
 
     const auto solve_block = [&](std::int32_t block) {
         pack_rows_16(
             plan, input + static_cast<std::ptrdiff_t>(block) * input_row_stride,
-            input_row_stride, scratch.data());
+            input_row_stride, scratch_data);
         for (std::int32_t source = plan.source_size;
              source < source_size; ++source) {
             _mm512_storeu_ps(
-                scratch.data() + static_cast<std::size_t>(source) * 16U,
+                scratch_data + static_cast<std::size_t>(source) * 16U,
                 _mm512_setzero_ps());
         }
 
         if (plan.half_bandwidth == 5) {
-            solve_horizontal_b5(plan, packed, scratch.data(), work.data());
+            solve_horizontal_fixed<5>(plan, packed, scratch_data, work_data);
+        } else if (plan.half_bandwidth == 7) {
+            solve_horizontal_fixed<7>(plan, packed, scratch_data, work_data);
         } else {
             for (std::int32_t i = 0; i < destination_size; ++i) {
                 __m512 value = _mm512_setzero_ps();
@@ -286,7 +264,7 @@ void inverse_rows_avx512(
                         value = _mm512_fmadd_ps(
                             _mm512_set1_ps(packed.weights[base
                                 + static_cast<std::size_t>(source - left)]),
-                            _mm512_loadu_ps(scratch.data()
+                            _mm512_loadu_ps(scratch_data
                                 + static_cast<std::size_t>(source) * 16U),
                             value);
                     }
@@ -298,7 +276,7 @@ void inverse_rows_avx512(
                                 static_cast<std::size_t>(distance - 1)
                                     * factor_stride
                                 + static_cast<std::size_t>(i)]),
-                            _mm512_loadu_ps(work.data()
+                            _mm512_loadu_ps(work_data
                                 + static_cast<std::size_t>(i - distance) * 16U),
                             value);
                     }
@@ -306,11 +284,11 @@ void inverse_rows_avx512(
                         packed.inverse_diagonal[static_cast<std::size_t>(i)]));
                 }
                 _mm512_storeu_ps(
-                    work.data() + static_cast<std::size_t>(i) * 16U, value);
+                    work_data + static_cast<std::size_t>(i) * 16U, value);
             }
             for (std::int32_t i = plan.destination_size - 2; i >= 0; --i) {
                 __m512 value = _mm512_loadu_ps(
-                    work.data() + static_cast<std::size_t>(i) * 16U);
+                    work_data + static_cast<std::size_t>(i) * 16U);
                 const auto available = std::min(plan.half_bandwidth,
                     plan.destination_size - i - 1);
                 for (std::int32_t distance = available;
@@ -319,16 +297,16 @@ void inverse_rows_avx512(
                         _mm512_set1_ps(packed.upper_l[
                             static_cast<std::size_t>(distance - 1) * factor_stride
                             + static_cast<std::size_t>(i)]),
-                        _mm512_loadu_ps(work.data()
+                        _mm512_loadu_ps(work_data
                             + static_cast<std::size_t>(i + distance) * 16U),
                         value);
                 }
                 _mm512_storeu_ps(
-                    work.data() + static_cast<std::size_t>(i) * 16U, value);
+                    work_data + static_cast<std::size_t>(i) * 16U, value);
             }
         }
         unpack_rows_16(
-            plan, work.data(),
+            plan, work_data,
             output + static_cast<std::ptrdiff_t>(block) * output_row_stride,
             output_row_stride);
     };
@@ -339,6 +317,62 @@ void inverse_rows_avx512(
     if (complete != row_count) solve_block(row_count - 16);
 }
 
+namespace {
+
+template <int Groups>
+void inverse_columns_grouped_avx512(
+    const AxisPlan &plan, const detail::PackedCpuPlan &packed,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t columns) {
+    const auto factor_stride = static_cast<std::size_t>(packed.padded_destination_size);
+    for (std::int32_t column = 0; column < columns; column += 16 * Groups) {
+        for (std::int32_t row = 0; row < plan.destination_size; ++row) {
+            const auto left = packed.weights_left[static_cast<std::size_t>(row)];
+            const auto right = packed.weights_right[static_cast<std::size_t>(row)];
+            const auto weight_base = static_cast<std::size_t>(row) * packed.weights_columns;
+            __m512 values[Groups];
+            for (int group = 0; group < Groups; ++group) values[group] = _mm512_setzero_ps();
+            for (auto source = left; source < right; ++source) {
+                const auto weight = _mm512_set1_ps(packed.weights[weight_base + source - left]);
+                const auto *data = input + static_cast<std::ptrdiff_t>(source) * input_row_stride + column;
+                for (int group = 0; group < Groups; ++group) {
+                    values[group] = _mm512_fmadd_ps(weight, _mm512_loadu_ps(data + 16 * group), values[group]);
+                }
+            }
+            for (auto distance = std::min(plan.half_bandwidth, row); distance >= 1; --distance) {
+                const auto weight = _mm512_set1_ps(packed.lower_ld[
+                    static_cast<std::size_t>(distance - 1) * factor_stride + row]);
+                const auto *data = output + static_cast<std::ptrdiff_t>(row - distance) * output_row_stride + column;
+                for (int group = 0; group < Groups; ++group) {
+                    values[group] = _mm512_fnmadd_ps(weight, _mm512_loadu_ps(data + 16 * group), values[group]);
+                }
+            }
+            const auto diagonal = _mm512_set1_ps(packed.inverse_diagonal[static_cast<std::size_t>(row)]);
+            auto *data = output + static_cast<std::ptrdiff_t>(row) * output_row_stride + column;
+            for (int group = 0; group < Groups; ++group) {
+                _mm512_storeu_ps(data + 16 * group, _mm512_mul_ps(values[group], diagonal));
+            }
+        }
+        for (std::int32_t row = plan.destination_size - 2; row >= 0; --row) {
+            auto *data = output + static_cast<std::ptrdiff_t>(row) * output_row_stride + column;
+            __m512 values[Groups];
+            for (int group = 0; group < Groups; ++group) values[group] = _mm512_loadu_ps(data + 16 * group);
+            for (auto distance = std::min(plan.half_bandwidth, plan.destination_size - row - 1); distance >= 1; --distance) {
+                const auto weight = _mm512_set1_ps(packed.upper_l[
+                    static_cast<std::size_t>(distance - 1) * factor_stride + row]);
+                const auto *previous = output + static_cast<std::ptrdiff_t>(row + distance) * output_row_stride + column;
+                for (int group = 0; group < Groups; ++group) {
+                    values[group] = _mm512_fnmadd_ps(weight, _mm512_loadu_ps(previous + 16 * group), values[group]);
+                }
+            }
+            for (int group = 0; group < Groups; ++group) _mm512_storeu_ps(data + 16 * group, values[group]);
+        }
+    }
+}
+
+} // namespace
+
 void inverse_columns_avx512(
     const AxisPlan &plan, const detail::PackedCpuPlan &packed,
     const float *input, std::ptrdiff_t input_row_stride,
@@ -347,7 +381,11 @@ void inverse_columns_avx512(
     const auto factor_stride = static_cast<std::size_t>(
         packed.padded_destination_size);
     const auto vector_columns = column_count & ~15;
-    for (std::int32_t column = 0; column < vector_columns; column += 16) {
+    const bool grouped = plan.half_bandwidth == 5 || plan.half_bandwidth == 7 || plan.half_bandwidth == 11;
+    const auto complete = grouped ? vector_columns / 64 * 64 : 0;
+    if (complete != 0) inverse_columns_grouped_avx512<4>(plan, packed,
+        input, input_row_stride, output, output_row_stride, complete);
+    for (std::int32_t column = complete; column < vector_columns; column += 16) {
         for (std::int32_t row = 0; row < plan.destination_size; ++row) {
             const auto left = packed.weights_left[static_cast<std::size_t>(row)];
             const auto right = packed.weights_right[static_cast<std::size_t>(row)];

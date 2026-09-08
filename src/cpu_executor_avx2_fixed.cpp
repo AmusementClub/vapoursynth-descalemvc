@@ -1,6 +1,9 @@
 #include <dsmvc/engine.hpp>
 
 #include "cpu_packed.hpp"
+#include "cpu_horizontal_window.hpp"
+#include "cpu_float_workspace.hpp"
+#include "cpu_rhs_span.hpp"
 
 #include <algorithm>
 #include <array>
@@ -88,6 +91,7 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
     }
 }
 
+template <int Bandwidth>
 [[nodiscard]] DSMVC_FORCE_INLINE __m256 multiply_transpose(
     const detail::PackedCpuPlan &packed, const float *scratch,
     std::int32_t row) noexcept {
@@ -96,6 +100,15 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
     const auto right = packed.weights_right[static_cast<std::size_t>(row)];
     const auto base = static_cast<std::size_t>(row)
         * static_cast<std::size_t>(packed.weights_columns);
+    const auto *weights = packed.weights.data() + base;
+    const auto *source_base = scratch + static_cast<std::size_t>(left) * 8U;
+    if (detail::try_accumulate_rhs_span<Bandwidth>(
+            right - left, [&]<int Tap>() noexcept {
+                sum = _mm256_fmadd_ps(_mm256_set1_ps(weights[Tap]),
+                    _mm256_load_ps(source_base + Tap * 8U), sum);
+            })) {
+        return sum;
+    }
     for (std::int32_t source = left; source < right; ++source) {
         sum = _mm256_fmadd_ps(
             _mm256_set1_ps(packed.weights[
@@ -106,62 +119,43 @@ void transpose_source(const float *input, std::ptrdiff_t stride,
     return sum;
 }
 
-[[nodiscard]] float *transposed_output(
-    float *output, std::ptrdiff_t stride, std::int32_t index) noexcept {
-    return output + static_cast<std::ptrdiff_t>(index & 7) * stride
-        + static_cast<std::ptrdiff_t>(index & ~7);
-}
-
-template <std::int32_t Distance>
-[[nodiscard]] DSMVC_FORCE_INLINE __m256 forward_fixed_band(
-    const detail::PackedCpuPlan &packed, float *output,
-    std::ptrdiff_t stride, std::size_t factor_stride,
-    std::int32_t i, __m256 value) noexcept {
-    value = _mm256_fnmadd_ps(
-        _mm256_set1_ps(packed.lower_ld[
-            static_cast<std::size_t>(Distance - 1) * factor_stride
-            + static_cast<std::size_t>(i)]),
-        _mm256_loadu_ps(transposed_output(output, stride, i - Distance)),
-        value);
-    if constexpr (Distance > 1) {
-        return forward_fixed_band<Distance - 1>(
-            packed, output, stride, factor_stride, i, value);
+struct HorizontalOps {
+    using Vector = __m256;
+    static constexpr std::size_t lanes = 8;
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector zero() noexcept {
+        return _mm256_setzero_ps();
     }
-    return value;
-}
-
-template <std::int32_t Distance>
-[[nodiscard]] DSMVC_FORCE_INLINE __m256 backward_fixed_band(
-    const detail::PackedCpuPlan &packed, float *output,
-    std::ptrdiff_t stride, std::size_t factor_stride,
-    std::int32_t i, __m256 value) noexcept {
-    value = _mm256_fnmadd_ps(
-        _mm256_set1_ps(packed.upper_l[
-            static_cast<std::size_t>(Distance - 1) * factor_stride
-            + static_cast<std::size_t>(i)]),
-        _mm256_loadu_ps(transposed_output(output, stride, i + Distance)),
-        value);
-    if constexpr (Distance > 1) {
-        return backward_fixed_band<Distance - 1>(
-            packed, output, stride, factor_stride, i, value);
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector load(const float *p) noexcept {
+        return _mm256_loadu_ps(p);
     }
-    return value;
-}
+    static DSMVC_FORCE_INLINE void store(float *p, Vector v) noexcept {
+        _mm256_storeu_ps(p, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector subtract_product(
+        Vector v, float c, Vector previous) noexcept {
+        return _mm256_fnmadd_ps(_mm256_set1_ps(c), previous, v);
+    }
+    [[nodiscard]] static DSMVC_FORCE_INLINE Vector multiply(
+        Vector v, float c) noexcept {
+        return _mm256_mul_ps(v, _mm256_set1_ps(c));
+    }
+};
 
-void transpose_output(const detail::PackedCpuPlan &packed, float *output,
-                      std::ptrdiff_t stride) noexcept {
-    for (std::int32_t j = 0; j < packed.padded_destination_size; j += 8) {
-        __m256 x0 = _mm256_loadu_ps(output + j);
-        __m256 x1 = _mm256_loadu_ps(output + stride + j);
-        __m256 x2 = _mm256_loadu_ps(output + 2 * stride + j);
-        __m256 x3 = _mm256_loadu_ps(output + 3 * stride + j);
-        __m256 x4 = _mm256_loadu_ps(output + 4 * stride + j);
-        __m256 x5 = _mm256_loadu_ps(output + 5 * stride + j);
-        __m256 x6 = _mm256_loadu_ps(output + 6 * stride + j);
-        __m256 x7 = _mm256_loadu_ps(output + 7 * stride + j);
+void unpack_work(const AxisPlan &plan, const float *work,
+                 float *output, std::ptrdiff_t stride) noexcept {
+    const auto full_destination = plan.destination_size & ~7;
+    for (std::int32_t j = 0; j < full_destination; j += 8) {
+        __m256 x0 = _mm256_load_ps(work + static_cast<std::size_t>(j + 0) * 8U);
+        __m256 x1 = _mm256_load_ps(work + static_cast<std::size_t>(j + 1) * 8U);
+        __m256 x2 = _mm256_load_ps(work + static_cast<std::size_t>(j + 2) * 8U);
+        __m256 x3 = _mm256_load_ps(work + static_cast<std::size_t>(j + 3) * 8U);
+        __m256 x4 = _mm256_load_ps(work + static_cast<std::size_t>(j + 4) * 8U);
+        __m256 x5 = _mm256_load_ps(work + static_cast<std::size_t>(j + 5) * 8U);
+        __m256 x6 = _mm256_load_ps(work + static_cast<std::size_t>(j + 6) * 8U);
+        __m256 x7 = _mm256_load_ps(work + static_cast<std::size_t>(j + 7) * 8U);
         transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
-        _mm256_storeu_ps(output + j, x0);
-        _mm256_storeu_ps(output + stride + j, x1);
+        _mm256_storeu_ps(output + 0 * stride + j, x0);
+        _mm256_storeu_ps(output + 1 * stride + j, x1);
         _mm256_storeu_ps(output + 2 * stride + j, x2);
         _mm256_storeu_ps(output + 3 * stride + j, x3);
         _mm256_storeu_ps(output + 4 * stride + j, x4);
@@ -169,209 +163,43 @@ void transpose_output(const detail::PackedCpuPlan &packed, float *output,
         _mm256_storeu_ps(output + 6 * stride + j, x6);
         _mm256_storeu_ps(output + 7 * stride + j, x7);
     }
-}
-
-[[nodiscard]] DSMVC_FORCE_INLINE __m256 load_tail_mapped(
-    float *output, std::ptrdiff_t stride, const float *tail,
-    std::int32_t full_destination, std::int32_t index) noexcept {
-    if (index < full_destination) {
-        return _mm256_loadu_ps(transposed_output(output, stride, index));
-    }
-    return _mm256_load_ps(
-        tail + static_cast<std::size_t>(index - full_destination) * 8U);
-}
-
-DSMVC_FORCE_INLINE void store_tail_mapped(
-    float *output, std::ptrdiff_t stride, float *tail,
-    std::int32_t full_destination, std::int32_t index,
-    __m256 value) noexcept {
-    if (index < full_destination) {
-        _mm256_storeu_ps(transposed_output(output, stride, index), value);
-    } else {
-        _mm256_store_ps(
-            tail + static_cast<std::size_t>(index - full_destination) * 8U,
-            value);
+    if (full_destination == plan.destination_size) return;
+    const auto j = full_destination;
+    alignas(32) float tail[64];
+    __m256 x0 = _mm256_load_ps(work + static_cast<std::size_t>(j + 0) * 8U);
+    __m256 x1 = _mm256_load_ps(work + static_cast<std::size_t>(j + 1) * 8U);
+    __m256 x2 = _mm256_load_ps(work + static_cast<std::size_t>(j + 2) * 8U);
+    __m256 x3 = _mm256_load_ps(work + static_cast<std::size_t>(j + 3) * 8U);
+    __m256 x4 = _mm256_load_ps(work + static_cast<std::size_t>(j + 4) * 8U);
+    __m256 x5 = _mm256_load_ps(work + static_cast<std::size_t>(j + 5) * 8U);
+    __m256 x6 = _mm256_load_ps(work + static_cast<std::size_t>(j + 6) * 8U);
+    __m256 x7 = _mm256_load_ps(work + static_cast<std::size_t>(j + 7) * 8U);
+    transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
+    _mm256_store_ps(tail + 0U * 8U, x0);
+    _mm256_store_ps(tail + 1U * 8U, x1);
+    _mm256_store_ps(tail + 2U * 8U, x2);
+    _mm256_store_ps(tail + 3U * 8U, x3);
+    _mm256_store_ps(tail + 4U * 8U, x4);
+    _mm256_store_ps(tail + 5U * 8U, x5);
+    _mm256_store_ps(tail + 6U * 8U, x6);
+    _mm256_store_ps(tail + 7U * 8U, x7);
+    const auto remaining = plan.destination_size - full_destination;
+    for (std::int32_t row = 0; row < 8; ++row) {
+        std::copy_n(tail + static_cast<std::size_t>(row) * 8U, remaining,
+                    output + static_cast<std::ptrdiff_t>(row) * stride + j);
     }
 }
 
 template <std::int32_t Bandwidth>
 void solve_fixed(const AxisPlan &plan, const detail::PackedCpuPlan &packed,
-                 const float *scratch, float *output,
+                 const float *scratch, float *work, float *output,
                  std::ptrdiff_t stride) noexcept {
-    const auto n = plan.destination_size;
-    const auto factor_stride = static_cast<std::size_t>(
-        packed.padded_destination_size);
-    const auto forward_boundary = std::min(Bandwidth, n);
-    for (std::int32_t i = 0; i < forward_boundary; ++i) {
-        __m256 value = multiply_transpose(packed, scratch, i);
-        for (std::int32_t distance = i; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.lower_ld[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                _mm256_loadu_ps(
-                    transposed_output(output, stride, i - distance)), value);
-        }
-        value = _mm256_mul_ps(value, _mm256_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-    for (std::int32_t i = Bandwidth; i < n; ++i) {
-        __m256 value = forward_fixed_band<Bandwidth>(
-            packed, output, stride, factor_stride, i,
-            multiply_transpose(packed, scratch, i));
-        value = _mm256_mul_ps(value, _mm256_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-    for (std::int32_t i = n; i < packed.padded_destination_size; ++i) {
-        _mm256_storeu_ps(
-            transposed_output(output, stride, i), _mm256_setzero_ps());
-    }
-    const auto backward_boundary = std::max(n - Bandwidth, 0);
-    for (std::int32_t i = n - 2; i >= backward_boundary; --i) {
-        __m256 value = _mm256_loadu_ps(transposed_output(output, stride, i));
-        const auto available = n - i - 1;
-        for (std::int32_t distance = available; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.upper_l[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                _mm256_loadu_ps(
-                    transposed_output(output, stride, i + distance)), value);
-        }
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-    for (std::int32_t i = n - Bandwidth - 1; i >= 0; --i) {
-        const __m256 value = backward_fixed_band<Bandwidth>(
-            packed, output, stride, factor_stride, i,
-            _mm256_loadu_ps(transposed_output(output, stride, i)));
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-    transpose_output(packed, output, stride);
-}
-
-template <std::int32_t Bandwidth>
-void solve_fixed_tail(const AxisPlan &plan,
-                      const detail::PackedCpuPlan &packed,
-                      const float *scratch, float *output,
-                      std::ptrdiff_t stride) noexcept {
-    const auto n = plan.destination_size;
-    const auto full_destination = n & ~7;
-    const auto factor_stride = static_cast<std::size_t>(
-        packed.padded_destination_size);
-    alignas(32) float tail_tile[64]{};
-
-    const auto forward_boundary = std::min(Bandwidth, n);
-    for (std::int32_t i = 0; i < forward_boundary; ++i) {
-        __m256 value = multiply_transpose(packed, scratch, i);
-        for (std::int32_t distance = i; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.lower_ld[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                load_tail_mapped(
-                    output, stride, tail_tile, full_destination, i - distance),
-                value);
-        }
-        value = _mm256_mul_ps(value, _mm256_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        store_tail_mapped(
-            output, stride, tail_tile, full_destination, i, value);
-    }
-    for (std::int32_t i = Bandwidth; i < full_destination; ++i) {
-        __m256 value = forward_fixed_band<Bandwidth>(
-            packed, output, stride, factor_stride, i,
-            multiply_transpose(packed, scratch, i));
-        value = _mm256_mul_ps(value, _mm256_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-    for (std::int32_t i = std::max(Bandwidth, full_destination); i < n; ++i) {
-        __m256 value = multiply_transpose(packed, scratch, i);
-        for (std::int32_t distance = Bandwidth; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.lower_ld[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                load_tail_mapped(
-                    output, stride, tail_tile, full_destination, i - distance),
-                value);
-        }
-        value = _mm256_mul_ps(value, _mm256_set1_ps(
-            packed.inverse_diagonal[static_cast<std::size_t>(i)]));
-        store_tail_mapped(
-            output, stride, tail_tile, full_destination, i, value);
-    }
-
-    const auto tail_backward_boundary = std::max(full_destination - Bandwidth, 0);
-    for (std::int32_t i = n - 2; i >= tail_backward_boundary; --i) {
-        __m256 value = load_tail_mapped(
-            output, stride, tail_tile, full_destination, i);
-        const auto available = std::min(Bandwidth, n - i - 1);
-        for (std::int32_t distance = available; distance >= 1; --distance) {
-            value = _mm256_fnmadd_ps(
-                _mm256_set1_ps(packed.upper_l[
-                    static_cast<std::size_t>(distance - 1) * factor_stride
-                    + static_cast<std::size_t>(i)]),
-                load_tail_mapped(
-                    output, stride, tail_tile, full_destination, i + distance),
-                value);
-        }
-        store_tail_mapped(
-            output, stride, tail_tile, full_destination, i, value);
-    }
-    for (std::int32_t i = full_destination - Bandwidth - 1; i >= 0; --i) {
-        const __m256 value = backward_fixed_band<Bandwidth>(
-            packed, output, stride, factor_stride, i,
-            _mm256_loadu_ps(transposed_output(output, stride, i)));
-        _mm256_storeu_ps(transposed_output(output, stride, i), value);
-    }
-
-    for (std::int32_t j = 0; j < full_destination; j += 8) {
-        __m256 x0 = _mm256_loadu_ps(output + j);
-        __m256 x1 = _mm256_loadu_ps(output + stride + j);
-        __m256 x2 = _mm256_loadu_ps(output + 2 * stride + j);
-        __m256 x3 = _mm256_loadu_ps(output + 3 * stride + j);
-        __m256 x4 = _mm256_loadu_ps(output + 4 * stride + j);
-        __m256 x5 = _mm256_loadu_ps(output + 5 * stride + j);
-        __m256 x6 = _mm256_loadu_ps(output + 6 * stride + j);
-        __m256 x7 = _mm256_loadu_ps(output + 7 * stride + j);
-        transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
-        _mm256_storeu_ps(output + j, x0);
-        _mm256_storeu_ps(output + stride + j, x1);
-        _mm256_storeu_ps(output + 2 * stride + j, x2);
-        _mm256_storeu_ps(output + 3 * stride + j, x3);
-        _mm256_storeu_ps(output + 4 * stride + j, x4);
-        _mm256_storeu_ps(output + 5 * stride + j, x5);
-        _mm256_storeu_ps(output + 6 * stride + j, x6);
-        _mm256_storeu_ps(output + 7 * stride + j, x7);
-    }
-
-    __m256 x0 = _mm256_load_ps(tail_tile + 0U * 8U);
-    __m256 x1 = _mm256_load_ps(tail_tile + 1U * 8U);
-    __m256 x2 = _mm256_load_ps(tail_tile + 2U * 8U);
-    __m256 x3 = _mm256_load_ps(tail_tile + 3U * 8U);
-    __m256 x4 = _mm256_load_ps(tail_tile + 4U * 8U);
-    __m256 x5 = _mm256_load_ps(tail_tile + 5U * 8U);
-    __m256 x6 = _mm256_load_ps(tail_tile + 6U * 8U);
-    __m256 x7 = _mm256_load_ps(tail_tile + 7U * 8U);
-    transpose8(x0, x1, x2, x3, x4, x5, x6, x7);
-    const auto remaining = n - full_destination;
-    _mm256_store_ps(tail_tile + 0U * 8U, x0);
-    _mm256_store_ps(tail_tile + 1U * 8U, x1);
-    _mm256_store_ps(tail_tile + 2U * 8U, x2);
-    _mm256_store_ps(tail_tile + 3U * 8U, x3);
-    _mm256_store_ps(tail_tile + 4U * 8U, x4);
-    _mm256_store_ps(tail_tile + 5U * 8U, x5);
-    _mm256_store_ps(tail_tile + 6U * 8U, x6);
-    _mm256_store_ps(tail_tile + 7U * 8U, x7);
-    for (std::int32_t row = 0; row < 8; ++row) {
-        std::copy_n(tail_tile + static_cast<std::size_t>(row) * 8U,
-                    remaining,
-                    output + static_cast<std::ptrdiff_t>(row) * stride
-                        + full_destination);
-    }
+    detail::solve_horizontal_window<Bandwidth, HorizontalOps>(
+        packed, plan.destination_size, work,
+        [&](std::int32_t i) noexcept {
+            return multiply_transpose<Bandwidth>(packed, scratch, i);
+        });
+    unpack_work(plan, work, output, stride);
 }
 
 } // namespace
@@ -391,35 +219,27 @@ void inverse_rows_fixed_avx2(
         return;
     }
 
-    thread_local std::vector<ScratchVector> scratch;
-    scratch.resize(static_cast<std::size_t>(packed.padded_source_size));
+    thread_local std::vector<float> scratch;
+    const auto scratch_vectors = static_cast<std::size_t>(packed.padded_source_size)
+        + static_cast<std::size_t>(packed.padded_destination_size);
+    auto *scratch_data = detail::aligned_float_workspace<32>(
+        scratch, detail::checked_size_product(scratch_vectors, 8U,
+            "AVX2 fixed row scratch"), "AVX2 fixed row scratch");
+    auto *work = scratch_data
+        + static_cast<std::size_t>(packed.padded_source_size) * 8U;
     const auto solve_block = [&](std::int32_t row) {
         auto *block_output =
             output + static_cast<std::ptrdiff_t>(row) * output_row_stride;
         transpose_source(
             input + static_cast<std::ptrdiff_t>(row) * input_row_stride,
             input_row_stride, plan.source_size,
-            packed.padded_source_size, scratch.front().lanes);
+            packed.padded_source_size, scratch_data);
         if (plan.half_bandwidth == 5) {
-            if (plan.destination_size == packed.padded_destination_size) {
-                solve_fixed<5>(
-                    plan, packed, scratch.front().lanes,
-                    block_output, output_row_stride);
-            } else {
-                solve_fixed_tail<5>(
-                    plan, packed, scratch.front().lanes,
-                    block_output, output_row_stride);
-            }
+            solve_fixed<5>(plan, packed, scratch_data, work,
+                            block_output, output_row_stride);
         } else {
-            if (plan.destination_size == packed.padded_destination_size) {
-                solve_fixed<7>(
-                    plan, packed, scratch.front().lanes,
-                    block_output, output_row_stride);
-            } else {
-                solve_fixed_tail<7>(
-                    plan, packed, scratch.front().lanes,
-                    block_output, output_row_stride);
-            }
+            solve_fixed<7>(plan, packed, scratch_data, work,
+                            block_output, output_row_stride);
         }
     };
     const auto complete_rows = row_count & ~7;

@@ -248,6 +248,8 @@ jobs:
               "dsmvc_metal_artifact_inventory",
               "dsmvc_metal_scheduler_tests",
               "dsmvc_metal_yuv_staging_tests",
+              "dsmvc_metal_rhs_span",
+              "dsmvc_metal_numerical_contract_tests",
               "dsmvc_vs_metal_integration",
           }
           missing = sorted(required - actual)

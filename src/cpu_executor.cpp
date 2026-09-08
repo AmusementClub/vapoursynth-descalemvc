@@ -3,6 +3,7 @@
 #include "axis_plan_internal.hpp"
 #include "checked_size.hpp"
 #include "cpu_packed.hpp"
+#include "cpu_float_workspace.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1980,6 +1981,27 @@ void CpuExecutor::inverse_2d(
         return;
     }
 
+#if defined(DSMVC_HAS_AVX512_OBJECT)
+    const auto wide_band = [](std::int32_t band) {
+        return band == 5 || band == 7 || band == 11;
+    };
+    if (path_ == CpuPath::avx512 && wide_band(horizontal.half_bandwidth)
+        && wide_band(vertical.half_bandwidth)
+        && horizontal.destination_size >= 64 && vertical.source_size >= 16) {
+        const auto stride = detail::checked_size_round_up(
+            static_cast<std::size_t>(horizontal.destination_size), 16U,
+            "AVX-512 split intermediate stride");
+        thread_local std::vector<float> storage;
+        auto *intermediate = detail::aligned_float_workspace<64>(storage,
+            detail::checked_size_product(static_cast<std::size_t>(vertical.source_size),
+                stride, "AVX-512 split intermediate"), "AVX-512 split intermediate");
+        inverse_rows(horizontal, input, input_row_stride,
+                     intermediate, static_cast<std::ptrdiff_t>(stride), vertical.source_size);
+        inverse_columns(vertical, intermediate, static_cast<std::ptrdiff_t>(stride),
+                        output, output_row_stride, horizontal.destination_size);
+        return;
+    }
+#endif
 #if defined(DSMVC_HAS_NEON_OBJECT)
     if (path_ == CpuPath::neon) {
         const auto packed_horizontal = impl_->get(horizontal);

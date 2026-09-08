@@ -60,6 +60,47 @@ static inline uint image_index(uint direction, uint vector, uint axis_index,
                                         : axis_index * stride + vector;
 }
 
+// Fixed counts preserve the original sparse order and single FMA accumulator.
+template <uint Count>
+static inline float rhs_count(
+    device const float *source, constant AxisJob &job,
+    device const int *indices, device const float *weights,
+    uint vector, uint begin) {
+    float sum = 0.0f;
+    #pragma clang loop unroll(full)
+    for (uint offset = 0u; offset < Count; ++offset) {
+        const uint entry = begin + offset;
+        sum = fma(weights[entry],
+                  source[image_index(job.direction, vector, uint(indices[entry]),
+                                     job.input_stride, job.reserved)], sum);
+    }
+    return sum;
+}
+
+static inline float ordered_rhs(
+    device const float *source, constant AxisJob &job,
+    device const int *indices, device const float *weights,
+    uint vector, uint begin, uint end, uint bandwidth) {
+    const uint count = end - begin;
+    if (bandwidth == 5u) {
+        if (count == 6u) return rhs_count<6>(source, job, indices, weights, vector, begin);
+        if (count == 7u) return rhs_count<7>(source, job, indices, weights, vector, begin);
+    } else if (bandwidth == 7u) {
+        if (count == 9u) return rhs_count<9>(source, job, indices, weights, vector, begin);
+        if (count == 10u) return rhs_count<10>(source, job, indices, weights, vector, begin);
+    } else if (bandwidth == 11u) {
+        if (count == 13u) return rhs_count<13>(source, job, indices, weights, vector, begin);
+        if (count == 14u) return rhs_count<14>(source, job, indices, weights, vector, begin);
+    }
+    float sum = 0.0f;
+    for (uint entry = begin; entry < end; ++entry) {
+        sum = fma(weights[entry],
+                  source[image_index(job.direction, vector, uint(indices[entry]),
+                                     job.input_stride, job.reserved)], sum);
+    }
+    return sum;
+}
+
 template <uint HalfBandwidth>
 static inline float apply_lower_window(
     float sum, device const float *lower_ld, uint destination_size, uint i,
@@ -160,17 +201,10 @@ static inline void inverse_axis_fixed_wide_impl(
     float lag7 = 0.0f;
 
     for (uint i = 0; i < job.destination_size; ++i) {
-        float sum = 0.0f;
         const uint begin = transpose_offsets[i];
         const uint end = transpose_offsets[i + 1u];
-        for (uint entry = begin; entry < end; ++entry) {
-            const uint source_axis = uint(transpose_indices[entry]);
-            sum = fma(
-                transpose_weights[entry],
-                source[image_index(job.direction, vector, source_axis,
-                                   job.input_stride, job.reserved)],
-                sum);
-        }
+        float sum = ordered_rhs(source, job, transpose_indices, transpose_weights,
+                                vector, begin, end, HalfBandwidth);
         sum = apply_lower_window<HalfBandwidth>(
             sum, lower_ld, job.destination_size, i,
             lag1, lag2, lag3, lag4, lag5, lag6, lag7);
@@ -195,6 +229,7 @@ static inline void inverse_axis_fixed_wide_impl(
     }
 }
 
+template <uint FixedHalfBandwidth>
 static inline void inverse_axis_impl(
     device const float *source,
     constant AxisJob &job,
@@ -205,8 +240,7 @@ static inline void inverse_axis_impl(
     device const float *upper_l,
     device const float *inverse_diagonal,
     device float *output,
-    uint global_vector,
-    uint fixed_half_bandwidth) {
+    uint global_vector) {
     const uint batch = global_vector / job.vector_count;
     const uint vector = global_vector - batch * job.vector_count;
     if (batch >= job.batch_count) return;
@@ -215,8 +249,8 @@ static inline void inverse_axis_impl(
     source += batch * job.input_frame_stride;
     output += batch * job.output_frame_stride;
 
-    const uint half_bandwidth = fixed_half_bandwidth == 0u
-        ? job.half_bandwidth : fixed_half_bandwidth;
+    const uint half_bandwidth = FixedHalfBandwidth == 0u
+        ? job.half_bandwidth : FixedHalfBandwidth;
     const uint output_base = job.direction == horizontal_axis
         ? vector * job.output_stride : vector;
     const uint output_step = job.direction == horizontal_axis
@@ -226,13 +260,21 @@ static inline void inverse_axis_impl(
         float sum = 0.0f;
         const uint begin = transpose_offsets[i];
         const uint end = transpose_offsets[i + 1u];
-        for (uint entry = begin; entry < end; ++entry) {
-            const uint source_axis = uint(transpose_indices[entry]);
-            sum = fma(
-                transpose_weights[entry],
-                source[image_index(job.direction, vector, source_axis,
-                                   job.input_stride, job.reserved)],
-                sum);
+        // H5/H7 use the dedicated wide implementation. Keep the generic,
+        // H1 and H3 entry points free of unused RHS specializations.
+        if (FixedHalfBandwidth == 11u) {
+            sum = ordered_rhs(source, job, transpose_indices, transpose_weights,
+                              vector, begin, end, 11u);
+        } else
+        {
+            for (uint entry = begin; entry < end; ++entry) {
+                const uint source_axis = uint(transpose_indices[entry]);
+                sum = fma(
+                    transpose_weights[entry],
+                    source[image_index(job.direction, vector, source_axis,
+                                       job.input_stride, job.reserved)],
+                    sum);
+            }
         }
         const uint available = min(half_bandwidth, i);
         for (uint distance = available; distance >= 1u; --distance) {
@@ -282,9 +324,9 @@ kernel void NAME( \
     device const float *inverse_diagonal [[buffer(7)]], \
     device float *output [[buffer(8)]], \
     uint vector [[thread_position_in_grid]]) { \
-    inverse_axis_impl(source, job, transpose_offsets, transpose_indices, \
+    inverse_axis_impl<HALF_BANDWIDTH>(source, job, transpose_offsets, transpose_indices, \
         transpose_weights, lower_ld, upper_l, inverse_diagonal, output, \
-        vector, HALF_BANDWIDTH); \
+        vector); \
 }
 
 #define DEFINE_INVERSE_AXIS_WIDE(NAME, HALF_BANDWIDTH) \
@@ -308,12 +350,14 @@ DEFINE_INVERSE_AXIS(inverse_axis_h1, 1u)
 DEFINE_INVERSE_AXIS(inverse_axis_h3, 3u)
 DEFINE_INVERSE_AXIS_WIDE(inverse_axis_h5, 5u)
 DEFINE_INVERSE_AXIS_WIDE(inverse_axis_h7, 7u)
+DEFINE_INVERSE_AXIS(inverse_axis_h11, 11u)
 DEFINE_INVERSE_AXIS(inverse_axis_generic, 0u)
 
 DEFINE_INVERSE_AXIS(inverse_axis_transposed_h1, 1u)
 DEFINE_INVERSE_AXIS(inverse_axis_transposed_h3, 3u)
 DEFINE_INVERSE_AXIS_WIDE(inverse_axis_transposed_h5, 5u)
 DEFINE_INVERSE_AXIS_WIDE(inverse_axis_transposed_h7, 7u)
+DEFINE_INVERSE_AXIS(inverse_axis_transposed_h11, 11u)
 DEFINE_INVERSE_AXIS(inverse_axis_transposed_generic, 0u)
 
 #define DEFINE_INVERSE_AXIS_BATCH(NAME, HALF_BANDWIDTH) \
@@ -329,13 +373,13 @@ kernel void NAME( \
     device float *output [[buffer(8)]], \
     uint2 position [[thread_position_in_grid]]) { \
     constant AxisBatchJob &batch = jobs[position.y]; \
-    inverse_axis_impl(source + batch.input_offset, batch.axis, \
+    inverse_axis_impl<HALF_BANDWIDTH>(source + batch.input_offset, batch.axis, \
         transpose_offsets + batch.transpose_offsets_offset, \
         transpose_indices + batch.transpose_indices_offset, \
         transpose_weights + batch.transpose_weights_offset, \
         lower_ld + batch.lower_ld_offset, upper_l + batch.upper_l_offset, \
         inverse_diagonal + batch.inverse_diagonal_offset, \
-        output + batch.output_offset, position.x, HALF_BANDWIDTH); \
+        output + batch.output_offset, position.x); \
 }
 
 #define DEFINE_INVERSE_AXIS_BATCH_WIDE(NAME, HALF_BANDWIDTH) \
@@ -365,12 +409,14 @@ DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_h1, 1u)
 DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_h3, 3u)
 DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_batch_h5, 5u)
 DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_batch_h7, 7u)
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_h11, 11u)
 DEFINE_INVERSE_AXIS_BATCH(inverse_axis_batch_generic, 0u)
 
 DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_h1, 1u)
 DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_h3, 3u)
 DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_transposed_batch_h5, 5u)
 DEFINE_INVERSE_AXIS_BATCH_WIDE(inverse_axis_transposed_batch_h7, 7u)
+DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_h11, 11u)
 DEFINE_INVERSE_AXIS_BATCH(inverse_axis_transposed_batch_generic, 0u)
 
 template <typename Sample>

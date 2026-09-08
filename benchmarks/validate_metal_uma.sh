@@ -246,7 +246,7 @@ configure_build() {
         -DCMAKE_OSX_ARCHITECTURES="$architecture"
         -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)"
         -DDSMVC_VAPOURSYNTH_SDK="$sdk"
-        -DDSMVC_BUILD_METAL_EXPERIMENTS="$metal"
+        -DDSMVC_ENABLE_METAL="$metal"
         -DDSMVC_BUILD_BENCHMARKS=OFF
         -DBUILD_TESTING=ON)
     if [[ -n "$vs_python" ]]; then

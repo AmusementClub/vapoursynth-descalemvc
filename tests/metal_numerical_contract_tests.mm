@@ -189,6 +189,15 @@ int main() {
                 fixtures[index].input_seed ^ 0xa511e9b3U);
         }
 
+        const auto wide = std::make_shared<const dsmvc::AxisPlan>(
+            dsmvc::build_axis_plan(dsmvc::numerical::make_axis_request(
+                192, 169, 168.5, 0.1875, dsmvc::KernelKind::lanczos, 6,
+                dsmvc::BorderMode::symmetric, dsmvc::F64Mode::float32_only)));
+        require(wide->half_bandwidth == 11, "Metal B11 fixture drifted");
+        check_metal_route("b11/horizontal", wide, identity, 0xb1100001U);
+        check_metal_route("b11/vertical", identity, wide, 0xb1100002U);
+        check_metal_route("b11/2d", wide, wide, 0xb1100003U);
+
         const auto generic = make_generic_plan();
         check_metal_route(
             "generic-b9/horizontal", generic, identity, 0x9e110001U);
