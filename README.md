@@ -218,7 +218,7 @@ separate horizontal and vertical passes with a 64-byte aligned intermediate.
 The horizontal pass keeps its existing ISA selection; Lanczos6 horizontal
 work still uses AVX2. Other 2D shapes, F64, and integer operations keep their
 existing kernels. NEON half-bandwidth-11 height-axis solves share coefficients
-across 16 columns. See the [GCP exploration report](docs/cpu-gcp-exploration-20260908.md)
+across 16 columns. See the [CPU release benchmark](docs/release-benchmark-v0.1.3.md)
 for measured gains and validation boundaries.
 The AVX2 F32 `Debilinear` / `Debicubic` / `Delanczos(taps=3)` / `Despline64`
 width-axis kernels write complete 8-wide tiles directly and keep only the
@@ -313,8 +313,8 @@ fixed counts only in the admitted fused Float32 routes: CUDA half-bandwidths
 5/7/11. Other counts and routes retain the dynamic loop. The former three
 `DSMVC_*_RHS_SPAN_EXPERIMENT` options have been removed; GPU backend selection
 and adaptive routing still use the existing settings. See the
-[default-promotion validation](docs/gpu-default-promotion-20260908.md) for
-performance scope and rejected cases.
+[GPU release benchmark](docs/release-benchmark-gpu-v0.1.3.md) for
+measured performance and workload boundaries.
 
 `DSMVC_ENABLE_METAL` is the single Metal build switch. An existing
 `DSMVC_BUILD_METAL_EXPERIMENTS` cache value is migrated once and removed.

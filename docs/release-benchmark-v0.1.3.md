@@ -41,7 +41,7 @@ kernel; its results do not measure the new F32 column route. The supplemental
 2D case explicitly checks that both axes use F32. These are engine timings,
 not video decode or complete GetNative scan timings.
 
-The [full benchmark report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/codex/release-v0.1.3/docs/release-benchmark-v0.1.3.md)
+The [full benchmark report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.3/docs/release-benchmark-v0.1.3.md)
 includes the original five-by-three results, absolute times, every paired
 ratio, environment failures, and reproduction instructions.
 

@@ -1,6 +1,6 @@
-# GPU package benchmark: v0.1.2 vs v0.1.3 draft
+# GPU package benchmark: v0.1.2 vs v0.1.3 candidate
 
-The published v0.1.2 and draft v0.1.3 Linux CPU/CUDA/Vulkan archives are tested on the same local RTX 5080 through SSH. The candidate is built from `d0ce31fb46e3c8e90cd8fc1307316554d119ba49`. This is a release-package comparison, not a product of previous incremental gains.
+The published v0.1.2 and pre-merge v0.1.3 candidate Linux CPU/CUDA/Vulkan archives were tested on the same local RTX 5080 through SSH. The candidate is built from `d0ce31fb46e3c8e90cd8fc1307316554d119ba49`. This is a release-package comparison, not a product of previous incremental gains.
 
 Primary ratio is candidate FPS / baseline FPS for each AB/BA pair, summarized by the median of all five pairs. VSPipe prints FPS with more significant digits than elapsed seconds; raw FPS reduces display quantization. Whole-process wall ratios are retained separately and include graph startup and warmup. No case is selected or discarded based on gain. The [R78 VSPipe source](https://github.com/vapoursynth/vapoursynth/blob/R78/src/vspipe/vspipe.cpp#L540-L560) starts the output timer after script evaluation, which contains source preparation and this harness's warmup.
 
@@ -146,4 +146,4 @@ taskset -c 0 vspipe -a plugin=/path/to/dsmvc.so -a backend=cuda \
 
 Use `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and the NVIDIA Vulkan ICD. Leave both `DSMVC_CUDA_SPLIT_RHS` and `DSMVC_VULKAN_SPLIT_RHS` unset for automatic selection; set both to `0` for forced fused cells. The raw data records the exact binary and policy for each sample. The source frame is identified by its hash and is not redistributed in the repository.
 
-This report was added after the packages were built. The package source remains `d0ce31fb46e3c8e90cd8fc1307316554d119ba49`; a later documentation commit does not change the tested binaries.
+This historical benchmark retains the exact candidate-package hashes above. The tagged release is rebuilt from the merged main-branch source, which retains these runtime kernels and adds Linux arm64 CPU packaging. The timings describe the recorded candidate binaries; they are not a second timing campaign on the rebuilt release archives.

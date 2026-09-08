@@ -1,10 +1,12 @@
 name: Release packages
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (for example 1.2.3; the tag will be v1.2.3)"
+        description: "Existing release tag version (for example 1.2.3; creates a draft only)"
         required: true
         type: string
 
@@ -12,15 +14,43 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ inputs.version }}
+  group: release-${{ github.workflow }}-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 env:
   VS_SDK_REF: 325756ed04588b31840fdb74479537cddcba4bf7
 
 jobs:
+  prepare:
+    name: Verify tagged main-branch source
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out tagged source and branch history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify version, tag and default branch
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          version="${REQUESTED_VERSION#v}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "refs/tags/v${version}^{commit}")" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
+          grep -Fx "# dsmvc v${version}" docs/release-description.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   portable:
     name: ${{ matrix.artifact }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,10 +58,19 @@ jobs:
         include:
           - os: ubuntu-24.04
             artifact: dsmvc-linux-x64-cpu-cuda-vulkan
+            enable-cuda: true
+            enable-vulkan: true
             cuda-subpackages: '["nvcc", "cuobjdump", "cudart", "crt", "nvtx"]'
           - os: windows-2022
             artifact: dsmvc-windows-x64-cpu-cuda-vulkan
+            enable-cuda: true
+            enable-vulkan: true
             cuda-subpackages: '["nvcc", "nvvm", "cuobjdump", "cudart", "crt", "nvtx", "visual_studio_integration"]'
+          - os: ubuntu-24.04-arm
+            artifact: dsmvc-linux-arm64-cpu
+            enable-cuda: false
+            enable-vulkan: false
+            cuda-subpackages: '[]'
 
     steps:
       - name: Check out dsmvc
@@ -49,6 +88,7 @@ jobs:
           persist-credentials: false
 
       - name: Install CUDA Toolkit
+        if: matrix.enable-cuda
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: 13.2.0
@@ -57,6 +97,7 @@ jobs:
           log-file-suffix: ${{ matrix.os }}
 
       - name: Install Vulkan SDK
+        if: matrix.enable-vulkan
         uses: jakoch/install-vulkan-sdk-action@v1.6.0
         with:
           vulkan_version: 1.4.313.0
@@ -67,17 +108,18 @@ jobs:
           github_token: ${{ github.token }}
 
       - name: Add Windows Vulkan runtime to PATH
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.enable-vulkan
         shell: bash
         run: echo "${VULKAN_SDK}/runtime/x64" >> "$GITHUB_PATH"
 
       - name: Install Linux Vulkan validation layers
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.enable-vulkan
         run: |
           sudo apt-get update
           sudo apt-get install -y vulkan-validationlayers
 
       - name: Verify GPU build tools
+        if: matrix.enable-cuda && matrix.enable-vulkan
         shell: bash
         run: |
           command -v nvcc
@@ -93,15 +135,20 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DBUILD_TESTING=ON
           -DDSMVC_ENABLE_NATIVE_CPU_SIMD=ON
-          -DDSMVC_ENABLE_CUDA=ON
-          -DDSMVC_ENABLE_VULKAN=ON
+          -DDSMVC_ENABLE_CUDA=${{ matrix.enable-cuda }}
+          -DDSMVC_ENABLE_VULKAN=${{ matrix.enable-vulkan }}
           -DDSMVC_ENABLE_METAL=OFF
           -DDSMVC_VAPOURSYNTH_SDK="${{ github.workspace }}/dependencies/vapoursynth"
+
+      - name: Verify native Linux arm64 configuration
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: test "$(uname -m)" = aarch64
 
       - name: Build Release
         run: cmake --build build --config Release --parallel
 
       - name: Test with Vulkan validation and software driver
+        if: matrix.enable-vulkan
         shell: bash
         env:
           DSMVC_VULKAN_VALIDATION: 1
@@ -121,12 +168,20 @@ jobs:
           vulkaninfo --summary
           ctest --test-dir build --build-config Release --output-on-failure
 
+      - name: Test CPU-only Release
+        if: ${{ !matrix.enable-vulkan }}
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
       - name: Stage package
         shell: bash
         run: |
           cmake --install build --config Release --prefix package
           test -f package/vapoursynth/dsmvc.so || test -f package/vapoursynth/dsmvc.dll
           test -z "$(find package -type f -name '*.spv' -print -quit)"
+
+      - name: Verify Linux arm64 CPU package
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: python3 cmake/verify_linux_arm64_cpu_package.py build package
 
       - name: Archive package
         shell: bash
@@ -142,6 +197,7 @@ jobs:
 
   macos-metal:
     name: dsmvc-macos-arm64-cpu-metal
+    needs: prepare
     runs-on: macos-15
     steps:
       - name: Check out dsmvc
@@ -221,7 +277,7 @@ jobs:
 
   draft-release:
     name: Create draft release
-    needs: [portable, macos-metal]
+    needs: [prepare, portable, macos-metal]
     runs-on: ubuntu-24.04
     steps:
       - name: Check out release notes
@@ -237,13 +293,17 @@ jobs:
 
       - name: Validate version
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
           version="${RELEASE_VERSION#v}"
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+          for package in dsmvc-linux-x64-cpu-cuda-vulkan dsmvc-linux-arm64-cpu \
+            dsmvc-windows-x64-cpu-cuda-vulkan dsmvc-macos-arm64-cpu-metal; do
+            test -s "release-assets/$package.tar.gz"
+          done
           (cd release-assets && sha256sum ./*.tar.gz > SHA256SUMS)
 
       - name: Create draft GitHub release
@@ -257,12 +317,12 @@ jobs:
           existing_sha=$(git ls-remote --tags origin \
             "refs/tags/v${RELEASE_VERSION}" "refs/tags/v${RELEASE_VERSION}^{}" \
             | awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }')
-          if [[ -n "$existing_sha" && "$existing_sha" != "$GITHUB_SHA" ]]; then
+          if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
             echo "The release tag already points to another commit: $existing_sha" >&2
             exit 1
           fi
           gh release create "v${RELEASE_VERSION}" release-assets/* \
-            --draft --target "$GITHUB_SHA" --title "dsmvc ${RELEASE_VERSION}" \
+            --draft --verify-tag --target "$GITHUB_SHA" --title "dsmvc ${RELEASE_VERSION}" \
             --notes-file docs/release-description.md
           gh release view "v${RELEASE_VERSION}" \
             --json isDraft,publishedAt,targetCommitish,url \

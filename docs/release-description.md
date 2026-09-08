@@ -62,15 +62,16 @@ kernel; its results do not measure the new F32 column route. The supplemental
 2D case explicitly checks that both axes use F32. These are engine timings,
 not video decode or complete GetNative scan timings.
 
-The [full benchmark report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/codex/release-v0.1.3/docs/release-benchmark-v0.1.3.md)
+The [full benchmark report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.3/docs/release-benchmark-v0.1.3.md)
 includes the original five-by-three results, absolute times, every paired
 ratio, environment failures, and reproduction instructions.
 
 ## GPU vs v0.1.2 (RTX 5080)
 
 Fresh comparisons use the actual Linux release archives on the same RTX 5080,
-NVIDIA driver 595.84, Ryzen 9 5950X, and VapourSynth R78. The v0.1.3 package
-is built from `d0ce31fb46e3c8e90cd8fc1307316554d119ba49`. Ratios are the median
+NVIDIA driver 595.84, Ryzen 9 5950X, and VapourSynth R78. The v0.1.3 candidate
+was built from `d0ce31fb46e3c8e90cd8fc1307316554d119ba49`; its runtime sources
+are retained in the tagged build. Ratios are the median
 of five alternating A/B or B/A pairs: **candidate FPS / v0.1.2 FPS**.
 Larger is faster. Every planned case and all five pairs are retained.
 
@@ -129,7 +130,7 @@ hash matches; repeated outputs are exact and all CPU-scalar comparisons meet
 The hardware results cover Linux on this RTX 5080; Metal, Windows GPU runtime,
 and other GPU architectures retain their separate evidence boundaries.
 
-The [full GPU report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/codex/release-v0.1.3/docs/release-benchmark-gpu-v0.1.3.md)
+The [full GPU report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.3/docs/release-benchmark-gpu-v0.1.3.md)
 provides all paired ranges, absolute FPS, whole-process wall ratios, workload
 scripts and output hashes in its linked machine-readable data.
 
@@ -140,12 +141,14 @@ scripts and output hashes in its linked machine-readable data.
 - The Float32 scalar/SIMD and mixed CPU/GPU tolerance contracts are unchanged.
   Fixed routes remain deterministic; concurrency-dependent mixed routing retains
   the existing numerical tolerance.
-- Packages: Linux x64 CPU/CUDA/Vulkan, Windows x64 CPU/CUDA/Vulkan, and macOS
-  arm64 CPU/Metal (deployment target macOS 13.3). macOS 13.3 is the target,
+- Packages: Linux x64 CPU/CUDA/Vulkan, Linux arm64 CPU/NEON, Windows x64
+  CPU/CUDA/Vulkan, and macOS arm64 CPU/Metal (deployment target macOS 13.3).
+  The Linux arm64 package is built and tested on a native arm64 runner.
+  macOS 13.3 is the target,
   not a claim of testing on that OS version.
 - CUDA packages contain native SM75/86/89/120 and PTX75/120 targets. Hardware
   coverage does not imply execution on every compiled GPU architecture.
-- `SHA256SUMS` covers all three package archives. The macOS archive also
+- `SHA256SUMS` covers all four package archives. The macOS archive also
   includes its source/build manifest and per-file checksums.
 
 The earlier GPU and incremental CPU reports retain their own baselines and
