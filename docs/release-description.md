@@ -20,8 +20,7 @@ CPU and Metal paths, and automatic backend selection are unchanged.
   16-bit and Float32 2D frames straight from frame memory by default.
 - **GPU frames (VapourSynth R81):** a `std.GPUUpload()` clip is processed on
   the core's own Vulkan device, or by CUDA through exported memory, and stays
-  on the GPU. This needs a build against the API 4.3 headers; see
-  "Compatibility and packages".
+  on the GPU.
 - **Direct transfers on vapoursynth-classic (R57.A14 and later):** opt-in with
   `DSMVC_CUDA_DIRECT_IO=1` or `DSMVC_VULKAN_DIRECT_IO=1`. Frame pool blocks are
   registered or imported once and rows are copied straight between them and
@@ -111,11 +110,10 @@ tested.
   backend selection keep their meaning. No script needs to change.
 - The Float32 scalar/SIMD and mixed CPU/GPU tolerance contracts are unchanged.
 - The plugin still declares API 4.0 and loads on API 4 cores, including
-  vapoursynth-classic. GPU frames are compiled in only when the plugin is
-  built against headers that include `VSVulkan4.h` (API 4.3) with Vulkan
-  enabled, and are enabled at run time on R81 only (`DSMVC_GPU_FRAMES=force`
-  allows another core). Packages built against the R57 SDK do not take GPU
-  clips.
+  vapoursynth-classic. The Linux x64 and Windows x64 packages are built
+  against the API 4.3 headers of R81 and include GPU frames, which are enabled
+  at run time on R81 only (`DSMVC_GPU_FRAMES=force` allows another core). On
+  any other core the same binary behaves as before.
 - A Vulkan slot now holds the workspace of all planes of a frame: about three
   times the previous figure for RGB (245 MB per slot at 4K).
 - New switches, all optional: `DSMVC_GPU_SOLVE_PARTITION=0`,
