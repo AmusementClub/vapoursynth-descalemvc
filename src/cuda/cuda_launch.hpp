@@ -75,6 +75,14 @@ namespace dsmvc::cuda_detail::cuda_launch {
     const float *lower, const float *upper, const float *diagonal,
     float *output, unsigned int threads, cudaStream_t stream);
 
+// Partitioned in-place solve of column-major vectors (src/solve_partition.hpp).
+// `transfers` holds the forward then backward chunk transfer matrices.
+[[nodiscard]] cudaError_t solve_chunked(
+    std::uint32_t vector_count, cuda_kernel::AxisPlanDescriptor plan,
+    std::uint32_t chunks, std::uint32_t chunk_length,
+    const float *lower, const float *upper, const float *diagonal,
+    const float *transfers, float *output, cudaStream_t stream);
+
 [[nodiscard]] cudaError_t inverse_horizontal_f64(
     const double *source, std::uint32_t vector_count,
     cuda_kernel::AxisPlanDescriptor plan,

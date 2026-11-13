@@ -66,6 +66,16 @@ struct RuntimeApi {
             row_bytes, rows, cudaMemcpyDeviceToHost, stream);
     }
 
+    [[nodiscard]] cudaError_t memcpy_2d_dtod_async(
+        void *destination, std::size_t destination_pitch,
+        const void *source, std::size_t source_pitch,
+        std::size_t row_bytes, std::size_t rows,
+        cudaStream_t stream) const noexcept {
+        return cudaMemcpy2DAsync(
+            destination, destination_pitch, source, source_pitch,
+            row_bytes, rows, cudaMemcpyDeviceToDevice, stream);
+    }
+
     [[nodiscard]] cudaError_t mem_host_alloc(
         void **pointer, std::size_t bytes,
         unsigned int flags) const noexcept {

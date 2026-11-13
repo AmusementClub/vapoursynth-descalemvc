@@ -4,6 +4,22 @@
 #include "cuda_kernel.hpp"
 #include "cuda_runtime.hpp"
 #include "nvtx.hpp"
+#include "../host_copy.hpp"
+#include "../solve_partition.hpp"
+
+#include <dsmvc/host_blocks.hpp>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -127,6 +143,13 @@ execution_slot_configuration() noexcept {
     return fallback;
 }
 
+// DSMVC_CUDA_WAIT=spin restores the driver's default wait, which spins a core
+// while a slot's work is in flight (one context on a multi-core host).
+[[nodiscard]] bool blocking_wait_requested() noexcept {
+    const char *text = std::getenv("DSMVC_CUDA_WAIT");
+    return !text || std::string_view{text} != "spin";
+}
+
 enum class SplitRhsMode : std::uint8_t {
     disabled,
     adaptive,
@@ -134,6 +157,13 @@ enum class SplitRhsMode : std::uint8_t {
 };
 
 enum class HostTransferMode : std::uint8_t {
+    // Unset: 16-bit and Float32 frames are copied by the driver straight
+    // from frame memory (it stages pageable memory in chunks that stay in
+    // cache), 8-bit frames through dsmvc's pinned staging. Measured on an
+    // RTX 5080 / Ryzen 9 5950X host, 1080p 2D: the driver path is 6-18%
+    // faster with 37-47% less CPU for 16-bit and Float32, and 19% slower for
+    // 8-bit frames.
+    automatic,
     staging,
     pageable,
     registered,
@@ -151,10 +181,23 @@ enum class HostTransferMode : std::uint8_t {
     if (text && std::string_view{text} == "registered") {
         return HostTransferMode::registered;
     }
-    if (!text || std::string_view{text} == "staging-decoupled") {
+    if (!text || std::string_view{text} == "auto") {
+        return HostTransferMode::automatic;
+    }
+    if (std::string_view{text} == "staging-decoupled") {
         return HostTransferMode::staging_decoupled;
     }
-    return HostTransferMode::staging_decoupled;
+    return HostTransferMode::automatic;
+}
+
+// Direct transfers to and from vapoursynth-classic frame blocks are opt-in
+// (DSMVC_CUDA_DIRECT_IO=1). An explicit DSMVC_CUDA_HOST_TRANSFER keeps its
+// meaning: its registered mode registers every frame per call, which would
+// clash with the block registrations.
+[[nodiscard]] bool block_direct_io_requested() noexcept {
+    const char *direct = std::getenv("DSMVC_CUDA_DIRECT_IO");
+    return direct && std::string_view{direct} == "1"
+        && !std::getenv("DSMVC_CUDA_HOST_TRANSFER");
 }
 
 [[nodiscard]] SplitRhsMode split_rhs_mode() noexcept {
@@ -1062,6 +1105,15 @@ struct ExecutionSlot {
         cuda_check(
             *api, api->stream_create(&stream, cudaStreamNonBlocking),
             "cudaStreamCreateWithFlags");
+        if (blocking_wait_requested()) {
+            const cudaError_t status = api->event_create(
+                &done, cudaEventBlockingSync | cudaEventDisableTiming);
+            if (status != cudaSuccess) {
+                (void)api->stream_destroy(stream);
+                stream = nullptr;
+                cuda_check(*api, status, "cudaEventCreateWithFlags(slot)");
+            }
+        }
     }
 
     ~ExecutionSlot() {
@@ -1071,6 +1123,7 @@ struct ExecutionSlot {
             const bool changed = queried && previous != cuda_device
                 && cudaSetDevice(cuda_device) == cudaSuccess;
             (void)api->stream_synchronize(stream);
+            if (done) (void)api->event_destroy(done);
             (void)api->stream_destroy(stream);
             if (changed) (void)cudaSetDevice(previous);
         }
@@ -1079,9 +1132,19 @@ struct ExecutionSlot {
     ExecutionSlot(const ExecutionSlot &) = delete;
     ExecutionSlot &operator=(const ExecutionSlot &) = delete;
 
+    // Waits for everything queued on the stream. The blocking-sync event
+    // lets the thread sleep instead of spinning in cudaStreamSynchronize.
+    [[nodiscard]] cudaError_t synchronize() const noexcept {
+        if (!done) return api->stream_synchronize(stream);
+        const cudaError_t recorded = api->event_record(done, stream);
+        if (recorded != cudaSuccess) return recorded;
+        return api->event_synchronize(done);
+    }
+
     std::shared_ptr<RuntimeApi> api;
     int cuda_device = -1;
     cudaStream_t stream = nullptr;
+    cudaEvent_t done = nullptr;
     PinnedBuffer host_source;
     PinnedBuffer host_destination;
     DeviceBuffer source;
@@ -1090,6 +1153,210 @@ struct ExecutionSlot {
     DeviceBuffer destination;
     DeviceBuffer integer_output;
     DeviceBuffer f64_status;
+};
+
+// ---- GPU frames of a VapourSynth core, imported through exported memory ----
+
+// Vulkan handle type bits the core can export.
+constexpr int export_opaque_fd = 0x1;
+[[maybe_unused]] constexpr int export_opaque_win32 = 0x2;
+[[maybe_unused]] constexpr int export_opaque_win32_kmt = 0x4;
+
+// The handle of an exported plane: a POSIX fd is consumed by a successful
+// import; an NT handle never is. A KMT handle is a global name, not a
+// reference: there is nothing to close.
+void close_exported_handle(
+    std::intptr_t handle, [[maybe_unused]] int handle_type) noexcept {
+#if defined(_WIN32)
+    if (handle != 0 && handle != -1 && handle_type != export_opaque_win32_kmt) {
+        CloseHandle(reinterpret_cast<HANDLE>(handle));
+    }
+#else
+    if (handle >= 0) ::close(static_cast<int>(handle));
+#endif
+}
+
+// One allocation of a core, imported into CUDA once; the planes of its frames
+// are addressed by offset. Destroyed when the cache has dropped it and the last
+// execution using it has finished.
+class ImportedAllocation {
+public:
+    ImportedAllocation(int device, const dsmvc::ExportedPlane &plane)
+        : device_(device) {
+        CurrentDeviceGuard current(device_);
+        cudaExternalMemoryHandleDesc desc{};
+        bool importable = false;
+#if defined(_WIN32)
+        if (plane.handle_type == export_opaque_win32) {
+            desc.type = cudaExternalMemoryHandleTypeOpaqueWin32;
+            desc.handle.win32.handle = reinterpret_cast<void *>(plane.handle);
+            importable = true;
+        } else if (plane.handle_type == export_opaque_win32_kmt) {
+            desc.type = cudaExternalMemoryHandleTypeOpaqueWin32Kmt;
+            desc.handle.win32.handle = reinterpret_cast<void *>(plane.handle);
+            importable = true;
+        }
+#else
+        if (plane.handle_type == export_opaque_fd) {
+            desc.type = cudaExternalMemoryHandleTypeOpaqueFd;
+            desc.handle.fd = static_cast<int>(plane.handle);
+            importable = true;
+        }
+#endif
+        if (!importable) {
+            close_exported_handle(plane.handle, plane.handle_type);
+            throw std::runtime_error(
+                "the core exports GPU memory in a form CUDA cannot import");
+        }
+        desc.size = plane.memory_size;
+        cudaError_t status = cudaImportExternalMemory(&memory_, &desc);
+        if (status != cudaSuccess) {
+            // A dedicated allocation must be imported as one. The handle is
+            // only consumed by a successful import, so it can be tried again.
+            (void)cudaGetLastError();
+            desc.flags = cudaExternalMemoryDedicated;
+            status = cudaImportExternalMemory(&memory_, &desc);
+        }
+        if (status != cudaSuccess) {
+            (void)cudaGetLastError();
+            close_exported_handle(plane.handle, plane.handle_type);
+            throw std::runtime_error(
+                std::string{"cudaImportExternalMemory failed: "}
+                + cudaGetErrorString(status));
+        }
+#if defined(_WIN32)
+        close_exported_handle(plane.handle, plane.handle_type); // an NT handle stays ours
+#endif
+        cudaExternalMemoryBufferDesc buffer{};
+        buffer.size = plane.memory_size;
+        void *mapped = nullptr;
+        status = cudaExternalMemoryGetMappedBuffer(&mapped, memory_, &buffer);
+        if (status != cudaSuccess) {
+            (void)cudaGetLastError();
+            (void)cudaDestroyExternalMemory(memory_);
+            memory_ = nullptr;
+            throw std::runtime_error(
+                std::string{"cudaExternalMemoryGetMappedBuffer failed: "}
+                + cudaGetErrorString(status));
+        }
+        base_ = static_cast<std::byte *>(mapped);
+    }
+
+    ~ImportedAllocation() {
+        try {
+            CurrentDeviceGuard current(device_);
+            if (base_) (void)cudaFree(base_);
+            if (memory_) (void)cudaDestroyExternalMemory(memory_);
+            (void)cudaGetLastError();
+        } catch (...) {
+        }
+    }
+    ImportedAllocation(const ImportedAllocation &) = delete;
+    ImportedAllocation &operator=(const ImportedAllocation &) = delete;
+
+    [[nodiscard]] std::byte *base() const noexcept { return base_; }
+
+private:
+    int device_ = 0;
+    cudaExternalMemory_t memory_ = nullptr;
+    std::byte *base_ = nullptr;
+};
+
+// Imports keyed by the core's memoryId (stable, never reused), not by the
+// handle value or a mapped address. Bounded: an import of a block the core has
+// freed keeps that memory alive.
+class ImportCache {
+public:
+    [[nodiscard]] std::shared_ptr<ImportedAllocation> acquire(
+        int device, const dsmvc::ExportedPlane &plane) {
+        {
+            const std::scoped_lock lock(mutex_);
+            if (const auto found = entries_.find(plane.memory_id);
+                found != entries_.end()) {
+                lru_.splice(lru_.end(), lru_, found->second.lru);
+                // Every export is a new handle.
+                close_exported_handle(plane.handle, plane.handle_type);
+                return found->second.allocation;
+            }
+        }
+        // Imported outside the lock; the constructor consumes or closes the handle.
+        auto allocation = std::make_shared<ImportedAllocation>(device, plane);
+        const std::scoped_lock lock(mutex_);
+        if (const auto found = entries_.find(plane.memory_id);
+            found != entries_.end()) {
+            return found->second.allocation; // another thread was first
+        }
+        lru_.push_back(plane.memory_id);
+        entries_.emplace(plane.memory_id,
+                         Entry{allocation, std::prev(lru_.end())});
+        while (entries_.size() > limit_) {
+            const auto victim = entries_.find(lru_.front());
+            lru_.pop_front();
+            entries_.erase(victim);
+        }
+        return allocation;
+    }
+
+    void clear() noexcept {
+        const std::scoped_lock lock(mutex_);
+        entries_.clear();
+        lru_.clear();
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<ImportedAllocation> allocation;
+        std::list<std::uint64_t>::iterator lru;
+    };
+    std::mutex mutex_;
+    std::unordered_map<std::uint64_t, Entry> entries_;
+    std::list<std::uint64_t> lru_;
+    const std::size_t limit_ = [] {
+        const char *text = std::getenv("DSMVC_CUDA_IMPORT_LIMIT");
+        const long value = text ? std::atol(text) : 64;
+        return static_cast<std::size_t>(value > 0 ? value : 64);
+    }();
+};
+
+// Registers whole classic frame pool blocks for the host block registry.
+// Pinning never changes results: a range that is not registered is copied
+// through the driver's own staging, so a failed registration only costs speed.
+struct BlockRegistrar {
+    static inline const RuntimeApi *api = nullptr;
+    static inline int device = -1;
+
+    static host_blocks::Registered register_block(
+        void *base, std::size_t size) noexcept {
+        try {
+            CurrentDeviceGuard current(device);
+            NvtxRange trace{NvtxLabel::host_register, size};
+            const cudaError_t status =
+                api->mem_host_register(base, size, cudaHostRegisterPortable);
+            if (status == cudaSuccess) {
+                return {host_blocks::Outcome::owned, {}};
+            }
+            (void)cudaGetLastError();
+            // Registered by somebody else (another plugin in this process):
+            // the pinned range serves our copies too, and stays theirs.
+            if (status == cudaErrorHostMemoryAlreadyRegistered) {
+                return {host_blocks::Outcome::foreign, {}};
+            }
+        } catch (...) {
+        }
+        return {};
+    }
+
+    static void unregister_block(
+        void *base, std::size_t size,
+        const std::shared_ptr<void> &) noexcept {
+        try {
+            CurrentDeviceGuard current(device);
+            NvtxRange trace{NvtxLabel::host_unregister, size};
+            (void)api->mem_host_unregister(base);
+            (void)cudaGetLastError();
+        } catch (...) {
+        }
+    }
 };
 
 class Runtime {
@@ -1157,10 +1424,20 @@ public:
             plan_stream = nullptr;
             throw;
         }
+        if (block_direct_io_requested()) {
+            BlockRegistrar::api = api.get();
+            BlockRegistrar::device = device_ordinal;
+            host_blocks::install(
+                host_blocks::Domain::cuda,
+                {&BlockRegistrar::register_block,
+                 &BlockRegistrar::unregister_block});
+        }
     }
 
     ~Runtime() {
         if (!api || device_ordinal < 0) return;
+        host_blocks::uninstall(host_blocks::Domain::cuda);
+        imports.clear();
         try {
             CurrentDeviceGuard current(device_ordinal);
             slots.clear();
@@ -1273,6 +1550,7 @@ public:
     DeviceArena input_arena;
     InputCache input_cache;
     PinnedBlockPool frame_staging_arena;
+    ImportCache imports;
     std::vector<std::unique_ptr<ExecutionSlot>> slots;
     std::vector<bool> slot_busy;
     std::mutex slot_mutex;
@@ -1355,6 +1633,8 @@ private:
 
 [[nodiscard]] std::size_t packed_plan_storage_bytes(const AxisPlan &axis) {
     std::size_t total = 0U;
+    const std::size_t transfers = solve_partition::transfer_floats(
+        solve_partition::choose(axis), axis);
     const auto add_field = [&](const auto &values) {
         using Value = typename std::remove_cvref_t<decltype(values)>::value_type;
         const std::size_t alignment = alignof(Value);
@@ -1378,6 +1658,9 @@ private:
         add_field(axis.lower_ld);
         add_field(axis.upper_l);
         add_field(axis.inverse_diagonal);
+        total = checked_add(
+            total, checked_product(transfers, sizeof(float), "CUDA plan field"),
+            "CUDA packed plan");
     }
     if (total > maximum_allocation_bytes) {
         throw std::length_error("CUDA packed plan exceeds 2 GiB");
@@ -1431,6 +1714,8 @@ struct PackedPlan {
         std::size_t lower_offset = 0U;
         std::size_t upper_offset = 0U;
         std::size_t diagonal_offset = 0U;
+        std::size_t transfers_offset = 0U;
+        solve_partition::Partition partition;
         std::size_t weights_f64_offset = 0U;
         std::size_t bands_f64_offset = 0U;
         if (precision == cuda_kernel::PlanPrecision::float64) {
@@ -1441,6 +1726,8 @@ struct PackedPlan {
             lower_offset = reserve_field(axis->lower_ld);
             upper_offset = reserve_field(axis->upper_l);
             diagonal_offset = reserve_field(axis->inverse_diagonal);
+            partition = solve_partition::build(*axis);
+            transfers_offset = reserve_field(partition.transfers);
         }
         if (total_bytes != storage_bytes) {
             throw std::logic_error("CUDA packed plan layout accounting mismatch");
@@ -1472,6 +1759,7 @@ struct PackedPlan {
                 copy_field(lower_offset, axis->lower_ld);
                 copy_field(upper_offset, axis->upper_l);
                 copy_field(diagonal_offset, axis->inverse_diagonal);
+                copy_field(transfers_offset, partition.transfers);
             }
         }
 
@@ -1487,6 +1775,11 @@ struct PackedPlan {
             lower_ld = storage.pointer() + lower_offset;
             upper_l = storage.pointer() + upper_offset;
             inverse_diagonal = storage.pointer() + diagonal_offset;
+            if (partition.chunks != 0U) {
+                solve_chunks = partition.chunks;
+                solve_chunk_length = partition.chunk_length;
+                solve_transfers = storage.pointer() + transfers_offset;
+            }
         }
         bool submitted = false;
         {
@@ -1575,6 +1868,10 @@ struct PackedPlan {
     DevicePointer lower_ld = nullptr;
     DevicePointer upper_l = nullptr;
     DevicePointer inverse_diagonal = nullptr;
+    // Partitioned solve; zero chunks keeps the sequential kernels.
+    std::uint32_t solve_chunks = 0U;
+    std::uint32_t solve_chunk_length = 0U;
+    DevicePointer solve_transfers = nullptr;
     DevicePointer transpose_weights_f64 = nullptr;
     DevicePointer ldlt_bands_f64 = nullptr;
     mutable std::mutex upload_mutex;
@@ -1724,36 +2021,15 @@ private:
 void pack_host_rows(
     const void *source, std::size_t source_pitch, void *destination,
     std::size_t row_bytes, std::size_t rows) {
-    if (source_pitch == row_bytes) {
-        std::memcpy(destination, source, row_bytes * rows);
-        return;
-    }
-    const auto *source_bytes = static_cast<const std::byte *>(source);
-    auto *destination_bytes = static_cast<std::byte *>(destination);
-    for (std::size_t row = 0U; row < rows; ++row) {
-        std::memcpy(
-            destination_bytes + static_cast<std::ptrdiff_t>(row * row_bytes),
-            source_bytes + static_cast<std::ptrdiff_t>(row * source_pitch),
-            row_bytes);
-    }
+    host_copy::copy_rows(
+        destination, row_bytes, source, source_pitch, row_bytes, rows);
 }
 
 void unpack_host_rows(
     const void *source, std::size_t row_bytes, void *destination,
     std::size_t destination_pitch, std::size_t rows) {
-    if (destination_pitch == row_bytes) {
-        std::memcpy(destination, source, row_bytes * rows);
-        return;
-    }
-    const auto *source_bytes = static_cast<const std::byte *>(source);
-    auto *destination_bytes = static_cast<std::byte *>(destination);
-    for (std::size_t row = 0U; row < rows; ++row) {
-        std::memcpy(
-            destination_bytes + static_cast<std::ptrdiff_t>(
-                row * destination_pitch),
-            source_bytes + static_cast<std::ptrdiff_t>(row * row_bytes),
-            row_bytes);
-    }
+    host_copy::copy_rows(
+        destination, destination_pitch, source, row_bytes, row_bytes, rows);
 }
 
 enum class TransposeSample : std::uint8_t {
@@ -1867,10 +2143,40 @@ void schedule_f64_status_download(
         "cudaMemcpyAsync(Float64 finite status download)");
 }
 
+void launch_horizontal_split(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    std::uint32_t vector_count, DevicePointer output,
+    DevicePointer requested_transposed);
+void launch_vertical_split(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    DevicePointer source, std::uint32_t source_width, DevicePointer output);
+
+void launch_solve_chunked(
+    Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
+    std::uint32_t vector_count, DevicePointer output) {
+    cuda_check(
+        *runtime.api,
+        cuda_launch::solve_chunked(
+            vector_count, plan.descriptor, plan.solve_chunks,
+            plan.solve_chunk_length,
+            device_as<const float>(plan.lower_ld),
+            device_as<const float>(plan.upper_l),
+            device_as<const float>(plan.inverse_diagonal),
+            device_as<const float>(plan.solve_transfers),
+            device_as<float>(output), slot.stream),
+        "CUDA partitioned-solve kernel launch");
+}
+
 void launch_horizontal(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
     std::uint32_t vector_count, DevicePointer output,
     DevicePointer requested_transposed = nullptr) {
+    if (plan.solve_chunks != 0U && runtime.horizontal_global_transpose) {
+        // The partitioned solve needs the right-hand side in place first.
+        launch_horizontal_split(
+            runtime, slot, plan, vector_count, output, requested_transposed);
+        return;
+    }
     DevicePointer transposed = requested_transposed
         ? requested_transposed : slot.transposed.pointer();
     const unsigned int shared_bytes = runtime.horizontal_global_transpose
@@ -1909,6 +2215,10 @@ void launch_horizontal_split(
             slot.stream),
         "CUDA horizontal-RHS kernel launch");
 
+    if (plan.solve_chunks != 0U && runtime.horizontal_global_transpose) {
+        launch_solve_chunked(runtime, slot, plan, vector_count, output);
+        return;
+    }
     const unsigned int shared_bytes = runtime.horizontal_global_transpose
         ? 0U
         : runtime.split_horizontal_threads * 33U
@@ -1928,6 +2238,10 @@ void launch_horizontal_split(
 void launch_vertical(
     Runtime &runtime, ExecutionSlot &slot, const PackedPlan &plan,
     DevicePointer source, std::uint32_t source_width, DevicePointer output) {
+    if (plan.solve_chunks != 0U) {
+        launch_vertical_split(runtime, slot, plan, source, source_width, output);
+        return;
+    }
     cuda_check(
         *runtime.api,
         cuda_launch::inverse_vertical(
@@ -1955,6 +2269,10 @@ void launch_vertical_split(
             device_as<float>(output), slot.stream),
         "CUDA vertical-RHS kernel launch");
 
+    if (plan.solve_chunks != 0U) {
+        launch_solve_chunked(runtime, slot, plan, source_width, output);
+        return;
+    }
     cuda_check(
         *runtime.api,
         cuda_launch::solve_vertical(
@@ -2132,9 +2450,42 @@ bool backend_available() noexcept {
     return available;
 }
 
+// Queues a wait for a GPU frame's producer pair ahead of the stream's reads.
+void wait_resident_source(
+    const RuntimeApi &api, const CudaExecutor::ResidentDevice *resident,
+    cudaStream_t stream) {
+    if (!resident || !resident->ready_semaphore) return;
+    auto semaphore =
+        static_cast<cudaExternalSemaphore_t>(resident->ready_semaphore);
+    cudaExternalSemaphoreWaitParams parameters{};
+    parameters.params.fence.value = resident->ready_value;
+    cuda_check(
+        api, cudaWaitExternalSemaphoresAsync(&semaphore, &parameters, 1U, stream),
+        "cudaWaitExternalSemaphoresAsync");
+}
+
 struct CudaExecutor::Impl {
     Impl() : runtime(shared_runtime()) { runtime->attach_executor(); }
-    ~Impl() { runtime->detach_executor(); }
+    ~Impl() {
+        if (!semaphores.empty()) {
+            try {
+                CurrentDeviceGuard current(runtime->device_ordinal);
+                for (const auto &entry : semaphores) {
+                    if (entry.second) {
+                        (void)cudaDestroyExternalSemaphore(entry.second);
+                    }
+                }
+                (void)cudaGetLastError();
+            } catch (...) {
+            }
+        }
+        runtime->detach_executor();
+    }
+
+    // Timeline semaphores of the core, imported once per executor and keyed
+    // by their VkSemaphore. A null entry is one that could not be imported.
+    mutable std::mutex semaphore_mutex;
+    mutable std::unordered_map<std::uint64_t, cudaExternalSemaphore_t> semaphores;
 
     struct PreparedPlan {
         std::shared_ptr<const AxisPlan> axis;
@@ -2195,7 +2546,8 @@ struct CudaExecutor::Impl {
         const Sample *input, std::ptrdiff_t input_row_stride,
         Sample *output, std::ptrdiff_t output_row_stride,
         const IntegerConversion *conversion,
-        std::shared_ptr<const void> input_lifetime) const {
+        std::shared_ptr<const void> input_lifetime,
+        const ResidentDevice *resident = nullptr) const {
         NvtxRange execute_trace{NvtxLabel::execute_2d};
         const bool use_float64 =
             horizontal.requires_float64() || vertical.requires_float64();
@@ -2249,11 +2601,42 @@ struct CudaExecutor::Impl {
             "CUDA destination pitch");
         const bool registered_transfer =
             runtime->host_transfer == HostTransferMode::registered;
+        const bool automatic_transfer =
+            runtime->host_transfer == HostTransferMode::automatic;
         const bool direct_transfer = registered_transfer
-            || runtime->host_transfer == HostTransferMode::pageable;
+            || runtime->host_transfer == HostTransferMode::pageable
+            || (automatic_transfer && sizeof(Sample) >= 2U);
         const bool decoupled_transfer =
             runtime->host_transfer == HostTransferMode::staging_decoupled
             && std::is_same_v<Sample, float>;
+        // Frames inside registered classic pool blocks are copied directly,
+        // each side on its own; the other side keeps staging.
+        const auto in_registered_block = [](const void *pointer,
+                                            std::size_t pitch,
+                                            std::size_t row_bytes,
+                                            std::size_t rows) {
+            return static_cast<bool>(host_blocks::acquire(
+                host_blocks::Domain::cuda, pointer,
+                host_blocks::plane_span(pitch, row_bytes, rows)));
+        };
+        // Which sides may copy directly (bit 0 source, bit 1 destination).
+        // Measured on an RTX 5080 with vapoursynth-classic: both sides gain
+        // for Float32 and 16-bit frames, but an 8-bit source loses about 13%
+        // against the packed pinned upload, so it stays staged by default.
+        static const unsigned direct_sides = [] {
+            const char *text = std::getenv("DSMVC_CUDA_DIRECT_IO_SIDES");
+            if (text) return static_cast<unsigned>(std::atoi(text)) & 3U;
+            return sizeof(Sample) == 1U ? 2U : 3U;
+        }();
+        const bool source_direct = resident || direct_transfer
+            || ((direct_sides & 1U) && in_registered_block(
+                input, source_pitch, source_row_bytes, source_height));
+        const bool destination_direct = resident || direct_transfer
+            || ((direct_sides & 2U) && in_registered_block(
+                output, result_pitch, result_row_bytes, destination_height));
+        const bool source_staged = decoupled_transfer && !source_direct;
+        const bool destination_staged =
+            decoupled_transfer && !destination_direct;
         const bool cache_requested =
             !use_float64 && input_lifetime && runtime->input_cache.enabled();
         std::shared_ptr<CachedInput> cached_input;
@@ -2273,9 +2656,9 @@ struct CudaExecutor::Impl {
             cached_input = std::move(acquired.input);
             cache_producer = acquired.producer;
         };
-        if (direct_transfer || decoupled_transfer) {
-            acquire_cached_input();
-        }
+        // Every route joins the shared input before taking a slot (see
+        // the wait below).
+        acquire_cached_input();
         const bool reused_input = cached_input && !cache_producer;
         if (reused_input) {
             // Consumers must not occupy every slot while the producer still
@@ -2286,19 +2669,23 @@ struct CudaExecutor::Impl {
         std::optional<StagingRelease> staging_release;
         PinnedBlockPool::Allocation staged_source;
         PinnedBlockPool::Allocation staged_destination;
-        if (decoupled_transfer) {
+        if (source_staged || destination_staged) {
             staging_release.emplace(
                 *runtime, runtime->adaptive_slots && !reused_input);
             {
                 NvtxRange trace{NvtxLabel::buffer_reserve};
-                if (!cached_input || cache_producer) {
+                if (source_staged && (!cached_input || cache_producer)) {
                     staged_source = runtime->frame_staging_arena.allocate(
                         runtime->api, runtime->device_ordinal, source_bytes);
                 }
-                staged_destination = runtime->frame_staging_arena.allocate(
-                    runtime->api, runtime->device_ordinal, result_bytes);
+                if (destination_staged) {
+                    staged_destination =
+                        runtime->frame_staging_arena.allocate(
+                            runtime->api, runtime->device_ordinal,
+                            result_bytes);
+                }
             }
-            if (!cached_input || cache_producer) {
+            if (source_staged && (!cached_input || cache_producer)) {
                 NvtxRange trace{NvtxLabel::host_pack, source_bytes};
                 pack_host_rows(
                     input, source_pitch, staged_source.data(),
@@ -2321,7 +2708,8 @@ struct CudaExecutor::Impl {
 
         const auto maximum_bandwidth =
             std::max(horizontal.half_bandwidth, vertical.half_bandwidth);
-        const ExecutionSlotClass slot_class = decoupled_transfer && !reused_input
+        const ExecutionSlotClass slot_class =
+            (source_staged || destination_staged) && !reused_input
             ? ExecutionSlotClass::host_limited_2d
             : maximum_bandwidth >= 7
                 ? ExecutionSlotClass::heavy_2d
@@ -2351,9 +2739,11 @@ struct CudaExecutor::Impl {
                 runtime->api, runtime->device_ordinal, intermediate_bytes);
             slot.destination.reserve(
                 runtime->api, runtime->device_ordinal, destination_bytes);
-            if (!direct_transfer && !decoupled_transfer) {
+            if (!source_direct && !decoupled_transfer) {
                 slot.host_source.reserve(
                     runtime->api, runtime->device_ordinal, source_bytes);
+            }
+            if (!destination_direct && !decoupled_transfer) {
                 slot.host_destination.reserve(
                     runtime->api, runtime->device_ordinal, result_bytes);
             }
@@ -2385,25 +2775,41 @@ struct CudaExecutor::Impl {
             clear_f64_status(*runtime, slot);
         }
 
-        if (!direct_transfer && !decoupled_transfer) {
-            acquire_cached_input();
-        }
         const DevicePointer transposed_input = cached_input
             ? cached_input->pointer() : slot.transposed.pointer();
         const void *transfer_source = decoupled_transfer
             ? staged_source.data() : slot.host_source.data();
         void *transfer_destination = decoupled_transfer
             ? staged_destination.data() : slot.host_destination.data();
+        // Float32 planes of a GPU frame with tight rows are read and written
+        // where they lie.
+        const bool resident_in_place = resident && !use_float64
+            && std::is_same_v<Sample, float>;
+        const bool source_in_place =
+            resident_in_place && source_pitch == source_row_bytes;
+        const bool result_in_place =
+            resident_in_place && result_pitch == result_row_bytes;
+        const DevicePointer source_device = source_in_place
+            ? const_cast<std::byte *>(resident->source)
+            : slot.source.pointer();
+        const DevicePointer destination_device = result_in_place
+            ? resident->result : slot.destination.pointer();
         const auto populate_input = [&] {
-            if (!direct_transfer && !decoupled_transfer) {
+            wait_resident_source(*runtime->api, resident, slot.stream);
+            if (!source_direct && !decoupled_transfer) {
                 NvtxRange trace{NvtxLabel::host_pack, source_bytes};
                 pack_host_rows(
                     input, source_pitch, slot.host_source.data(),
                     source_row_bytes, source_height);
             }
-            {
+            if (!source_in_place) {
                 NvtxRange trace{NvtxLabel::source_upload, source_bytes};
-                const cudaError_t status = direct_transfer
+                const cudaError_t status = resident
+                    ? runtime->api->memcpy_2d_dtod_async(
+                        slot.source.pointer(), source_row_bytes,
+                        resident->source, source_pitch, source_row_bytes,
+                        source_height, slot.stream)
+                : source_direct
                     ? runtime->api->memcpy_2d_htod_async(
                         slot.source.pointer(), source_row_bytes,
                         input, source_pitch, source_row_bytes, source_height,
@@ -2422,7 +2828,7 @@ struct CudaExecutor::Impl {
                 } else {
                     launch_transpose(
                         *runtime, slot, transpose, source_width, source_height,
-                        converted_ptr, slot.source.pointer(), transposed_input);
+                        converted_ptr, source_device, transposed_input);
                 }
             }
         };
@@ -2506,12 +2912,12 @@ struct CudaExecutor::Impl {
                 launch_vertical_split(
                     *runtime, slot, *packed_vertical,
                     slot.intermediate.pointer(), destination_width,
-                    slot.destination.pointer());
+                    destination_device);
             } else {
                 launch_vertical(
                     *runtime, slot, *packed_vertical,
                     slot.intermediate.pointer(), destination_width,
-                    slot.destination.pointer());
+                    destination_device);
             }
         }
         std::uint32_t f64_nonfinite = 0U;
@@ -2543,9 +2949,13 @@ struct CudaExecutor::Impl {
         if (use_float64) {
             schedule_f64_status_download(*runtime, slot, f64_nonfinite);
         }
-        {
+        if (!result_in_place) {
             NvtxRange trace{NvtxLabel::destination_download, result_bytes};
-            const cudaError_t status = direct_transfer
+            const cudaError_t status = resident
+                ? runtime->api->memcpy_2d_dtod_async(
+                    resident->result, result_pitch, result, result_row_bytes,
+                    result_row_bytes, destination_height, slot.stream)
+            : destination_direct
                 ? runtime->api->memcpy_2d_dtoh_async(
                     output, result_pitch, result, result_row_bytes,
                     result_row_bytes, destination_height, slot.stream)
@@ -2557,12 +2967,12 @@ struct CudaExecutor::Impl {
         {
             NvtxRange trace{NvtxLabel::stream_synchronize, slot_index};
             cuda_check(
-                *runtime->api, runtime->api->stream_synchronize(slot.stream),
+                *runtime->api, slot.synchronize(),
                 "cudaStreamSynchronize");
         }
         packed_horizontal->mark_upload_complete();
         packed_vertical->mark_upload_complete();
-        if (direct_transfer || decoupled_transfer) {
+        if (decoupled_transfer || destination_direct) {
             release.release_completed();
         } else {
             release.mark_completed();
@@ -2571,7 +2981,7 @@ struct CudaExecutor::Impl {
             throw std::runtime_error(
                 "CUDA Float64 2D execution produced a nonfinite value");
         }
-        if (!direct_transfer) {
+        if (!destination_direct) {
             NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
             unpack_host_rows(
                 transfer_destination, result_row_bytes,
@@ -2621,6 +3031,18 @@ void CudaExecutor::inverse_rows(
     float *output, std::ptrdiff_t output_row_stride,
     std::int32_t row_count,
     std::shared_ptr<const void> input_lifetime) const {
+    inverse_rows_impl(
+        plan, input, input_row_stride, output, output_row_stride, row_count,
+        std::move(input_lifetime), nullptr);
+}
+
+void CudaExecutor::inverse_rows_impl(
+    const AxisPlan &plan,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t row_count,
+    std::shared_ptr<const void> input_lifetime,
+    const ResidentDevice *resident) const {
     if (!plan.valid() || !input || !output
         || input_row_stride < plan.source_size
         || output_row_stride < plan.destination_size || row_count < 0) {
@@ -2656,12 +3078,45 @@ void CudaExecutor::inverse_rows(
     const std::size_t output_bytes = checked_product(
         output_elements, use_float64 ? sizeof(double) : sizeof(float),
         "CUDA row workspace destination");
+    const std::size_t input_pitch = checked_product(
+        static_cast<std::size_t>(input_row_stride), sizeof(float),
+        "CUDA input row pitch");
+    const std::size_t input_row_bytes = checked_product(
+        width, sizeof(float), "CUDA input row row");
+    const std::size_t output_pitch = checked_product(
+        static_cast<std::size_t>(output_row_stride), sizeof(float),
+        "CUDA output row pitch");
+    const std::size_t output_row_bytes = checked_product(
+        destination_width, sizeof(float), "CUDA output row row");
+    // Frames inside registered classic pool blocks are copied directly.
+    const bool source_direct = resident || static_cast<bool>(host_blocks::acquire(
+        host_blocks::Domain::cuda, input,
+        host_blocks::plane_span(input_pitch, input_row_bytes, height)));
+    const bool destination_direct = resident || static_cast<bool>(host_blocks::acquire(
+        host_blocks::Domain::cuda, output,
+        host_blocks::plane_span(output_pitch, output_row_bytes, height)));
 
     const bool cache_requested =
         !use_float64 && input_lifetime && impl_->runtime->input_cache.enabled();
     std::shared_ptr<CachedInput> cached_input;
     std::optional<InputCacheKey> cache_key;
     bool cache_producer = false;
+
+    if (cache_requested) {
+        NvtxRange trace{NvtxLabel::input_cache_lookup, source_bytes};
+        cache_key = make_input_cache_key(
+            input, input_row_stride, width, height,
+            CachedInputLayout::transposed);
+        auto acquired = impl_->runtime->input_cache.acquire(
+            *cache_key, impl_->runtime->api, impl_->runtime->device_ordinal,
+            impl_->runtime->input_arena, source_bytes,
+            std::move(input_lifetime));
+        cached_input = std::move(acquired.input);
+        cache_producer = acquired.producer;
+    }
+    // Join the shared input before taking a slot, and let its producer
+    // schedule first: a consumer must never hold a slot the producer needs.
+    if (cached_input && !cache_producer) cached_input->wait_until_scheduled();
 
     std::size_t slot_index = 0U;
     {
@@ -2689,10 +3144,16 @@ void CudaExecutor::inverse_rows(
         }
         slot.destination.reserve(
             impl_->runtime->api, impl_->runtime->device_ordinal, output_bytes);
-        slot.host_source.reserve(
-            impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
-        slot.host_destination.reserve(
-            impl_->runtime->api, impl_->runtime->device_ordinal, result_bytes);
+        if (!source_direct) {
+            slot.host_source.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                source_bytes);
+        }
+        if (!destination_direct) {
+            slot.host_destination.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                result_bytes);
+        }
         if (use_float64) {
             slot.integer_output.reserve(
                 impl_->runtime->api, impl_->runtime->device_ordinal,
@@ -2707,38 +3168,33 @@ void CudaExecutor::inverse_rows(
         clear_f64_status(*impl_->runtime, slot);
     }
 
-    if (cache_requested) {
-        NvtxRange trace{NvtxLabel::input_cache_lookup, source_bytes};
-        cache_key = make_input_cache_key(
-            input, input_row_stride, width, height,
-            CachedInputLayout::transposed);
-        auto acquired = impl_->runtime->input_cache.acquire(
-            *cache_key, impl_->runtime->api, impl_->runtime->device_ordinal,
-            impl_->runtime->input_arena, source_bytes,
-            std::move(input_lifetime));
-        cached_input = std::move(acquired.input);
-        cache_producer = acquired.producer;
-    }
     const DevicePointer transposed_input = cached_input
         ? cached_input->pointer() : slot.transposed.pointer();
     const auto populate_input = [&] {
-        {
+        wait_resident_source(*impl_->runtime->api, resident, slot.stream);
+        if (!source_direct) {
             NvtxRange trace{NvtxLabel::host_pack, source_bytes};
             pack_host_rows(
-                input,
-                checked_product(
-                    static_cast<std::size_t>(input_row_stride), sizeof(float),
-                    "CUDA input row pitch"),
-                slot.host_source.data(),
-                checked_product(width, sizeof(float), "CUDA input row"), height);
+                input, input_pitch, slot.host_source.data(),
+                input_row_bytes, height);
         }
         {
             NvtxRange trace{NvtxLabel::source_upload, source_bytes};
             cuda_check(
                 *impl_->runtime->api,
-                impl_->runtime->api->memcpy_htod_async(
-                    slot.source.pointer(), slot.host_source.data(), source_bytes,
-                    slot.stream),
+                resident
+                    ? impl_->runtime->api->memcpy_2d_dtod_async(
+                        slot.source.pointer(), input_row_bytes,
+                        resident->source, input_pitch, input_row_bytes, height,
+                        slot.stream)
+                : source_direct
+                    ? impl_->runtime->api->memcpy_2d_htod_async(
+                        slot.source.pointer(), input_row_bytes,
+                        input, input_pitch, input_row_bytes, height,
+                        slot.stream)
+                    : impl_->runtime->api->memcpy_htod_async(
+                        slot.source.pointer(), slot.host_source.data(),
+                        source_bytes, slot.stream),
                 "cudaMemcpyAsync(row source upload)");
         }
         {
@@ -2836,35 +3292,41 @@ void CudaExecutor::inverse_rows(
         NvtxRange trace{NvtxLabel::destination_download, result_bytes};
         cuda_check(
             *impl_->runtime->api,
-            impl_->runtime->api->memcpy_dtoh_async(
-                slot.host_destination.data(), result,
-                result_bytes, slot.stream),
+            resident
+                ? impl_->runtime->api->memcpy_2d_dtod_async(
+                    resident->result, output_pitch, result, output_row_bytes,
+                    output_row_bytes, height, slot.stream)
+            : destination_direct
+                ? impl_->runtime->api->memcpy_2d_dtoh_async(
+                    output, output_pitch, result, output_row_bytes,
+                    output_row_bytes, height, slot.stream)
+                : impl_->runtime->api->memcpy_dtoh_async(
+                    slot.host_destination.data(), result,
+                    result_bytes, slot.stream),
             "cudaMemcpyAsync(row destination download)");
     }
     {
         NvtxRange trace{NvtxLabel::stream_synchronize, slot_index};
         cuda_check(
             *impl_->runtime->api,
-            impl_->runtime->api->stream_synchronize(slot.stream),
+            slot.synchronize(),
             "cudaStreamSynchronize");
     }
     packed->mark_upload_complete();
-    release.mark_completed();
+    if (destination_direct) {
+        release.release_completed();
+    } else {
+        release.mark_completed();
+    }
     if (f64_nonfinite != 0U) {
         throw std::runtime_error(
             "CUDA Float64 row execution produced a nonfinite value");
     }
-    {
+    if (!destination_direct) {
         NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
         unpack_host_rows(
-            slot.host_destination.data(),
-            checked_product(
-                destination_width, sizeof(float), "CUDA output row"),
-            output,
-            checked_product(
-                static_cast<std::size_t>(output_row_stride), sizeof(float),
-                "CUDA output row pitch"),
-            height);
+            slot.host_destination.data(), output_row_bytes, output,
+            output_pitch, height);
     }
 }
 
@@ -2874,6 +3336,18 @@ void CudaExecutor::inverse_columns(
     float *output, std::ptrdiff_t output_row_stride,
     std::int32_t column_count,
     std::shared_ptr<const void> input_lifetime) const {
+    inverse_columns_impl(
+        plan, input, input_row_stride, output, output_row_stride,
+        column_count, std::move(input_lifetime), nullptr);
+}
+
+void CudaExecutor::inverse_columns_impl(
+    const AxisPlan &plan,
+    const float *input, std::ptrdiff_t input_row_stride,
+    float *output, std::ptrdiff_t output_row_stride,
+    std::int32_t column_count,
+    std::shared_ptr<const void> input_lifetime,
+    const ResidentDevice *resident) const {
     if (!plan.valid() || !input || !output
         || input_row_stride < column_count
         || output_row_stride < column_count || column_count < 0) {
@@ -2908,12 +3382,45 @@ void CudaExecutor::inverse_columns(
     const std::size_t output_bytes = checked_product(
         output_elements, use_float64 ? sizeof(double) : sizeof(float),
         "CUDA column workspace destination");
+    const std::size_t input_pitch = checked_product(
+        static_cast<std::size_t>(input_row_stride), sizeof(float),
+        "CUDA input column pitch");
+    const std::size_t input_row_bytes = checked_product(
+        width, sizeof(float), "CUDA input column row");
+    const std::size_t output_pitch = checked_product(
+        static_cast<std::size_t>(output_row_stride), sizeof(float),
+        "CUDA output column pitch");
+    const std::size_t output_row_bytes = checked_product(
+        width, sizeof(float), "CUDA output column row");
+    // Frames inside registered classic pool blocks are copied directly.
+    const bool source_direct = resident || static_cast<bool>(host_blocks::acquire(
+        host_blocks::Domain::cuda, input,
+        host_blocks::plane_span(input_pitch, input_row_bytes, source_height)));
+    const bool destination_direct = resident || static_cast<bool>(host_blocks::acquire(
+        host_blocks::Domain::cuda, output,
+        host_blocks::plane_span(output_pitch, output_row_bytes, destination_height)));
 
     const bool cache_requested =
         !use_float64 && input_lifetime && impl_->runtime->input_cache.enabled();
     std::shared_ptr<CachedInput> cached_input;
     std::optional<InputCacheKey> cache_key;
     bool cache_producer = false;
+
+    if (cache_requested) {
+        NvtxRange trace{NvtxLabel::input_cache_lookup, source_bytes};
+        cache_key = make_input_cache_key(
+            input, input_row_stride, width, source_height,
+            CachedInputLayout::row_major);
+        auto acquired = impl_->runtime->input_cache.acquire(
+            *cache_key, impl_->runtime->api, impl_->runtime->device_ordinal,
+            impl_->runtime->input_arena, source_bytes,
+            std::move(input_lifetime));
+        cached_input = std::move(acquired.input);
+        cache_producer = acquired.producer;
+    }
+    // Join the shared input before taking a slot, and let its producer
+    // schedule first: a consumer must never hold a slot the producer needs.
+    if (cached_input && !cache_producer) cached_input->wait_until_scheduled();
 
     std::size_t slot_index = 0U;
     {
@@ -2944,51 +3451,51 @@ void CudaExecutor::inverse_columns(
                 impl_->runtime->api, impl_->runtime->device_ordinal,
                 sizeof(std::uint32_t));
         }
-        slot.host_source.reserve(
-            impl_->runtime->api, impl_->runtime->device_ordinal, source_bytes);
-        slot.host_destination.reserve(
-            impl_->runtime->api, impl_->runtime->device_ordinal, result_bytes);
+        if (!source_direct) {
+            slot.host_source.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                source_bytes);
+        }
+        if (!destination_direct) {
+            slot.host_destination.reserve(
+                impl_->runtime->api, impl_->runtime->device_ordinal,
+                result_bytes);
+        }
     }
 
     if (use_float64) {
         clear_f64_status(*impl_->runtime, slot);
     }
 
-    if (cache_requested) {
-        NvtxRange trace{NvtxLabel::input_cache_lookup, source_bytes};
-        cache_key = make_input_cache_key(
-            input, input_row_stride, width, source_height,
-            CachedInputLayout::row_major);
-        auto acquired = impl_->runtime->input_cache.acquire(
-            *cache_key, impl_->runtime->api, impl_->runtime->device_ordinal,
-            impl_->runtime->input_arena, source_bytes,
-            std::move(input_lifetime));
-        cached_input = std::move(acquired.input);
-        cache_producer = acquired.producer;
-    }
     const DevicePointer uploaded_input = cached_input
         ? cached_input->pointer() : slot.source.pointer();
     const DevicePointer device_input = use_float64
         ? slot.transposed.pointer() : uploaded_input;
     const auto populate_input = [&] {
-        {
+        wait_resident_source(*impl_->runtime->api, resident, slot.stream);
+        if (!source_direct) {
             NvtxRange trace{NvtxLabel::host_pack, source_bytes};
             pack_host_rows(
-                input,
-                checked_product(
-                    static_cast<std::size_t>(input_row_stride), sizeof(float),
-                    "CUDA input column pitch"),
-                slot.host_source.data(),
-                checked_product(width, sizeof(float), "CUDA input columns"),
-                source_height);
+                input, input_pitch, slot.host_source.data(),
+                input_row_bytes, source_height);
         }
         {
             NvtxRange trace{NvtxLabel::source_upload, source_bytes};
             cuda_check(
                 *impl_->runtime->api,
-                impl_->runtime->api->memcpy_htod_async(
-                    uploaded_input, slot.host_source.data(), source_bytes,
-                    slot.stream),
+                resident
+                    ? impl_->runtime->api->memcpy_2d_dtod_async(
+                        uploaded_input, input_row_bytes,
+                        resident->source, input_pitch, input_row_bytes,
+                        source_height, slot.stream)
+                : source_direct
+                    ? impl_->runtime->api->memcpy_2d_htod_async(
+                        uploaded_input, input_row_bytes,
+                        input, input_pitch, input_row_bytes, source_height,
+                        slot.stream)
+                    : impl_->runtime->api->memcpy_htod_async(
+                        uploaded_input, slot.host_source.data(),
+                        source_bytes, slot.stream),
                 "cudaMemcpyAsync(column source upload)");
         }
         if (use_float64) {
@@ -3071,33 +3578,41 @@ void CudaExecutor::inverse_columns(
         NvtxRange trace{NvtxLabel::destination_download, result_bytes};
         cuda_check(
             *impl_->runtime->api,
-            impl_->runtime->api->memcpy_dtoh_async(
-                slot.host_destination.data(), result,
-                result_bytes, slot.stream),
+            resident
+                ? impl_->runtime->api->memcpy_2d_dtod_async(
+                    resident->result, output_pitch, result, output_row_bytes,
+                    output_row_bytes, destination_height, slot.stream)
+            : destination_direct
+                ? impl_->runtime->api->memcpy_2d_dtoh_async(
+                    output, output_pitch, result, output_row_bytes,
+                    output_row_bytes, destination_height, slot.stream)
+                : impl_->runtime->api->memcpy_dtoh_async(
+                    slot.host_destination.data(), result,
+                    result_bytes, slot.stream),
             "cudaMemcpyAsync(column destination download)");
     }
     {
         NvtxRange trace{NvtxLabel::stream_synchronize, slot_index};
         cuda_check(
             *impl_->runtime->api,
-            impl_->runtime->api->stream_synchronize(slot.stream),
+            slot.synchronize(),
             "cudaStreamSynchronize");
     }
     packed->mark_upload_complete();
-    release.mark_completed();
+    if (destination_direct) {
+        release.release_completed();
+    } else {
+        release.mark_completed();
+    }
     if (f64_nonfinite != 0U) {
         throw std::runtime_error(
             "CUDA Float64 column execution produced a nonfinite value");
     }
-    {
+    if (!destination_direct) {
         NvtxRange trace{NvtxLabel::host_unpack, result_bytes};
         unpack_host_rows(
-            slot.host_destination.data(),
-            checked_product(width, sizeof(float), "CUDA output columns"), output,
-            checked_product(
-                static_cast<std::size_t>(output_row_stride), sizeof(float),
-                "CUDA output column pitch"),
-            destination_height);
+            slot.host_destination.data(), output_row_bytes, output,
+            output_pitch, destination_height);
     }
 }
 
@@ -3115,6 +3630,271 @@ void CudaExecutor::inverse_2d(
     impl_->execute_2d(
         horizontal, vertical, input, input_row_stride,
         output, output_row_stride, nullptr, std::move(input_lifetime));
+}
+
+namespace {
+
+struct ResolvedPlane {
+    std::shared_ptr<ImportedAllocation> allocation;
+    std::byte *pointer = nullptr;
+};
+
+// Imports (or finds) the plane's allocation and checks that `rows` rows of
+// `row_bytes` at the plane's pitch lie inside the plane and the allocation. The
+// plane's handle is consumed on every path.
+ResolvedPlane resolve_exported(
+    Runtime &runtime, const dsmvc::ExportedPlane &plane,
+    std::size_t row_bytes, std::size_t rows,
+    std::size_t element_bytes = sizeof(float)) {
+    const auto reject = [&](const char *message) {
+        close_exported_handle(plane.handle, plane.handle_type);
+        throw std::invalid_argument(message);
+    };
+    if (plane.pitch_bytes <= 0
+        || plane.pitch_bytes % static_cast<std::ptrdiff_t>(element_bytes) != 0
+        || row_bytes == 0U || rows == 0U
+        || static_cast<std::size_t>(plane.pitch_bytes) < row_bytes) {
+        reject("invalid exported GPU plane geometry");
+    }
+    const std::size_t span = (rows - 1U) * static_cast<std::size_t>(plane.pitch_bytes)
+        + row_bytes;
+    if (plane.offset > plane.memory_size
+        || plane.plane_bytes > plane.memory_size - plane.offset
+        || span > plane.plane_bytes) {
+        reject("exported GPU plane lies outside its allocation");
+    }
+    ResolvedPlane resolved;
+    resolved.allocation = runtime.imports.acquire(runtime.device_ordinal, plane);
+    resolved.pointer = resolved.allocation->base() + plane.offset;
+    return resolved;
+}
+
+// Both planes of a call, closing the second handle if the first import fails.
+struct ResolvedPair {
+    ResolvedPlane source;
+    ResolvedPlane result;
+};
+
+ResolvedPair resolve_pair(
+    Runtime &runtime, const dsmvc::ExportedPlane &input,
+    std::size_t input_row_bytes, std::size_t input_rows,
+    const dsmvc::ExportedPlane &output, std::size_t output_row_bytes,
+    std::size_t output_rows, std::size_t element_bytes = sizeof(float)) {
+    ResolvedPair pair;
+    try {
+        pair.source = resolve_exported(
+            runtime, input, input_row_bytes, input_rows, element_bytes);
+    } catch (...) {
+        close_exported_handle(output.handle, output.handle_type);
+        throw;
+    }
+    pair.result = resolve_exported(
+        runtime, output, output_row_bytes, output_rows, element_bytes);
+    return pair;
+}
+
+// The host pointers of a resident call are never dereferenced.
+inline float *no_host_pointer(CudaExecutor::ResidentDevice &io) noexcept {
+    return const_cast<float *>(reinterpret_cast<const float *>(&io));
+}
+
+} // namespace
+
+bool CudaExecutor::has_exported_semaphore(std::uint64_t semaphore) const {
+    const std::scoped_lock lock(impl_->semaphore_mutex);
+    const auto found = impl_->semaphores.find(semaphore);
+    return found != impl_->semaphores.end() && found->second;
+}
+
+bool CudaExecutor::import_exported_semaphore(
+    std::uint64_t semaphore, int handle_type, std::intptr_t handle) const {
+    cudaExternalSemaphoreHandleDesc desc{};
+    bool importable = false;
+#if defined(_WIN32)
+    if (handle_type == export_opaque_win32) {
+        desc.type = cudaExternalSemaphoreHandleTypeTimelineSemaphoreWin32;
+        desc.handle.win32.handle = reinterpret_cast<void *>(handle);
+        importable = true;
+    }
+#else
+    if (handle_type == export_opaque_fd) {
+        desc.type = cudaExternalSemaphoreHandleTypeTimelineSemaphoreFd;
+        desc.handle.fd = static_cast<int>(handle);
+        importable = true;
+    }
+#endif
+    cudaExternalSemaphore_t imported = nullptr;
+    bool consumed = false;
+    if (importable && semaphore != 0U) {
+        try {
+            CurrentDeviceGuard current(impl_->runtime->device_ordinal);
+            if (cudaImportExternalSemaphore(&imported, &desc) == cudaSuccess) {
+                consumed = true;
+            } else {
+                (void)cudaGetLastError();
+                imported = nullptr;
+            }
+        } catch (...) {
+            imported = nullptr;
+        }
+    }
+#if defined(_WIN32)
+    close_exported_handle(handle, handle_type); // an NT handle stays ours
+#else
+    if (!consumed) close_exported_handle(handle, handle_type);
+#endif
+    const std::scoped_lock lock(impl_->semaphore_mutex);
+    const auto [entry, inserted] = impl_->semaphores.emplace(semaphore, imported);
+    if (!inserted && imported) {
+        // Another thread imported it first.
+        try {
+            CurrentDeviceGuard current(impl_->runtime->device_ordinal);
+            (void)cudaDestroyExternalSemaphore(imported);
+        } catch (...) {
+        }
+    }
+    return entry->second != nullptr;
+}
+
+CudaExecutor::ResidentDevice CudaExecutor::resident_device(
+    const ExportedPlane &input, const std::byte *source,
+    std::byte *result) const {
+    ResidentDevice io{source, result};
+    if (input.ready_semaphore != 0U) {
+        const std::scoped_lock lock(impl_->semaphore_mutex);
+        const auto found = impl_->semaphores.find(input.ready_semaphore);
+        if (found == impl_->semaphores.end() || !found->second) {
+            throw std::logic_error(
+                "the GPU frame's ready semaphore was not imported");
+        }
+        io.ready_semaphore = found->second;
+        io.ready_value = input.ready_value;
+    }
+    return io;
+}
+
+CudaExecutor::CudaExecutor(const std::uint8_t device_uuid[16])
+    : impl_(std::make_shared<Impl>()) {
+    cudaDeviceProp properties{};
+    cuda_check(
+        cudaGetDeviceProperties(&properties, impl_->runtime->device_ordinal),
+        "cudaGetDeviceProperties");
+    if (std::memcmp(properties.uuid.bytes, device_uuid, 16U) != 0) {
+        throw std::runtime_error(
+            "the CUDA device in use is not the GPU of the VapourSynth core's "
+            "Vulkan device; select it with CUDA_VISIBLE_DEVICES or "
+            "core.set_vulkan_device");
+    }
+}
+
+void CudaExecutor::inverse_rows_exported(
+    const AxisPlan &plan, const dsmvc::ExportedPlane &input,
+    const dsmvc::ExportedPlane &output, std::int32_t row_count) const {
+    if (!plan.valid() || row_count <= 0) {
+        close_exported_handle(input.handle, input.handle_type);
+        close_exported_handle(output.handle, output.handle_type);
+        if (row_count == 0) return;
+        throw std::invalid_argument("invalid CUDA row executor arguments");
+    }
+    const auto rows = static_cast<std::size_t>(row_count);
+    const auto pair = resolve_pair(
+        *impl_->runtime, input, static_cast<std::size_t>(plan.source_size) * sizeof(float), rows,
+        output, static_cast<std::size_t>(plan.destination_size) * sizeof(float), rows);
+    ResidentDevice io =
+        resident_device(input, pair.source.pointer, pair.result.pointer);
+    inverse_rows_impl(
+        plan, no_host_pointer(io), input.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(float)),
+        no_host_pointer(io), output.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(float)),
+        row_count, {}, &io);
+}
+
+void CudaExecutor::inverse_columns_exported(
+    const AxisPlan &plan, const dsmvc::ExportedPlane &input,
+    const dsmvc::ExportedPlane &output, std::int32_t column_count) const {
+    if (!plan.valid() || column_count <= 0) {
+        close_exported_handle(input.handle, input.handle_type);
+        close_exported_handle(output.handle, output.handle_type);
+        if (column_count == 0) return;
+        throw std::invalid_argument("invalid CUDA column executor arguments");
+    }
+    const auto columns_bytes = static_cast<std::size_t>(column_count) * sizeof(float);
+    const auto pair = resolve_pair(
+        *impl_->runtime, input, columns_bytes, static_cast<std::size_t>(plan.source_size),
+        output, columns_bytes, static_cast<std::size_t>(plan.destination_size));
+    ResidentDevice io =
+        resident_device(input, pair.source.pointer, pair.result.pointer);
+    inverse_columns_impl(
+        plan, no_host_pointer(io), input.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(float)),
+        no_host_pointer(io), output.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(float)),
+        column_count, {}, &io);
+}
+
+template <class Sample>
+void CudaExecutor::inverse_2d_integer_exported(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const dsmvc::ExportedPlane &input, const dsmvc::ExportedPlane &output,
+    const IntegerConversion &conversion) const {
+    if (!horizontal.valid() || !vertical.valid()
+        || !valid_conversion<Sample>(conversion)) {
+        close_exported_handle(input.handle, input.handle_type);
+        close_exported_handle(output.handle, output.handle_type);
+        throw std::invalid_argument("invalid CUDA integer 2D arguments");
+    }
+    const auto pair = resolve_pair(
+        *impl_->runtime, input,
+        static_cast<std::size_t>(horizontal.source_size) * sizeof(Sample),
+        static_cast<std::size_t>(vertical.source_size), output,
+        static_cast<std::size_t>(horizontal.destination_size) * sizeof(Sample),
+        static_cast<std::size_t>(vertical.destination_size), sizeof(Sample));
+    ResidentDevice io =
+        resident_device(input, pair.source.pointer, pair.result.pointer);
+    const auto *host = reinterpret_cast<const Sample *>(&io);
+    impl_->execute_2d<Sample>(
+        horizontal, vertical, host,
+        input.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(Sample)),
+        const_cast<Sample *>(host),
+        output.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(Sample)),
+        &conversion, {}, &io);
+}
+
+void CudaExecutor::inverse_2d_u8_exported(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const dsmvc::ExportedPlane &input, const dsmvc::ExportedPlane &output,
+    const IntegerConversion &conversion) const {
+    inverse_2d_integer_exported<std::uint8_t>(
+        horizontal, vertical, input, output, conversion);
+}
+
+void CudaExecutor::inverse_2d_u16_exported(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const dsmvc::ExportedPlane &input, const dsmvc::ExportedPlane &output,
+    const IntegerConversion &conversion) const {
+    inverse_2d_integer_exported<std::uint16_t>(
+        horizontal, vertical, input, output, conversion);
+}
+
+void CudaExecutor::inverse_2d_exported(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const dsmvc::ExportedPlane &input, const dsmvc::ExportedPlane &output) const {
+    if (!horizontal.valid() || !vertical.valid()) {
+        close_exported_handle(input.handle, input.handle_type);
+        close_exported_handle(output.handle, output.handle_type);
+        throw std::invalid_argument("invalid CUDA 2D executor arguments");
+    }
+    const auto pair = resolve_pair(
+        *impl_->runtime, input,
+        static_cast<std::size_t>(horizontal.source_size) * sizeof(float),
+        static_cast<std::size_t>(vertical.source_size), output,
+        static_cast<std::size_t>(horizontal.destination_size) * sizeof(float),
+        static_cast<std::size_t>(vertical.destination_size));
+    ResidentDevice io =
+        resident_device(input, pair.source.pointer, pair.result.pointer);
+    impl_->execute_2d<float>(
+        horizontal, vertical, no_host_pointer(io),
+        input.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(float)),
+        no_host_pointer(io),
+        output.pitch_bytes / static_cast<std::ptrdiff_t>(sizeof(float)),
+        nullptr, {}, &io);
 }
 
 void CudaExecutor::inverse_2d_u8(

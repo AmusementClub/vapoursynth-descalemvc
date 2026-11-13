@@ -1,155 +1,134 @@
-# dsmvc v0.1.3
+# dsmvc v0.1.4
 
-This release speeds up selected CPU and GPU Float32 descale paths while
-preserving the existing API, precision policy, and automatic backend selection.
+This release speeds up the CUDA and Vulkan backends and adds two optional ways
+to move frames to the GPU without staging copies. The API, precision policy,
+CPU and Metal paths, and automatic backend selection are unchanged.
 
 ## Highlights
 
-- Reduces horizontal RHS work for common AVX2, AVX-512, and NEON kernels,
-  with aligned private workspaces and ordered arithmetic.
-- Shares coefficients across wider AVX-512 and NEON column groups. Eligible
-  AVX-512 Float32 2D operations use separate horizontal and vertical passes;
-  Lanczos6 horizontal work retains its AVX2 implementation.
-- Enables the validated fixed-span GPU optimization in selected fused
-  Float32 routes: CUDA half-bandwidths 5/7, Vulkan 5/7/11, and Metal 5/7/11.
-  Other routes retain their dynamic loops. This release adds no tuning switches.
-- Consolidates the Metal build option, propagates the macOS deployment target
-  to the Metal compiler, and keeps Vulkan policy assertions active in Release.
-- Adds buffer-boundary and GPU RHS coverage, including the permitted Vulkan
-  fused or separate multiply/add rounding models, and serializes Metal tests that share
-  the device, and packages macOS arm64 with a verified 36-entry Metal library.
+- Solves Float32 plans with half bandwidth 1, 3, 5 or 7 in 2 to 32 chunks per
+  row or column on CUDA and Vulkan, instead of one thread walking each vector
+  end to end. GPU time for a 1080p Float32 frame on CUDA drops from 0.53 ms to
+  0.09 ms. Other plans and Float64 keep the sequential solve.
+- Submits the planes of a YUV or RGB frame to Vulkan in one command buffer,
+  recorded step by step so the planes' dispatches overlap on the GPU.
+- Removes the Vulkan transpose-only passes: the right-hand side reads either
+  layout, and a GPU frame's plane is read where it lies.
+- Copies large planes between frame memory and staging with non-temporal
+  stores on x86-64, and stops clearing Vulkan staging before overwriting it.
+- CUDA no longer spins a CPU core while it waits for a stream, and copies
+  16-bit and Float32 2D frames straight from frame memory by default.
+- **GPU frames (VapourSynth R81):** a `std.GPUUpload()` clip is processed on
+  the core's own Vulkan device, or by CUDA through exported memory, and stays
+  on the GPU. This needs a build against the API 4.3 headers; see
+  "Compatibility and packages".
+- **Direct transfers on vapoursynth-classic (R57.A14 and later):** opt-in with
+  `DSMVC_CUDA_DIRECT_IO=1` or `DSMVC_VULKAN_DIRECT_IO=1`. Frame pool blocks are
+  registered or imported once and rows are copied straight between them and
+  the device.
+- Fixes found on the way: a deadlock between filters that share one source
+  under concurrent requests (CUDA input cache), a crash or hang at process
+  exit when NVIDIA's background shader compile was still running, and a crash
+  at exit under Vulkan synchronization validation.
 
-## CPU vs v0.1.2
+[`docs/gpu-performance.md`](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.4/docs/gpu-performance.md)
+records the profiles, every change with its measurement, what was tried and
+dropped, and all switches.
+[`docs/frame-io.md`](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.4/docs/frame-io.md)
+describes GPU frames and direct transfers.
 
-All ratios below are **v0.1.2 time / v0.1.3 candidate time** on the same host
-and requested ISA. Larger is faster; 1.000x is unchanged. These are fresh
-comparisons against the latest published release, not a product of older gains.
+## GPU vs v0.1.3 (RTX 5080)
 
-The width workload preserves the v0.1.2 release description's 256 rows,
-1920 → 1692 geometry, four kernels, Release build, and GCC 13.3. Both hosts
-have two vCPUs: Intel Xeon Platinum 8581C and AMD EPYC 9B45. Buffers use the
-same controlled alignment and are filled before timing. Five A/B or B/A pairs
-use three calls per sample, followed by longer calibrated samples.
+Both plugins were built from source with the same options on the same host:
+RTX 5080, NVIDIA driver 615.71.09, Ryzen 9 5950X, VapourSynth R78. v0.1.3 is
+the tagged commit; the candidate is this release's source. Ratios are
+**candidate FPS / v0.1.3 FPS**, each the median of five alternating A/B or B/A
+runs. Larger is faster.
 
-The main table uses five longer pairs, approximately 1.0–1.3 seconds or more
-per sample. Each accepted group requires CPU1 to be at least 99% idle in
-every timed sample. Environment-invalid groups are retained and are not used
-for these ratios.
+The workload is a fixed 1920x1080 to 1280x720 descale of fresh host frames
+(3840x2160 to 2560x1440 for the 4K row), 32 requests in flight on 32 core
+threads, 64 untimed warmup frames and 700 to 4000 measured frames. `gray` is
+Float32; `rgb` is Float32 RGB. It measures the plugin with a synthetic source;
+decode and GetNative-style candidate scans are outside this comparison. The
+GPU also drives the desktop of the test machine.
 
-| Filter | Intel AVX2 | Intel AVX-512 | AMD AVX2 | AMD AVX-512 |
-|---|---:|---:|---:|---:|
-| Debilinear | 1.012x | 1.013x | 0.995x | 0.999x |
-| Debicubic | 1.004x | 1.008x | 0.986x | 0.993x |
-| Delanczos (`taps=3`) | 1.400x | 1.296x | 1.575x | 1.350x |
-| Despline64 | 1.424x | 1.406x | 1.645x | 1.493x |
+| Workload | CUDA v0.1.3 | CUDA v0.1.4 | CUDA ratio | Vulkan v0.1.3 | Vulkan v0.1.4 | Vulkan ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| Debilinear, gray | 713 | 840 | 1.18x | 524 | 861 | 1.64x |
+| Debicubic, gray | 715 | 841 | 1.18x | 610 | 852 | 1.40x |
+| Delanczos, gray | 723 | 838 | 1.16x | 591 | 858 | 1.45x |
+| Despline36, gray | 722 | 839 | 1.16x | 593 | 830 | 1.40x |
+| Despline64, gray | 721 | 839 | 1.16x | 589 | 856 | 1.45x |
+| Debicubic, YUV420 8-bit | 1716 | 2017 | 1.18x | 745 | 2244 | 3.01x |
+| Debicubic, YUV420 16-bit | 913 | 1058 | 1.16x | 603 | 1075 | 1.78x |
+| Debicubic, RGB | 229 | 268 | 1.17x | 193 | 262 | 1.36x |
+| Despline64, YUV420 8-bit | 1818 | 1947 | 1.07x | 625 | 2108 | 3.37x |
+| Debicubic, gray, 4K | 186 | 201 | 1.08x | 145 | 196 | 1.35x |
 
-Debilinear and Debicubic are effectively flat in this workload; AMD Debicubic
-has a small measured slowdown (0.986x on AVX2). Lanczos3 and Spline64 improve
-on both tested CPUs and both requested ISA paths.
+Float32 host frames are bound by host copies and PCIe on both backends, which
+is why all kernels land near the same figure. Vulkan gains most on 8-bit YUV,
+where v0.1.3 was bound by its single queue.
 
-A supplemental predecoded Float32 2D case, 1920×1080 → 1692×952, measures
-the full CPU inverse with automatic ISA selection:
+**Outputs.** CPU output is byte-identical to v0.1.3. Of 40 GPU digests (five
+kernels, four formats, both backends, 32 frames each), 34 are identical to
+v0.1.3. The six that differ are Float32 Lanczos3 and Spline64 cases, and
+`DSMVC_GPU_SOLVE_PARTITION=0` reproduces the v0.1.3 digest for each: the
+chunked solve is exact algebra, and only Float32 rounding of the state carried
+between chunks can differ. The largest difference from the sequential solve on
+the full-size routes tested is 4.8e-7, against the 2e-5 tolerance of the
+integration tests.
 
-| Filter | Intel auto | AMD auto |
+### GPU frames (VapourSynth R81)
+
+GPU frames are new, so there is no v0.1.3 figure. Debicubic 1080p to 720p on
+a GPU resident clip, fps:
+
+| Format | Vulkan | CUDA |
 |---|---:|---:|
-| Delanczos (`taps=3`) | 2.187x | 1.753x |
-| Despline64 | 2.169x | 1.740x |
-| Delanczos (`taps=6`) | 1.955x | 1.451x |
+| Float32 gray | 7648 | 7977 |
+| YUV420 8-bit | 5278 | - |
+| YUV420 16-bit | 4993 | - |
+| Float32 RGB | 3489 | - |
 
-All measured cross-version outputs are byte-identical. The legacy height
-fixture (951 → 952 with automatic precision) selects **F64** for every tested
-kernel; its results do not measure the new F32 column route. The supplemental
-2D case explicitly checks that both axes use F32. These are engine timings,
-not video decode or complete GetNative scan timings.
+A chain of three filters on a GPU clip measured 430 fps on Vulkan against 226
+fps on host frames, with about half the PCIe traffic. Output is bit-identical
+to the host path on every tested route. CUDA figures for YUV and RGB GPU
+frames were not remeasured for this release; they are bound by the core's
+plane export (see the performance page).
 
-The [full benchmark report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.3/docs/release-benchmark-v0.1.3.md)
-includes the original five-by-three results, absolute times, every paired
-ratio, environment failures, and reproduction instructions.
+### Direct transfers (vapoursynth-classic R57.A15)
 
-## GPU vs v0.1.2 (RTX 5080)
-
-Fresh comparisons use the actual Linux release archives on the same RTX 5080,
-NVIDIA driver 595.84, Ryzen 9 5950X, and VapourSynth R78. The v0.1.3 candidate
-was built from `d0ce31fb46e3c8e90cd8fc1307316554d119ba49`; its runtime sources
-are retained in the tagged build. Ratios are the median
-of five alternating A/B or B/A pairs: **candidate FPS / v0.1.2 FPS**.
-Larger is faster. Every planned case and all five pairs are retained.
-
-Both versions load the same predecoded Float32 input before timing. Fixed
-geometry is 1920x1080 to 1692x952, with active height 951.5, symmetric padding,
-128 untimed warmup frames and 2,048 measured requests. The candidate graph
-scans 512 heights across 700.0-979.9, including reconstruction, error threshold,
-crop and PlaneStats. It is a bounded GetNative-style workload. Decode and the
-complete historical 30,800-candidate scan are outside this comparison.
-
-### Default RHS selection, one request and one thread
-
-| Kernel | CUDA fixed | Vulkan fixed | CUDA candidate graph | Vulkan candidate graph |
-|---|---:|---:|---:|---:|
-| Bilinear | 1.001x | 1.002x | 0.989x | 0.991x |
-| Bicubic | 1.007x | 1.000x | 0.991x | 0.992x |
-| Lanczos3 | 1.002x | 1.002x | 1.008x | 1.026x |
-| Spline64 | 1.000x | 0.999x | 1.005x | 1.056x |
-| Lanczos6 | 1.000x | 0.998x | 0.994x | 1.039x |
-| Lanczos9 | 0.999x | 1.000x | 0.998x | 0.993x |
-
-### Default RHS selection, 32 requests and 32 threads
-
-| Kernel | CUDA candidate graph | Vulkan candidate graph |
-|---|---:|---:|
-| Lanczos3 | 1.000x | 1.081x |
-| Spline64 | 0.996x | 1.145x |
-| Lanczos6 | 0.991x | 1.110x |
-
-### Forced fused RHS, fixed geometry, one request and one thread
-
-These cells set the existing RHS policy override to fused execution. Their
-ratios describe that specific route; they do not establish the same gain under
-automatic RHS selection.
-
-| Kernel | CUDA | Vulkan |
-|---|---:|---:|
-| Bilinear | 0.999x | 1.001x |
-| Bicubic | 1.001x | 1.000x |
-| Lanczos3 | 1.103x | 1.166x |
-| Spline64 | 1.066x | 1.223x |
-| Lanczos6 | 0.998x | 1.231x |
-| Lanczos9 | 1.001x | 0.998x |
-
-Default fixed geometry is nearly unchanged across both backends. CUDA default
-scans remain close to v0.1.2; Vulkan gains depend on kernel and concurrency.
-Small measured slowdowns are retained in the tables. Vulkan Bilinear scan
-pairs span 0.892-1.102x around its 0.991x median, so that cell does not establish
-a stable change. The full report includes every pair range.
-
-All 672 paired sampled frames match in logical pixel SHA-256 and PlaneStats.
-An additional 96 paired cases cover six kernels, CUDA/Vulkan, automatic/fused
-RHS, and normal, tail, downscale and 4K dimensions. Every cross-version output
-hash matches; repeated outputs are exact and all CPU-scalar comparisons meet
-`3e-6`. These samples do not establish that every timed frame was hashed.
-The hardware results cover Linux on this RTX 5080; Metal, Windows GPU runtime,
-and other GPU architectures retain their separate evidence boundaries.
-
-The [full GPU report](https://github.com/AmusementClub/vapoursynth-descalemvc/blob/v0.1.3/docs/release-benchmark-gpu-v0.1.3.md)
-provides all paired ranges, absolute FPS, whole-process wall ratios, workload
-scripts and output hashes in its linked machine-readable data.
+Vulkan with direct transfers on, Debicubic 1080p to 720p, measured 2590 fps on
+8-bit YUV420 (2244 staged on R78 above) and 395 fps on Float32 RGB (262
+staged). CUDA's new default transfer already copies 16-bit and Float32 frames
+from frame memory on any core; direct transfers add to it for 8-bit and
+one-axis routes. Output digests are identical with direct transfers on and off for every route
+tested.
 
 ## Compatibility and packages
 
-- Existing `opt=0/1/2/3`, Python enum values, precision settings, and backend
-  selection retain their meaning. Explicit AVX-512 still requires the supported ISA.
+- Existing arguments, `opt` values, Python enum values, precision settings and
+  backend selection keep their meaning. No script needs to change.
 - The Float32 scalar/SIMD and mixed CPU/GPU tolerance contracts are unchanged.
-  Fixed routes remain deterministic; concurrency-dependent mixed routing retains
-  the existing numerical tolerance.
+- The plugin still declares API 4.0 and loads on API 4 cores, including
+  vapoursynth-classic. GPU frames are compiled in only when the plugin is
+  built against headers that include `VSVulkan4.h` (API 4.3) with Vulkan
+  enabled, and are enabled at run time on R81 only (`DSMVC_GPU_FRAMES=force`
+  allows another core). Packages built against the R57 SDK do not take GPU
+  clips.
+- A Vulkan slot now holds the workspace of all planes of a frame: about three
+  times the previous figure for RGB (245 MB per slot at 4K).
+- New switches, all optional: `DSMVC_GPU_SOLVE_PARTITION=0`,
+  `DSMVC_VULKAN_FRAME_SUBMIT=0`, `DSMVC_VULKAN_FOLD_TRANSPOSE=0`,
+  `DSMVC_HOST_COPY_STREAM_MIN`, `DSMVC_CUDA_HOST_TRANSFER`,
+  `DSMVC_CUDA_DIRECT_IO`, `DSMVC_VULKAN_DIRECT_IO`, `DSMVC_GPU_FRAMES`. Each
+  restores the previous behavior or enables an opt-in path; the linked pages
+  list them all.
 - Packages: Linux x64 CPU/CUDA/Vulkan, Linux arm64 CPU/NEON, Windows x64
-  CPU/CUDA/Vulkan, and macOS arm64 CPU/Metal (deployment target macOS 13.3).
-  The Linux arm64 package is built and tested on a native arm64 runner.
-  macOS 13.3 is the target,
-  not a claim of testing on that OS version.
-- CUDA packages contain native SM75/86/89/120 and PTX75/120 targets. Hardware
-  coverage does not imply execution on every compiled GPU architecture.
-- `SHA256SUMS` covers all four package archives. The macOS archive also
-  includes its source/build manifest and per-file checksums.
+  CPU/CUDA/Vulkan, and macOS arm64 CPU/Metal, as in v0.1.3.
 
-The earlier GPU and incremental CPU reports retain their own baselines and
-workload limits; their percentages are not cumulative v0.1.2-to-v0.1.3 results.
+Evidence boundaries: all GPU measurements and GPU-frame, direct-transfer and
+exit tests ran on Linux with one RTX 5080. The Windows handle paths for GPU
+frames and direct transfers are written but were not exercised. AMD and Intel
+Vulkan drivers and multi-GPU hosts are untested; the test suite also passes
+on Mesa lavapipe under the Vulkan validation layer.

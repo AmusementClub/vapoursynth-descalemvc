@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import math
+import re
 from pathlib import Path
 
 import vapoursynth as vs
@@ -206,10 +207,17 @@ def run(options) -> None:
             set(FUNCTIONS) | {"Descale"}, "public function set differs")
     for name in set(FUNCTIONS) | {"Descale"}:
         function = getattr(core.dsmvc, name)
-        require(function.signature == EXPECTED_SIGNATURES[name],
+        # API 4.3 cores get residency-aware signatures (vnode:all); the golden
+        # protects the arguments, so it compares without the suffix and checks
+        # that the suffix is on both the input and the return type, or neither.
+        no_residency = lambda text: re.sub(r"vnode:(?:all|cpu|gpu)", "vnode", text)
+        require(no_residency(function.signature) == EXPECTED_SIGNATURES[name],
                 f"{name}: API4 input signature differs")
-        require(function.return_signature == "clip:vnode;",
+        require(no_residency(function.return_signature) == "clip:vnode;",
                 f"{name}: API4 return signature differs")
+        require(("vnode:all" in function.signature)
+                == ("vnode:all" in function.return_signature),
+                f"{name}: residency suffix on only one side")
 
     float_source = core.std.BlankClip(
         width=96, height=64, format=vs.GRAYS, color=[0.35])

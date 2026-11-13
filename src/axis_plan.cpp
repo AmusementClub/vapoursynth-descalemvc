@@ -1250,6 +1250,13 @@ void inverse_axis_f64(
 } // namespace detail
 
 bool AxisPlan::valid() const noexcept {
+    if (validation_.known()) return true;
+    const bool result = check_valid();
+    if (result) validation_.remember();
+    return result;
+}
+
+bool AxisPlan::check_valid() const noexcept {
     if (source_size <= 0 || destination_size <= 0 || support <= 0
         || half_bandwidth < 0 || half_bandwidth >= destination_size
         || !(active_length > 0.0) || !std::isfinite(active_length)
