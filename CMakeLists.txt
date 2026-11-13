@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(dsmvc VERSION 0.1.3 LANGUAGES CXX)
+project(dsmvc VERSION 0.1.4 LANGUAGES CXX)
 
 if(MSVC)
     # The plugin boundary is a C ABI. Static CRT linkage prevents the host's
@@ -81,6 +81,9 @@ set(DSMVC_ENGINE_SOURCES
     src/backend.cpp
     src/cpu_executor.cpp
     src/executor.cpp
+    src/host_blocks.cpp
+    src/host_copy.cpp
+    src/solve_partition.cpp
 )
 
 set(DSMVC_CAN_BUILD_AVX2 OFF)
@@ -252,6 +255,15 @@ if(DSMVC_ENABLE_VULKAN)
             -DDSMVC_LOCAL_SIZE=32 -DDSMVC_SOLVE_ONLY=1
             "-DDSMVC_FIXED_BANDWIDTH=${_bandwidth}")
     endforeach()
+    foreach(_bandwidth IN ITEMS 1 3 5 7)
+        foreach(_chunks IN ITEMS 2 4 8 16 32)
+            dsmvc_compile_vulkan_shader(
+                "solve_chunked_b${_bandwidth}_c${_chunks}"
+                src/vulkan/shaders/solve_chunked.comp
+                "-DDSMVC_FIXED_BANDWIDTH=${_bandwidth}"
+                "-DDSMVC_CHUNKS=${_chunks}")
+        endforeach()
+    endforeach()
     dsmvc_compile_vulkan_shader(
         convert_256 src/vulkan/shaders/convert.comp
         -DDSMVC_LOCAL_SIZE=256)
@@ -319,10 +331,10 @@ if(DSMVC_CAN_BUILD_AVX512)
     endif()
 endif()
 
-add_library(dsmvc MODULE src/vs_plugin.cpp)
+add_library(dsmvc MODULE src/vs_plugin.cpp src/vs_frame_memory.cpp)
 target_compile_features(dsmvc PRIVATE cxx_std_23)
 target_include_directories(dsmvc PRIVATE "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}")
-target_link_libraries(dsmvc PRIVATE dsmvc_engine)
+target_link_libraries(dsmvc PRIVATE dsmvc_engine ${CMAKE_DL_LIBS})
 if(DSMVC_ENABLE_CUDA)
     target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_CUDA=1)
     target_include_directories(dsmvc PRIVATE
@@ -331,6 +343,12 @@ if(DSMVC_ENABLE_CUDA)
 endif()
 if(DSMVC_ENABLE_VULKAN)
     target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_VULKAN=1)
+    # GPU frames need the 4.3 headers (VSVulkan4.h) for the table layout; the
+    # plugin still declares API 4.0 and checks the core at run time.
+    if(EXISTS "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}/VSVulkan4.h")
+        target_compile_definitions(dsmvc PRIVATE DSMVC_HAS_VS_GPU=1 VS_USE_API_43=1)
+        target_link_libraries(dsmvc PRIVATE Vulkan::Vulkan)
+    endif()
 endif()
 set_target_properties(dsmvc PROPERTIES PREFIX "" OUTPUT_NAME "dsmvc")
 if(APPLE)
@@ -384,6 +402,32 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(dsmvc_engine_tests PRIVATE dsmvc_engine)
     add_test(NAME dsmvc_engine_tests COMMAND dsmvc_engine_tests)
+
+    add_executable(dsmvc_host_blocks_tests tests/host_blocks_tests.cpp)
+    target_compile_features(dsmvc_host_blocks_tests PRIVATE cxx_std_23)
+    target_link_libraries(dsmvc_host_blocks_tests PRIVATE dsmvc_engine)
+    add_test(NAME dsmvc_host_blocks_tests COMMAND dsmvc_host_blocks_tests)
+
+    add_executable(dsmvc_host_copy_tests tests/host_copy_tests.cpp)
+    target_compile_features(dsmvc_host_copy_tests PRIVATE cxx_std_23)
+    target_include_directories(dsmvc_host_copy_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(dsmvc_host_copy_tests PRIVATE dsmvc_engine)
+    add_test(NAME dsmvc_host_copy_tests COMMAND dsmvc_host_copy_tests)
+
+    # GPU frame tests need a VapourSynth R81+ environment with a Vulkan device
+    # (and a CUDA one for the CUDA cases); they run against the built plugin.
+    set(DSMVC_VS_GPU_PYTHON "" CACHE FILEPATH
+        "Python of a VapourSynth R81+ environment, to run the GPU frame tests")
+    if(DSMVC_VS_GPU_PYTHON AND DSMVC_ENABLE_VULKAN AND DSMVC_ENABLE_CUDA
+       AND EXISTS "${DSMVC_VAPOURSYNTH_INCLUDE_DIR}/VSVulkan4.h")
+        add_test(NAME dsmvc_vs_gpu_frames
+                 COMMAND "${DSMVC_VS_GPU_PYTHON}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/vs_gpu_frames.py"
+                         "$<TARGET_FILE:dsmvc>")
+        set_tests_properties(dsmvc_vs_gpu_frames PROPERTIES
+            LABELS "gpu" TIMEOUT 600)
+    endif()
 
     add_executable(dsmvc_simd_buffer_contract_tests
         tests/simd_buffer_contract_tests.cpp)
@@ -527,6 +571,22 @@ if(BUILD_TESTING)
     endif()
     if(DSMVC_ENABLE_VULKAN)
         list(APPEND _dsmvc_vs_backend_args --vulkan-enabled)
+    endif()
+    if(DSMVC_VS_PYTHON AND (DSMVC_ENABLE_CUDA OR DSMVC_ENABLE_VULKAN))
+        set(_dsmvc_vs_gpu_backends)
+        if(DSMVC_ENABLE_CUDA)
+            list(APPEND _dsmvc_vs_gpu_backends --cuda)
+        endif()
+        if(DSMVC_ENABLE_VULKAN)
+            list(APPEND _dsmvc_vs_gpu_backends --vulkan)
+        endif()
+        add_test(
+            NAME dsmvc_vs_gpu_concurrency
+            COMMAND "${DSMVC_VS_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/vs_gpu_concurrency.py"
+                "$<TARGET_FILE:dsmvc>" ${_dsmvc_vs_gpu_backends})
+        set_tests_properties(dsmvc_vs_gpu_concurrency PROPERTIES
+            LABELS "gpu" TIMEOUT 300)
     endif()
     if(DSMVC_VS_PYTHON AND NOT DSMVC_ENABLE_METAL)
         add_test(

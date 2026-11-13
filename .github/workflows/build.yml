@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # API 4.0 headers (R57) for CPU and Metal packages; the CUDA/Vulkan packages
+  # are built against the API 4.3 headers of R81 for GPU frames (the plugin
+  # still declares API 4.0).
+  DSMVC_VS_SDK_REF: 325756ed04588b31840fdb74479537cddcba4bf7
+  DSMVC_VS_GPU_SDK_REF: dd11a9da6f8e2bb24ab4bb084d44bf01fb93612a
+
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -56,14 +63,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check out VapourSynth R57 SDK
+      - name: Check out VapourSynth SDK
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: vapoursynth/vapoursynth
-          ref: 325756ed04588b31840fdb74479537cddcba4bf7
+          ref: ${{ matrix.enable-vulkan && env.DSMVC_VS_GPU_SDK_REF || env.DSMVC_VS_SDK_REF }}
           path: dependencies/vapoursynth
           sparse-checkout: include
           persist-credentials: false
+
+      - name: Verify GPU frame headers
+        if: matrix.enable-vulkan
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dependencies/vapoursynth/include
+          # The headers GPU frames were tested with (line endings aside).
+          digest() { tr -d '\r' < "$1" | sha256sum | cut -d' ' -f1; }
+          test "$(digest VSVulkan4.h)" = 56f0cb5a68a76c2db086b46413f2f231bdcdb484032d3093f5a1fd5f787122ba
+          test "$(digest VapourSynth4.h)" = d079c0e1602718204c36fe743079cf6667f832bc98f28a2bd54ff19b44cfc1db
 
       - name: Install CUDA Toolkit
         if: matrix.enable-cuda
@@ -159,6 +177,15 @@ jobs:
         if: matrix.enable-vulkan
         shell: bash
         run: test -z "$(find package -type f -name '*.spv' -print -quit)"
+
+      - name: Verify GPU frame support in the plugin
+        if: matrix.enable-vulkan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plugin="$(find package/vapoursynth -maxdepth 1 -type f \( -name 'dsmvc.so' -o -name 'dsmvc.dll' \) -print -quit)"
+          test -n "$plugin"
+          grep -aq 'clip:vnode:all;' "$plugin"
 
       - name: Upload plugin package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

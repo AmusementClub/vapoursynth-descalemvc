@@ -810,6 +810,227 @@ __device__ __forceinline__ Sample convert_output_f64(
     return static_cast<Sample>(__double2uint_rn(value));
 }
 
+// ---- Partitioned solve (see src/solve_partition.hpp) ----------------------
+// Column-major data, solved in place: element i of vector v at i * V + v.
+// A block holds 32 vectors (threadIdx.x) and blockDim.y chunks of each.
+// Arithmetic per element is that of inverse_axis_ring<W, UA, true>.
+
+constexpr std::uint32_t chunk_batch = 8U;
+
+template <std::uint32_t W>
+__device__ __forceinline__ void shift_in(float (&recent)[W], float value) {
+#pragma unroll
+    for (std::uint32_t distance = W - 1U; distance > 0U; --distance) {
+        recent[distance] = recent[distance - 1U];
+    }
+    recent[0] = value;
+}
+
+template <std::uint32_t W>
+__device__ __forceinline__ void chunk_forward(
+    const float *__restrict__ lower_ld,
+    const float *__restrict__ inverse_diagonal,
+    float *__restrict__ column, std::uint32_t stride, std::uint32_t size,
+    std::uint32_t begin, std::uint32_t end, float (&recent)[W], bool store) {
+    for (std::uint32_t base = begin; base < end; base += chunk_batch) {
+        float values[chunk_batch];
+#pragma unroll
+        for (std::uint32_t offset = 0U; offset < chunk_batch; ++offset) {
+            if (base + offset < end) {
+                values[offset] = column[(base + offset) * stride];
+            }
+        }
+#pragma unroll
+        for (std::uint32_t offset = 0U; offset < chunk_batch; ++offset) {
+            const std::uint32_t index = base + offset;
+            if (index < end) {
+                float sum = values[offset];
+                const std::uint32_t available = minimum(W, index);
+#pragma unroll
+                for (std::uint32_t distance = W; distance > 0U; --distance) {
+                    if (distance <= available) {
+                        sum = fmaf(
+                            -lower_ld[(distance - 1U) * size + index],
+                            recent[distance - 1U], sum);
+                    }
+                }
+                const float current = sum * inverse_diagonal[index];
+                if (store) column[index * stride] = current;
+                shift_in(recent, current);
+            }
+        }
+    }
+}
+
+// Indices end - 1 down to begin.
+template <std::uint32_t W, bool UpperAscending>
+__device__ __forceinline__ void chunk_backward(
+    const float *__restrict__ upper_l, float *__restrict__ column,
+    std::uint32_t stride, std::uint32_t size, std::uint32_t begin,
+    std::uint32_t end, float (&recent)[W], bool store) {
+    for (std::uint32_t top = end; top > begin;) {
+        const std::uint32_t count = minimum(chunk_batch, top - begin);
+        float values[chunk_batch];
+#pragma unroll
+        for (std::uint32_t offset = 0U; offset < chunk_batch; ++offset) {
+            if (offset < count) {
+                values[offset] = column[(top - 1U - offset) * stride];
+            }
+        }
+#pragma unroll
+        for (std::uint32_t offset = 0U; offset < chunk_batch; ++offset) {
+            if (offset < count) {
+                const std::uint32_t index = top - 1U - offset;
+                const std::uint32_t available = minimum(W, size - index - 1U);
+                float sum = 0.0F;
+                if constexpr (UpperAscending) {
+#pragma unroll
+                    for (std::uint32_t distance = 1U; distance <= W; ++distance) {
+                        if (distance <= available) {
+                            sum = fmaf(
+                                upper_l[(distance - 1U) * size + index],
+                                recent[distance - 1U], sum);
+                        }
+                    }
+                } else {
+#pragma unroll
+                    for (std::uint32_t distance = W; distance > 0U; --distance) {
+                        if (distance <= available) {
+                            sum = fmaf(
+                                upper_l[(distance - 1U) * size + index],
+                                recent[distance - 1U], sum);
+                        }
+                    }
+                }
+                const float current = values[offset] - sum;
+                if (store) column[index * stride] = current;
+                shift_in(recent, current);
+            }
+        }
+        top -= count;
+    }
+}
+
+// carry[(chunk * W + k) * 32 + lane] holds, per chunk, first its end state
+// from a zero carry-in and then its true carry-in. One thread per vector
+// turns the former into the latter with the transfer matrices.
+template <std::uint32_t W>
+__device__ __forceinline__ void carry_across_chunks(
+    float *carry, const float *__restrict__ transfers, std::uint32_t lane,
+    std::uint32_t chunks, bool reverse) {
+    const auto at = [&](std::uint32_t chunk, std::uint32_t k) -> float & {
+        return carry[(chunk * W + k) * 32U + lane];
+    };
+    float incoming[W];
+    const std::uint32_t first = reverse ? chunks - 1U : 0U;
+#pragma unroll
+    for (std::uint32_t k = 0U; k < W; ++k) incoming[k] = at(first, k);
+    if (!reverse) {
+#pragma unroll
+        for (std::uint32_t k = 0U; k < W; ++k) at(0U, k) = 0.0F;
+    }
+    for (std::uint32_t step = 1U; step < chunks; ++step) {
+        const std::uint32_t chunk = reverse ? chunks - 1U - step : step;
+        const float *matrix = transfers + chunk * W * W;
+        float next[W];
+#pragma unroll
+        for (std::uint32_t row = 0U; row < W; ++row) {
+            float sum = at(chunk, row);
+#pragma unroll
+            for (std::uint32_t k = 0U; k < W; ++k) {
+                sum = fmaf(matrix[row * W + k], incoming[k], sum);
+            }
+            next[row] = sum;
+        }
+#pragma unroll
+        for (std::uint32_t k = 0U; k < W; ++k) {
+            at(chunk, k) = incoming[k];
+            incoming[k] = next[k];
+        }
+    }
+}
+
+template <std::uint32_t W, bool UpperAscending>
+__device__ __forceinline__ void solve_axis_chunked(
+    std::uint32_t vector_count, const kernel::AxisPlanDescriptor &plan,
+    std::uint32_t chunk_length, const float *__restrict__ lower_ld,
+    const float *__restrict__ upper_l,
+    const float *__restrict__ inverse_diagonal,
+    const float *__restrict__ transfers, float *__restrict__ output) {
+    extern __shared__ float carry[];
+    const std::uint32_t lane = threadIdx.x;
+    const std::uint32_t chunk = threadIdx.y;
+    const std::uint32_t chunks = blockDim.y;
+    const std::uint32_t size = plan.destination_size;
+    const std::uint32_t vector = blockIdx.x * 32U + lane;
+    const bool active = vector < vector_count;
+    const bool last = chunk + 1U == chunks;
+    float *column = output + (active ? vector : 0U);
+    const std::uint32_t begin = minimum(size, chunk * chunk_length);
+    const std::uint32_t end = minimum(size, begin + chunk_length);
+    float *own = carry + chunk * W * 32U + lane;
+
+    // Forward substitution. The first chunk's carry-in is zero; the last
+    // chunk's end state is never needed.
+    float recent[W];
+#pragma unroll
+    for (std::uint32_t k = 0U; k < W; ++k) recent[k] = 0.0F;
+    if (active && !last) {
+        chunk_forward<W>(
+            lower_ld, inverse_diagonal, column, vector_count, size,
+            begin, end, recent, false);
+    }
+#pragma unroll
+    for (std::uint32_t k = 0U; k < W; ++k) own[k * 32U] = recent[k];
+    __syncthreads();
+    if (chunk == 0U) {
+        carry_across_chunks<W>(carry, transfers, lane, chunks, false);
+    }
+    __syncthreads();
+#pragma unroll
+    for (std::uint32_t k = 0U; k < W; ++k) recent[k] = own[k * 32U];
+    if (active) {
+        chunk_forward<W>(
+            lower_ld, inverse_diagonal, column, vector_count, size,
+            begin, end, recent, true);
+    }
+    __syncthreads();
+
+    // Backward substitution. The last sample is final; the last chunk starts
+    // from it, and the first chunk's end state is never needed.
+    const std::uint32_t backward_end = minimum(end, size - 1U);
+    const auto start_state = [&] {
+#pragma unroll
+        for (std::uint32_t k = 0U; k < W; ++k) recent[k] = 0.0F;
+        if (last && active) recent[0] = column[(size - 1U) * vector_count];
+    };
+    start_state();
+    if (active && chunk != 0U) {
+        chunk_backward<W, UpperAscending>(
+            upper_l, column, vector_count, size, begin, backward_end,
+            recent, false);
+    }
+#pragma unroll
+    for (std::uint32_t k = 0U; k < W; ++k) own[k * 32U] = recent[k];
+    __syncthreads();
+    if (chunk == 0U) {
+        carry_across_chunks<W>(
+            carry, transfers + chunks * W * W, lane, chunks, true);
+    }
+    __syncthreads();
+    if (last) {
+        start_state();
+    } else {
+#pragma unroll
+        for (std::uint32_t k = 0U; k < W; ++k) recent[k] = own[k * 32U];
+    }
+    if (active) {
+        chunk_backward<W, UpperAscending>(
+            upper_l, column, vector_count, size, begin, backward_end,
+            recent, true);
+    }
+}
+
 } // namespace
 
 extern "C" __global__ void dsmvc_cuda_transpose_f32(
@@ -1016,6 +1237,23 @@ extern "C" __global__ void dsmvc_cuda_solve_vertical(
         plan, lower_ld, upper_l, inverse_diagonal,
         output + column, source_width);
 }
+
+#define DSMVC_SOLVE_CHUNKED(name, W, UA) \
+    extern "C" __global__ void __launch_bounds__(1024) name( \
+        std::uint32_t vector_count, kernel::AxisPlanDescriptor plan, \
+        std::uint32_t chunk_length, const float *__restrict__ lower_ld, \
+        const float *__restrict__ upper_l, \
+        const float *__restrict__ inverse_diagonal, \
+        const float *__restrict__ transfers, float *__restrict__ output) { \
+        solve_axis_chunked<W, UA>( \
+            vector_count, plan, chunk_length, lower_ld, upper_l, \
+            inverse_diagonal, transfers, output); \
+    }
+DSMVC_SOLVE_CHUNKED(dsmvc_cuda_solve_chunked_w1, 1U, false)
+DSMVC_SOLVE_CHUNKED(dsmvc_cuda_solve_chunked_w3, 3U, true)
+DSMVC_SOLVE_CHUNKED(dsmvc_cuda_solve_chunked_w5, 5U, false)
+DSMVC_SOLVE_CHUNKED(dsmvc_cuda_solve_chunked_w7, 7U, false)
+#undef DSMVC_SOLVE_CHUNKED
 
 extern "C" __global__ void dsmvc_cuda_convert_u8(
     const float *__restrict__ source,
@@ -1428,6 +1666,42 @@ cudaError_t solve_vertical(
     dsmvc_cuda_solve_vertical<<<divide_up(source_width, threads), threads,
         0U, stream>>>(
         source_width, plan, lower, upper, diagonal, output);
+    return launch_status();
+}
+
+cudaError_t solve_chunked(
+    std::uint32_t vector_count, cuda_kernel::AxisPlanDescriptor plan,
+    std::uint32_t chunks, std::uint32_t chunk_length,
+    const float *lower, const float *upper, const float *diagonal,
+    const float *transfers, float *output, cudaStream_t stream) {
+    const dim3 block(32U, chunks);
+    const dim3 grid(divide_up(vector_count, 32U));
+    const std::size_t shared_bytes = static_cast<std::size_t>(chunks)
+        * plan.half_bandwidth * 32U * sizeof(float);
+    switch (plan.half_bandwidth) {
+    case 1U:
+        dsmvc_cuda_solve_chunked_w1<<<grid, block, shared_bytes, stream>>>(
+            vector_count, plan, chunk_length, lower, upper, diagonal,
+            transfers, output);
+        break;
+    case 3U:
+        dsmvc_cuda_solve_chunked_w3<<<grid, block, shared_bytes, stream>>>(
+            vector_count, plan, chunk_length, lower, upper, diagonal,
+            transfers, output);
+        break;
+    case 5U:
+        dsmvc_cuda_solve_chunked_w5<<<grid, block, shared_bytes, stream>>>(
+            vector_count, plan, chunk_length, lower, upper, diagonal,
+            transfers, output);
+        break;
+    case 7U:
+        dsmvc_cuda_solve_chunked_w7<<<grid, block, shared_bytes, stream>>>(
+            vector_count, plan, chunk_length, lower, upper, diagonal,
+            transfers, output);
+        break;
+    default:
+        return cudaErrorInvalidValue;
+    }
     return launch_status();
 }
 

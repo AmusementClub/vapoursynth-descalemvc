@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -105,9 +106,35 @@ struct AxisPlan {
     std::vector<double> ldlt_bands_f64;
     std::vector<double> inverse_diagonal_f64;
 
+    // Checks every coefficient once per object: a successful result is
+    // remembered, and copies and moves start unchecked. Plans are immutable
+    // once validated; modify a copy instead.
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool requires_float64() const noexcept;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
+
+private:
+    class ValidationMemo {
+    public:
+        ValidationMemo() noexcept = default;
+        ValidationMemo(const ValidationMemo &) noexcept {}
+        ValidationMemo &operator=(const ValidationMemo &) noexcept {
+            valid_.store(false, std::memory_order_relaxed);
+            return *this;
+        }
+        [[nodiscard]] bool known() const noexcept {
+            return valid_.load(std::memory_order_acquire);
+        }
+        void remember() const noexcept {
+            valid_.store(true, std::memory_order_release);
+        }
+
+    private:
+        mutable std::atomic<bool> valid_{false};
+    };
+
+    [[nodiscard]] bool check_valid() const noexcept;
+    ValidationMemo validation_;
 };
 
 struct PlannerCacheStats {
@@ -265,6 +292,72 @@ private:
         const IntegerConversion &conversion) const;
 };
 
+// One plane of a device-resident (GPU) frame: a linear pitched Vulkan buffer
+// laid out like the CPU plane, plus the timeline pair to wait on before reading.
+// Vulkan handles travel as integers so this header stays free of Vulkan.
+struct GpuPlane {
+    std::uint64_t buffer = 0;           // VkBuffer
+    std::uint64_t buffer_bytes = 0;     // stride * height
+    std::uint64_t ready_semaphore = 0;  // VkSemaphore (timeline); 0 = ready now
+    std::uint64_t ready_value = 0;
+    std::ptrdiff_t pitch_bytes = 0;     // distance between rows
+};
+
+// A plane of a GPU frame exported by the core for a foreign API (CUDA): the
+// whole allocation is imported once and the plane lives at `offset` in it. The
+// handle (a POSIX file descriptor, or a Windows handle) is consumed by the call
+// that receives it, whatever the outcome.
+struct ExportedPlane {
+    std::uint64_t memory_id = 0;     // stable for the allocation's lifetime
+    std::uint64_t memory_size = 0;
+    std::uint64_t offset = 0;
+    std::uint64_t plane_bytes = 0;   // stride * height
+    int handle_type = 0;             // VkExternalMemoryHandleTypeFlagBits
+    std::intptr_t handle = -1;
+    std::ptrdiff_t pitch_bytes = 0;
+    // An input plane's producer pair, for an executor that has imported the
+    // semaphore (import_exported_semaphore): it then waits for the pair on
+    // the device. Zero when the caller has waited on the host instead.
+    std::uint64_t ready_semaphore = 0;  // VkSemaphore (timeline)
+    std::uint64_t ready_value = 0;
+};
+
+// Closes the handle of an exported plane that was never passed to an executor.
+void close_exported_plane(const ExportedPlane &plane) noexcept;
+
+enum class ResidentKind : std::uint8_t { none, vulkan, cuda };
+
+enum class SampleKind : std::uint8_t { float32, u8, u16 };
+
+// One plane of a multi-plane 2D frame for Executor::inverse_2d_frame. Host
+// frames give pointers and strides in samples, GPU frames the planes;
+// `conversion` is read for integer samples only.
+struct FramePlane2D {
+    const AxisPlan *horizontal = nullptr;
+    const AxisPlan *vertical = nullptr;
+    const void *input = nullptr;
+    std::ptrdiff_t input_row_stride = 0;
+    void *output = nullptr;
+    std::ptrdiff_t output_row_stride = 0;
+    GpuPlane gpu_input;
+    GpuPlane gpu_output;
+    IntegerConversion conversion;
+};
+
+// The Vulkan device of a VapourSynth core, borrowed for as long as the
+// executor made from it lives. The queue is shared with the core's own filters:
+// every submission is bracketed by lock_queue / unlock_queue.
+struct VulkanCoreDevice {
+    void *instance = nullptr;           // VkInstance
+    void *physical_device = nullptr;    // VkPhysicalDevice
+    void *device = nullptr;             // VkDevice
+    std::uint32_t queue_family = 0;
+    std::uint32_t queue_index = 0;
+    void (*lock_queue)(void *user) = nullptr;
+    void (*unlock_queue)(void *user) = nullptr;
+    void *user = nullptr;
+};
+
 // Backend-neutral executor used by the plugin. Automatic dispatch deliberately
 // remains CPU-first; callers opt in to a GPU backend explicitly.
 class Executor {
@@ -278,14 +371,86 @@ public:
     Executor(Executor &&) noexcept = default;
     Executor &operator=(Executor &&) noexcept = default;
 
+    // Runs on the Vulkan device of a core that hands out GPU frames. Throws
+    // when this build has no Vulkan or the device cannot run the kernels.
+    [[nodiscard]] static Executor on_core_vulkan(const VulkanCoreDevice &device);
+    // CUDA on the GPU that backs a core's Vulkan device (matched by UUID).
+    // Throws when the CUDA device in use is not that GPU.
+    [[nodiscard]] static Executor on_core_cuda(const std::uint8_t device_uuid[16]);
+
     [[nodiscard]] BackendKind backend() const noexcept;
     [[nodiscard]] const char *name() const noexcept;
     [[nodiscard]] bool input_cache_enabled() const noexcept;
     [[nodiscard]] CpuPlanPackingStats cpu_plan_packing_stats() const noexcept;
+    // True for an executor made by on_core_vulkan: it takes GPU planes only.
+    [[nodiscard]] bool resident() const noexcept;
+    [[nodiscard]] ResidentKind resident_kind() const noexcept;
 
     void prepare(std::shared_ptr<const AxisPlan> plan) const;
     void defer(std::shared_ptr<const AxisPlan> plan) const;
     void seal() const;
+
+    // GPU frames (resident executors, Float32). The call returns once the
+    // output plane is written; the input plane's ready pair is waited on.
+    void inverse_rows_resident(
+        const AxisPlan &plan, const GpuPlane &input, const GpuPlane &output,
+        std::int32_t row_count) const;
+    void inverse_columns_resident(
+        const AxisPlan &plan, const GpuPlane &input, const GpuPlane &output,
+        std::int32_t column_count) const;
+    void inverse_2d_resident(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const GpuPlane &input, const GpuPlane &output) const;
+    // Fused 8-16 bit integer 2D descale on GPU frames.
+    void inverse_2d_u8_resident(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const GpuPlane &input, const GpuPlane &output,
+        const IntegerConversion &conversion) const;
+    void inverse_2d_u16_resident(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const GpuPlane &input, const GpuPlane &output,
+        const IntegerConversion &conversion) const;
+
+    // The same for a CUDA resident executor, through exported memory. The
+    // caller has waited for the input frame's producers, or names their pair
+    // in the input plane; the output is written and synchronized before the
+    // call returns.
+    //
+    // A timeline semaphore of the core, exported for this executor to wait on
+    // (keyed by its VkSemaphore, which must stay alive as long as the
+    // executor). The handle is consumed whatever the outcome; returns false
+    // when it cannot be imported, and the caller waits on the host.
+    [[nodiscard]] bool has_exported_semaphore(std::uint64_t semaphore) const;
+    [[nodiscard]] bool import_exported_semaphore(
+        std::uint64_t semaphore, int handle_type, std::intptr_t handle) const;
+    void inverse_rows_exported(
+        const AxisPlan &plan, const ExportedPlane &input,
+        const ExportedPlane &output, std::int32_t row_count) const;
+    void inverse_columns_exported(
+        const AxisPlan &plan, const ExportedPlane &input,
+        const ExportedPlane &output, std::int32_t column_count) const;
+    void inverse_2d_exported(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const ExportedPlane &input, const ExportedPlane &output) const;
+    void inverse_2d_u8_exported(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const ExportedPlane &input, const ExportedPlane &output,
+        const IntegerConversion &conversion) const;
+    void inverse_2d_u16_exported(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const ExportedPlane &input, const ExportedPlane &output,
+        const IntegerConversion &conversion) const;
+
+    // All planes (2 to 3, one sample kind, 2D) of a frame in one submission,
+    // for the Vulkan backend: host frames, or GPU frames on an executor made
+    // by on_core_vulkan. Returns false without doing anything when the backend
+    // or the frame is not eligible (another backend, a Float64 plan, a frame
+    // that does not fit one workspace, DSMVC_VULKAN_FRAME_SUBMIT=0); the
+    // caller then runs the planes one by one, which also reports invalid
+    // arguments.
+    [[nodiscard]] bool inverse_2d_frame(
+        SampleKind kind, std::span<const FramePlane2D> planes,
+        const std::shared_ptr<const void> &input_lifetime = {}) const;
 
     void inverse_rows(const AxisPlan &plan,
                       const float *input, std::ptrdiff_t input_row_stride,
@@ -334,6 +499,7 @@ public:
 
 private:
     struct Impl;
+    explicit Executor(std::shared_ptr<Impl> impl);
     std::shared_ptr<Impl> impl_;
 };
 

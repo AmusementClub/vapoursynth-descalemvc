@@ -5,6 +5,7 @@
 #include "vulkan_f64.hpp"
 
 #include <memory>
+#include <span>
 #include <string>
 
 namespace dsmvc::vulkan_detail {
@@ -17,6 +18,8 @@ void require_backend_available();
 class VulkanExecutor {
 public:
     VulkanExecutor();
+    // Runs on a core's Vulkan device (GPU frames); see VulkanCoreDevice.
+    explicit VulkanExecutor(const VulkanCoreDevice &device);
     ~VulkanExecutor();
     VulkanExecutor(const VulkanExecutor &) noexcept = default;
     VulkanExecutor &operator=(const VulkanExecutor &) noexcept = default;
@@ -55,6 +58,28 @@ public:
         std::uint16_t *output, std::ptrdiff_t output_row_stride,
         const IntegerConversion &conversion,
         std::shared_ptr<const void> input_lifetime) const;
+
+    [[nodiscard]] bool inverse_2d_frame(
+        SampleKind kind, std::span<const FramePlane2D> planes, bool gpu_frame,
+        const std::shared_ptr<const void> &input_lifetime) const;
+
+    void inverse_rows_resident(
+        const AxisPlan &plan, const GpuPlane &input, const GpuPlane &output,
+        std::int32_t row_count) const;
+    void inverse_columns_resident(
+        const AxisPlan &plan, const GpuPlane &input, const GpuPlane &output,
+        std::int32_t column_count) const;
+    void inverse_2d_resident(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const GpuPlane &input, const GpuPlane &output) const;
+    void inverse_2d_u8_resident(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const GpuPlane &input, const GpuPlane &output,
+        const IntegerConversion &conversion) const;
+    void inverse_2d_u16_resident(
+        const AxisPlan &horizontal, const AxisPlan &vertical,
+        const GpuPlane &input, const GpuPlane &output,
+        const IntegerConversion &conversion) const;
 
 private:
     struct Impl;

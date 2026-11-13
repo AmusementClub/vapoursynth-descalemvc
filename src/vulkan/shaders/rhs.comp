@@ -42,8 +42,14 @@ uint output_index(uint vector, uint index) {
 }
 
 void main() {
-    const uint vector = gl_GlobalInvocationID.x;
-    const uint index = gl_GlobalInvocationID.y;
+    // Invocations that are neighbours along x share cache lines of whatever
+    // they index alike. [18] nonzero runs the samples of a vector along x (for
+    // a row-major source, whose taps are then neighbours); zero runs vectors.
+    const bool samples_along_x = pc.value[18] != 0U;
+    const uint vector = samples_along_x
+        ? gl_GlobalInvocationID.y : gl_GlobalInvocationID.x;
+    const uint index = samples_along_x
+        ? gl_GlobalInvocationID.x : gl_GlobalInvocationID.y;
     if (vector >= pc.value[3] || index >= pc.value[1]) {
         return;
     }

@@ -1,4 +1,7 @@
+#include <dsmvc/host_blocks.hpp>
 #include "vulkan_executor.hpp"
+#include "../host_copy.hpp"
+#include "../solve_partition.hpp"
 
 #include "vulkan_convert_128_spv.hpp"
 #include "vulkan_convert_256_spv.hpp"
@@ -23,6 +26,26 @@
 #include "vulkan_solve_b5_32_spv.hpp"
 #include "vulkan_solve_b7_32_spv.hpp"
 #include "vulkan_solve_b9_32_spv.hpp"
+#include "vulkan_solve_chunked_b1_c2_spv.hpp"
+#include "vulkan_solve_chunked_b1_c4_spv.hpp"
+#include "vulkan_solve_chunked_b1_c8_spv.hpp"
+#include "vulkan_solve_chunked_b1_c16_spv.hpp"
+#include "vulkan_solve_chunked_b1_c32_spv.hpp"
+#include "vulkan_solve_chunked_b3_c2_spv.hpp"
+#include "vulkan_solve_chunked_b3_c4_spv.hpp"
+#include "vulkan_solve_chunked_b3_c8_spv.hpp"
+#include "vulkan_solve_chunked_b3_c16_spv.hpp"
+#include "vulkan_solve_chunked_b3_c32_spv.hpp"
+#include "vulkan_solve_chunked_b5_c2_spv.hpp"
+#include "vulkan_solve_chunked_b5_c4_spv.hpp"
+#include "vulkan_solve_chunked_b5_c8_spv.hpp"
+#include "vulkan_solve_chunked_b5_c16_spv.hpp"
+#include "vulkan_solve_chunked_b5_c32_spv.hpp"
+#include "vulkan_solve_chunked_b7_c2_spv.hpp"
+#include "vulkan_solve_chunked_b7_c4_spv.hpp"
+#include "vulkan_solve_chunked_b7_c8_spv.hpp"
+#include "vulkan_solve_chunked_b7_c16_spv.hpp"
+#include "vulkan_solve_chunked_b7_c32_spv.hpp"
 #include "vulkan_solve_f64_spv.hpp"
 #include "vulkan_transpose_128_spv.hpp"
 #include "vulkan_transpose_256_spv.hpp"
@@ -45,26 +68,39 @@
 #include <exception>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <map>
 #include <utility>
 #include <vector>
+
+#ifdef __linux__
+#include <chrono>
+#include <dirent.h>
+#include <sys/syscall.h>
+#include <thread>
+#include <unistd.h>
+#endif
 
 namespace dsmvc::vulkan_detail {
 
 namespace {
 
 constexpr VkDeviceSize maximum_allocation_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
-constexpr std::size_t descriptor_set_count = 8U;
+// One plane's 2D execution records up to seven sets; a frame submits three.
+constexpr std::size_t descriptor_set_count = 24U;
+constexpr std::size_t frame_plane_limit = 3U;
 constexpr std::size_t default_plan_cache_bytes = 16U * 1024U * 1024U;
 constexpr std::size_t default_input_cache_bytes = 64U * 1024U * 1024U;
 constexpr std::array<std::uint32_t, 6U> fixed_bandwidths{
@@ -237,6 +273,7 @@ struct InstanceHandle {
     VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger = nullptr;
     bool debug_utils = false;
+    bool owned = true; // false: the instance belongs to a VapourSynth core
 
     InstanceHandle() = default;
     InstanceHandle(const InstanceHandle &) = delete;
@@ -245,7 +282,7 @@ struct InstanceHandle {
         : instance(std::exchange(other.instance, VK_NULL_HANDLE)),
           messenger(std::exchange(other.messenger, VK_NULL_HANDLE)),
           destroy_messenger(std::exchange(other.destroy_messenger, nullptr)),
-          debug_utils(other.debug_utils) {}
+          debug_utils(other.debug_utils), owned(other.owned) {}
     InstanceHandle &operator=(InstanceHandle &&other) noexcept {
         if (this == &other) return *this;
         reset();
@@ -253,6 +290,7 @@ struct InstanceHandle {
         messenger = std::exchange(other.messenger, VK_NULL_HANDLE);
         destroy_messenger = std::exchange(other.destroy_messenger, nullptr);
         debug_utils = other.debug_utils;
+        owned = other.owned;
         return *this;
     }
     ~InstanceHandle() { reset(); }
@@ -262,12 +300,117 @@ struct InstanceHandle {
             destroy_messenger(instance, messenger, nullptr);
         }
         messenger = VK_NULL_HANDLE;
-        if (instance) vkDestroyInstance(instance, nullptr);
+        if (instance && owned) vkDestroyInstance(instance, nullptr);
         instance = VK_NULL_HANDLE;
     }
 };
 
+// The threads of this process, by id.
+[[nodiscard]] std::vector<long> thread_ids() {
+    std::vector<long> ids;
+#ifdef __linux__
+    if (DIR *tasks = opendir("/proc/self/task")) {
+        while (const dirent *entry = readdir(tasks)) {
+            if (entry->d_name[0] != '.') ids.push_back(std::atol(entry->d_name));
+        }
+        closedir(tasks);
+    }
+    std::ranges::sort(ids);
+#endif
+    return ids;
+}
+
+// The threads that existed before dsmvc first called into the Vulkan loader.
+[[nodiscard]] const std::vector<long> &threads_before_vulkan() {
+    static const std::vector<long> ids = thread_ids();
+    return ids;
+}
+
+struct ThreadActivity {
+    unsigned long long cpu = 0U; // ticks used so far
+    bool running = false;        // any of them in state R
+};
+
+[[nodiscard]] ThreadActivity thread_activity(const std::vector<long> &ids) {
+    ThreadActivity result;
+#ifdef __linux__
+    for (const long id : ids) {
+        char path[48];
+        std::snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", id);
+        std::FILE *file = std::fopen(path, "r");
+        if (!file) continue; // the thread has exited
+        char text[512];
+        const std::size_t length = std::fread(text, 1U, sizeof(text) - 1U, file);
+        std::fclose(file);
+        text[length] = '\0';
+        // The state (field 3) and utime, stime (14, 15) follow the name.
+        const char *fields = std::strrchr(text, ')');
+        char state = '\0';
+        unsigned long long user = 0U;
+        unsigned long long system = 0U;
+        if (fields && std::sscanf(fields + 2,
+                "%c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
+                &state, &user, &system) == 3) {
+            result.cpu += user + system;
+            result.running = result.running || state == 'R';
+        }
+    }
+#else
+    (void)ids;
+#endif
+    return result;
+}
+
+// NVIDIA's driver (seen with 615.71.09) compiles shaders on its own threads.
+// When its shader cache holds an incomplete entry for a pipeline (left by a
+// process that ended during a compile), it compiles that pipeline again about
+// three seconds into every process, for several seconds, and stores the
+// result only when the compile finishes. A process that exits during that
+// compile crashes or hangs in the driver (libnvidia-gpucomp): exit handlers
+// that run before dsmvc's destroy state the compiler still uses, and the
+// entry stays incomplete for the next process. Waiting for the compile before
+// the process exits avoids the crash and completes the entry.
+//
+// `threads` are the driver's (created while the owned runtime was set up).
+// Returns at once (after three samples 1 ms apart) when none of them runs;
+// otherwise waits until they have used no CPU for 100 ms, at most 20 s.
+// DSMVC_VULKAN_TEARDOWN_WAIT=0 skips the wait; DSMVC_VULKAN_TEARDOWN_TRACE=1
+// reports waits.
+void wait_for_driver_threads(const std::vector<long> &threads, const char *when) noexcept {
+#ifdef __linux__
+    if (threads.empty() || !environment_flag("DSMVC_VULKAN_TEARDOWN_WAIT", true)) return;
+    using namespace std::chrono;
+    const auto start = steady_clock::now();
+    ThreadActivity last = thread_activity(threads);
+    bool busy = last.running;
+    for (int sample = 0; sample < 2 && !busy; ++sample) {
+        std::this_thread::sleep_for(milliseconds(1));
+        const ThreadActivity now = thread_activity(threads);
+        busy = now.running || now.cpu != last.cpu;
+        last = now;
+    }
+    if (busy) {
+        int quiet = 0;
+        while (quiet < 5 && steady_clock::now() - start < seconds(20)) {
+            std::this_thread::sleep_for(milliseconds(20));
+            const ThreadActivity now = thread_activity(threads);
+            quiet = now.cpu == last.cpu && !now.running ? quiet + 1 : 0;
+            last = now;
+        }
+    }
+    if (environment_flag("DSMVC_VULKAN_TEARDOWN_TRACE", false)) {
+        std::fprintf(stderr, "dsmvc: Vulkan %s waited %.1f ms for %zu driver threads\n",
+                     when, duration<double, std::milli>(steady_clock::now() - start).count(),
+                     threads.size());
+    }
+#else
+    (void)threads;
+    (void)when;
+#endif
+}
+
 [[nodiscard]] InstanceHandle create_instance(bool validation) {
+    (void)threads_before_vulkan();
     InstanceHandle result;
     result.debug_utils = has_instance_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     std::vector<const char *> extensions;
@@ -332,6 +475,26 @@ struct InstanceHandle {
     return result;
 }
 
+[[nodiscard]] bool device_has_extension(
+    VkPhysicalDevice physical, const char *name) {
+    std::uint32_t count = 0U;
+    if (vkEnumerateDeviceExtensionProperties(
+            physical, nullptr, &count, nullptr) != VK_SUCCESS) {
+        return false;
+    }
+    std::vector<VkExtensionProperties> properties(count);
+    if (count != 0U
+        && vkEnumerateDeviceExtensionProperties(
+               physical, nullptr, &count, properties.data()) != VK_SUCCESS) {
+        return false;
+    }
+    return std::any_of(
+        properties.begin(), properties.begin() + count,
+        [name](const VkExtensionProperties &entry) {
+            return std::string_view{entry.extensionName} == name;
+        });
+}
+
 struct DeviceInfo {
     std::uint32_t index = 0U;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
@@ -343,6 +506,70 @@ struct DeviceInfo {
     bool eligible = false;
     std::string reason;
 };
+
+[[nodiscard]] DeviceInfo describe_device(VkPhysicalDevice physical, std::uint32_t index) {
+    DeviceInfo info;
+    info.index = index;
+    info.physical = physical;
+    VkPhysicalDeviceFloatControlsProperties float_controls{};
+    float_controls.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
+    VkPhysicalDeviceProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties.pNext = &float_controls;
+    vkGetPhysicalDeviceProperties2(info.physical, &properties);
+    info.properties = properties.properties;
+    vkGetPhysicalDeviceMemoryProperties(info.physical, &info.memory);
+    VkPhysicalDeviceFeatures2 features{};
+    features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    vkGetPhysicalDeviceFeatures2(info.physical, &features);
+    info.float64 = {
+        features.features.shaderFloat64 == VK_TRUE,
+        float_controls.shaderRoundingModeRTEFloat64 == VK_TRUE,
+        float_controls.shaderSignedZeroInfNanPreserveFloat64 == VK_TRUE,
+        float_controls.shaderDenormPreserveFloat64 == VK_TRUE,
+        info.properties.limits.minStorageBufferOffsetAlignment,
+        info.properties.limits.maxStorageBufferRange,
+    };
+
+    std::uint32_t queue_count = 0U;
+    vkGetPhysicalDeviceQueueFamilyProperties(
+        info.physical, &queue_count, nullptr);
+    std::vector<VkQueueFamilyProperties> queues(queue_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(
+        info.physical, &queue_count, queues.data());
+    for (std::uint32_t family = 0U; family < queue_count; ++family) {
+        if (queues[family].queueCount == 0U
+            || !(queues[family].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+            continue;
+        }
+        const bool dedicated = !(queues[family].queueFlags & VK_QUEUE_GRAPHICS_BIT);
+        if (info.queue_family == std::numeric_limits<std::uint32_t>::max()
+            || (dedicated && !info.dedicated_compute)) {
+            info.queue_family = family;
+            info.dedicated_compute = dedicated;
+        }
+    }
+
+    const auto &limits = info.properties.limits;
+    if (info.properties.apiVersion < VK_API_VERSION_1_2) {
+        info.reason = "requires Vulkan 1.2";
+    } else if (info.queue_family == std::numeric_limits<std::uint32_t>::max()) {
+        info.reason = "no compute queue";
+    } else if (limits.maxComputeWorkGroupInvocations < 128U
+               || limits.maxComputeWorkGroupSize[0] < 128U
+               || limits.maxComputeWorkGroupSize[1] < 8U
+               || limits.maxPerStageDescriptorStorageBuffers < 3U
+               || limits.maxDescriptorSetStorageBuffers < 3U
+               || limits.maxPushConstantsSize < 128U
+               || limits.maxStorageBufferRange < (128U * 1024U * 1024U)) {
+        info.reason = "does not meet Vulkan core compute limits";
+    } else {
+        info.eligible = true;
+        info.reason = "eligible";
+    }
+    return info;
+}
 
 [[nodiscard]] std::vector<DeviceInfo> enumerate_devices(VkInstance instance) {
     std::uint32_t count = 0U;
@@ -358,67 +585,7 @@ struct DeviceInfo {
     std::vector<DeviceInfo> result;
     result.reserve(count);
     for (std::uint32_t index = 0U; index < count; ++index) {
-        DeviceInfo info;
-        info.index = index;
-        info.physical = physical_devices[index];
-        VkPhysicalDeviceFloatControlsProperties float_controls{};
-        float_controls.sType =
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
-        VkPhysicalDeviceProperties2 properties{};
-        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        properties.pNext = &float_controls;
-        vkGetPhysicalDeviceProperties2(info.physical, &properties);
-        info.properties = properties.properties;
-        vkGetPhysicalDeviceMemoryProperties(info.physical, &info.memory);
-        VkPhysicalDeviceFeatures2 features{};
-        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        vkGetPhysicalDeviceFeatures2(info.physical, &features);
-        info.float64 = {
-            features.features.shaderFloat64 == VK_TRUE,
-            float_controls.shaderRoundingModeRTEFloat64 == VK_TRUE,
-            float_controls.shaderSignedZeroInfNanPreserveFloat64 == VK_TRUE,
-            float_controls.shaderDenormPreserveFloat64 == VK_TRUE,
-            info.properties.limits.minStorageBufferOffsetAlignment,
-            info.properties.limits.maxStorageBufferRange,
-        };
-
-        std::uint32_t queue_count = 0U;
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            info.physical, &queue_count, nullptr);
-        std::vector<VkQueueFamilyProperties> queues(queue_count);
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            info.physical, &queue_count, queues.data());
-        for (std::uint32_t family = 0U; family < queue_count; ++family) {
-            if (queues[family].queueCount == 0U
-                || !(queues[family].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-                continue;
-            }
-            const bool dedicated = !(queues[family].queueFlags & VK_QUEUE_GRAPHICS_BIT);
-            if (info.queue_family == std::numeric_limits<std::uint32_t>::max()
-                || (dedicated && !info.dedicated_compute)) {
-                info.queue_family = family;
-                info.dedicated_compute = dedicated;
-            }
-        }
-
-        const auto &limits = info.properties.limits;
-        if (info.properties.apiVersion < VK_API_VERSION_1_2) {
-            info.reason = "requires Vulkan 1.2";
-        } else if (info.queue_family == std::numeric_limits<std::uint32_t>::max()) {
-            info.reason = "no compute queue";
-        } else if (limits.maxComputeWorkGroupInvocations < 128U
-                   || limits.maxComputeWorkGroupSize[0] < 128U
-                   || limits.maxComputeWorkGroupSize[1] < 8U
-                   || limits.maxPerStageDescriptorStorageBuffers < 3U
-                   || limits.maxDescriptorSetStorageBuffers < 3U
-                   || limits.maxPushConstantsSize < 128U
-                   || limits.maxStorageBufferRange < (128U * 1024U * 1024U)) {
-            info.reason = "does not meet Vulkan core compute limits";
-        } else {
-            info.eligible = true;
-            info.reason = "eligible";
-        }
-        result.push_back(std::move(info));
+        result.push_back(describe_device(physical_devices[index], index));
     }
     return result;
 }
@@ -618,9 +785,17 @@ class PlanUploadPool;
 class StagingPool;
 struct ExecutionSlot;
 
+// An external timeline pair a submission waits on (a GPU frame's producer).
+struct ExternalWait {
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    std::uint64_t value = 0U;
+};
+
 class Runtime : public std::enable_shared_from_this<Runtime> {
 public:
     Runtime();
+    // Adopts the device of a VapourSynth core instead of creating one.
+    explicit Runtime(const VulkanCoreDevice &borrowed);
     ~Runtime();
     Runtime(const Runtime &) = delete;
     Runtime &operator=(const Runtime &) = delete;
@@ -638,9 +813,14 @@ public:
     void end_label(VkCommandBuffer command) const noexcept;
     [[nodiscard]] VkPipeline create_pipeline(
         const std::uint32_t *code, std::size_t bytes, const char *name);
+    // Partitioned-solve pipeline for a bandwidth of 1, 3, 5 or 7 and a power
+    // of two chunk count; created on first use.
+    [[nodiscard]] VkPipeline chunked_solve_pipeline(
+        std::uint32_t bandwidth, std::uint32_t chunks);
     [[nodiscard]] std::uint64_t submit(
         VkCommandBuffer command, VkFence fence, std::uint64_t wait_value,
-        bool signal_timeline);
+        bool signal_timeline, const ExternalWait *externals = nullptr,
+        std::size_t external_count = 0U);
     void wait_fence(VkFence fence, const char *label);
 
     [[nodiscard]] std::size_t acquire_slot(bool heavy, bool host_limited);
@@ -661,6 +841,9 @@ public:
     VkPipeline solve_pipeline = VK_NULL_HANDLE;
     std::array<VkPipeline, fixed_bandwidths.size()> fixed_inverse_pipelines{};
     std::array<VkPipeline, fixed_bandwidths.size()> fixed_solve_pipelines{};
+    std::mutex chunked_mutex;
+    // [bandwidth 1/3/5/7][log2(chunks) - 1]
+    std::array<std::array<VkPipeline, 5U>, 4U> chunked_pipelines{};
     VkPipeline convert_pipeline = VK_NULL_HANDLE;
     VkPipeline transpose_f64_pipeline = VK_NULL_HANDLE;
     VkPipeline inverse_f64_pipeline = VK_NULL_HANDLE;
@@ -668,6 +851,14 @@ public:
     VkPipeline solve_f64_pipeline = VK_NULL_HANDLE;
     VkPipeline convert_f64_pipeline = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
+    // VK_EXT_external_memory_host (opt-in, DSMVC_VULKAN_DIRECT_IO=1): classic
+    // frame pool blocks are imported as buffers so rows are copied straight
+    // from and to the frames.
+    bool host_import_enabled = false;
+    VkDeviceSize host_import_alignment = 0U;
+    std::uint32_t host_import_limit = 0U;
+    std::atomic<std::uint32_t> host_imports{0U};
+    PFN_vkGetMemoryHostPointerPropertiesEXT get_host_pointer_properties = nullptr;
     PFN_vkSetDebugUtilsObjectNameEXT set_object_name = nullptr;
     PFN_vkCmdBeginDebugUtilsLabelEXT command_begin_label = nullptr;
     PFN_vkCmdEndDebugUtilsLabelEXT command_end_label = nullptr;
@@ -679,6 +870,14 @@ public:
     std::uint32_t convert_local_size = 256U;
     bool timeline_enabled = false;
     bool force_non_coherent = false;
+    // DSMVC_VULKAN_FOLD_TRANSPOSE=0 restores the separate transpose passes of
+    // the 2D path (see execute_2d) and the right-hand side's walk by vectors.
+    const bool fold_transposes =
+        environment_flag("DSMVC_VULKAN_FOLD_TRANSPOSE", true);
+    // DSMVC_VULKAN_FRAME_SUBMIT=0 submits the planes of a frame one by one
+    // instead of recording them into one command buffer.
+    const bool frame_submit =
+        environment_flag("DSMVC_VULKAN_FRAME_SUBMIT", true);
     SplitRhsMode split_rhs = SplitRhsMode::adaptive;
     std::unique_ptr<DeviceArena> plan_arena;
     std::unique_ptr<DeviceArena> input_arena;
@@ -688,8 +887,20 @@ public:
     std::vector<std::unique_ptr<ExecutionSlot>> slots;
     std::vector<bool> slot_busy;
 
+    [[nodiscard]] bool borrowed() const noexcept { return !owns_device_; }
+
 private:
     void destroy_device_objects() noexcept;
+    void finish_construction();
+
+    bool owns_device_ = true;
+    std::vector<long> driver_threads_; // see wait_for_driver_threads
+    // A submission was made since the device was last known idle.
+    std::atomic<bool> submitted_since_idle_{false};
+    std::uint32_t queue_index_ = 0U;
+    void (*lock_queue_)(void *) = nullptr;
+    void (*unlock_queue_)(void *) = nullptr;
+    void *queue_lock_user_ = nullptr;
 
     mutable std::mutex failure_mutex_;
     std::string failure_message_;
@@ -705,6 +916,221 @@ private:
     std::mutex executor_mutex_;
     std::size_t executor_count_ = 0U;
 };
+
+// A page-aligned block of host memory (a classic frame pool block) imported as
+// a buffer with VK_EXT_external_memory_host. Importing is optional: any failure
+// throws and the caller stages the frames instead, without poisoning the
+// runtime.
+class ImportedBlock {
+public:
+    ImportedBlock(Runtime &runtime, void *base, std::size_t size)
+        : runtime_(&runtime) {
+        if (!runtime.host_import_enabled) {
+            throw std::runtime_error("Vulkan host import is not enabled");
+        }
+        const VkDeviceSize alignment = runtime.host_import_alignment;
+        if (reinterpret_cast<std::uintptr_t>(base) % alignment != 0U
+            || size % alignment != 0U || size > maximum_allocation_bytes) {
+            throw std::runtime_error(
+                "host block does not satisfy the Vulkan import alignment");
+        }
+        if (runtime.host_imports.load() >= runtime.host_import_limit) {
+            throw std::runtime_error("too many imported host blocks");
+        }
+        try {
+            create(base, size);
+        } catch (...) {
+            destroy();
+            throw;
+        }
+        ++runtime.host_imports;
+    }
+
+    ~ImportedBlock() {
+        if (buffer_ || memory_) {
+            destroy();
+            --runtime_->host_imports;
+        }
+    }
+    ImportedBlock(const ImportedBlock &) = delete;
+    ImportedBlock &operator=(const ImportedBlock &) = delete;
+
+    [[nodiscard]] VkBuffer handle() const noexcept { return buffer_; }
+
+private:
+    static void require(VkResult result, const char *what) {
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error(
+                std::string{"Vulkan host import failed in "} + what);
+        }
+    }
+
+    void create(void *base, std::size_t size) {
+        VkDevice device = runtime_->device;
+        VkMemoryHostPointerPropertiesEXT pointer_properties{
+            VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT, nullptr, 0U};
+        require(
+            runtime_->get_host_pointer_properties(
+                device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                base, &pointer_properties),
+            "vkGetMemoryHostPointerPropertiesEXT");
+        const VkExternalMemoryBufferCreateInfo external{
+            VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, nullptr,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+        const VkBufferCreateInfo buffer_info{
+            VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external, 0U, size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_SHARING_MODE_EXCLUSIVE, 0U, nullptr};
+        require(vkCreateBuffer(device, &buffer_info, nullptr, &buffer_),
+                "vkCreateBuffer");
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, buffer_, &requirements);
+        if (requirements.size > size) {
+            throw std::runtime_error("imported buffer needs more memory than the block");
+        }
+        // Only host-coherent memory: no flush or invalidate is needed (or
+        // possible) for memory the application owns.
+        const std::uint32_t bits =
+            requirements.memoryTypeBits & pointer_properties.memoryTypeBits;
+        constexpr VkMemoryPropertyFlags wanted =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        std::uint32_t type = std::numeric_limits<std::uint32_t>::max();
+        for (std::uint32_t index = 0U;
+             index < runtime_->selected.memory.memoryTypeCount; ++index) {
+            if (((bits >> index) & 1U) != 0U
+                && (runtime_->selected.memory.memoryTypes[index].propertyFlags
+                    & wanted) == wanted) {
+                type = index;
+                break;
+            }
+        }
+        if (type == std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("no coherent memory type for the host block");
+        }
+        const VkImportMemoryHostPointerInfoEXT import{
+            VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, nullptr,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, base};
+        const VkMemoryAllocateInfo allocate{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &import, size, type};
+        require(vkAllocateMemory(device, &allocate, nullptr, &memory_),
+                "vkAllocateMemory");
+        require(vkBindBufferMemory(device, buffer_, memory_, 0U),
+                "vkBindBufferMemory");
+    }
+
+    void destroy() noexcept {
+        if (buffer_) vkDestroyBuffer(runtime_->device, buffer_, nullptr);
+        if (memory_) vkFreeMemory(runtime_->device, memory_, nullptr);
+        buffer_ = VK_NULL_HANDLE;
+        memory_ = VK_NULL_HANDLE;
+    }
+
+    Runtime *runtime_ = nullptr;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory memory_ = VK_NULL_HANDLE;
+};
+
+struct BlockRegistrar {
+    static inline Runtime *runtime = nullptr;
+
+    static host_blocks::Registered register_block(
+        void *base, std::size_t size) noexcept {
+        try {
+            return {host_blocks::Outcome::owned,
+                    std::make_shared<ImportedBlock>(*runtime, base, size)};
+        } catch (...) {
+            return {};
+        }
+    }
+
+    // The import is destroyed when the registry drops its reference and the
+    // last lease on it ends.
+    static void unregister_block(
+        void *, std::size_t, const std::shared_ptr<void> &) noexcept {}
+};
+
+// Bit 0: frames are copied from imported blocks; bit 1: into them.
+[[nodiscard]] unsigned direct_sides() noexcept {
+    static const unsigned sides = [] {
+        const char *text = std::getenv("DSMVC_VULKAN_DIRECT_IO_SIDES");
+        return text ? static_cast<unsigned>(std::atoi(text)) & 3U : 3U;
+    }();
+    return sides;
+}
+
+// A plane range inside an imported block.
+struct HostRange {
+    std::shared_ptr<ImportedBlock> block; // a host block imported as a buffer, or
+    VkBuffer raw = VK_NULL_HANDLE;        // the buffer of a GPU frame's plane
+    VkDeviceSize offset = 0U;
+    explicit operator bool() const noexcept {
+        return block != nullptr || raw != VK_NULL_HANDLE;
+    }
+    [[nodiscard]] VkBuffer buffer() const noexcept {
+        return raw != VK_NULL_HANDLE ? raw : block->handle();
+    }
+};
+
+// The planes of a GPU frame pair an execution reads and writes in place.
+struct ResidentIo {
+    const GpuPlane *source = nullptr;
+    const GpuPlane *result = nullptr;
+};
+
+[[nodiscard]] HostRange resident_range(const GpuPlane &plane) noexcept {
+    HostRange range;
+    range.raw = reinterpret_cast<VkBuffer>(plane.buffer);
+    return range;
+}
+
+[[nodiscard]] ExternalWait resident_wait(const ResidentIo *resident) noexcept {
+    ExternalWait wait;
+    if (resident && resident->source->ready_semaphore != 0U) {
+        wait.semaphore =
+            reinterpret_cast<VkSemaphore>(resident->source->ready_semaphore);
+        wait.value = resident->source->ready_value;
+    }
+    return wait;
+}
+
+[[nodiscard]] HostRange host_range(
+    unsigned side, const void *pointer, std::size_t pitch,
+    std::size_t row_bytes, std::size_t rows) noexcept {
+    if ((direct_sides() & side) == 0U) return {};
+    auto lease = host_blocks::acquire(
+        host_blocks::Domain::vulkan, pointer,
+        host_blocks::plane_span(pitch, row_bytes, rows));
+    if (!lease) return {};
+    HostRange range;
+    range.block = std::static_pointer_cast<ImportedBlock>(std::move(lease.handle));
+    range.offset = lease.offset;
+    return range;
+}
+
+// Copies `rows` rows of `row_bytes` between buffers whose rows are
+// `source_pitch` and `destination_pitch` bytes apart.
+void record_row_copies(
+    VkCommandBuffer command, VkBuffer source, VkDeviceSize source_offset,
+    std::size_t source_pitch, VkBuffer destination,
+    VkDeviceSize destination_offset, std::size_t destination_pitch,
+    std::size_t row_bytes, std::size_t rows) {
+    if (source_pitch == row_bytes && destination_pitch == row_bytes) {
+        const VkBufferCopy copy{
+            source_offset, destination_offset, row_bytes * rows};
+        vkCmdCopyBuffer(command, source, destination, 1U, &copy);
+        return;
+    }
+    std::vector<VkBufferCopy> copies(rows);
+    for (std::size_t row = 0U; row < rows; ++row) {
+        copies[row] = {
+            source_offset + row * source_pitch,
+            destination_offset + row * destination_pitch, row_bytes};
+    }
+    vkCmdCopyBuffer(
+        command, source, destination,
+        static_cast<std::uint32_t>(copies.size()), copies.data());
+}
 
 Buffer::Buffer(
     Runtime &runtime, VkDeviceSize size, VkBufferUsageFlags usage,
@@ -1046,10 +1472,34 @@ namespace {
         axis.requires_float64(), include_float64);
 }
 
+// The partitioned solve shader uses 32 x chunks invocations and
+// 32 * 32 * half_bandwidth floats of shared memory; devices below that keep
+// the sequential shaders.
+[[nodiscard]] solve_partition::Partition device_partition(
+    const Runtime &runtime, const AxisPlan &axis, bool build) {
+    auto partition = build ? solve_partition::build(axis)
+                           : solve_partition::choose(axis);
+    const auto &limits = runtime.selected.properties.limits;
+    const std::uint64_t invocations =
+        static_cast<std::uint64_t>(partition.chunks) * 32U;
+    const std::uint64_t shared_bytes = 32ULL * 32ULL
+        * static_cast<std::uint64_t>(axis.half_bandwidth) * sizeof(float);
+    if (partition.chunks != 0U
+        && (invocations > limits.maxComputeWorkGroupInvocations
+            || partition.chunks > limits.maxComputeWorkGroupSize[1]
+            || shared_bytes > limits.maxComputeSharedMemorySize)) {
+        partition = {};
+    }
+    return partition;
+}
+
 [[nodiscard]] std::size_t packed_plan_storage_bytes(
-    const AxisPlan &axis, bool include_float64) {
+    const Runtime &runtime, const AxisPlan &axis, bool include_float64) {
     const std::size_t total =
-        packed_plan_layout(axis, include_float64).storage_bytes();
+        packed_plan_layout(axis, include_float64).storage_bytes()
+        + solve_partition::transfer_floats(
+              device_partition(runtime, axis, false), axis)
+            * sizeof(float);
     if (total == 0U || total > maximum_allocation_bytes) {
         throw std::length_error("Vulkan packed plan exceeds the 2 GiB guard");
     }
@@ -1079,7 +1529,9 @@ public:
         }
         const bool include_float64 = float64;
         const auto layout = packed_plan_layout(*axis, include_float64);
-        storage_bytes = layout.storage_bytes();
+        const auto partition = device_partition(*runtime, *axis, true);
+        storage_bytes = layout.storage_bytes()
+            + partition.transfers.size() * sizeof(float);
         if (storage_bytes > runtime->selected.properties.limits.maxStorageBufferRange) {
             throw std::length_error(
                 "Vulkan packed plan exceeds maxStorageBufferRange");
@@ -1139,6 +1591,16 @@ public:
         copy_words(axis->lower_ld, lower_offset);
         copy_words(axis->upper_l, upper_offset);
         copy_words(axis->inverse_diagonal, diagonal_offset);
+        if (partition.chunks != 0U) {
+            solve_chunks = partition.chunks;
+            solve_chunk_length = partition.chunk_length;
+            transfers_offset = static_cast<std::uint32_t>(
+                layout.storage_bytes() / sizeof(std::uint32_t));
+            copy_words(partition.transfers, transfers_offset);
+            // Create the pipeline now (plans are packed when a filter is
+            // created), not at the first frame.
+            (void)runtime->chunked_solve_pipeline(half_bandwidth, solve_chunks);
+        }
         if (include_float64) {
             weights_f64_offset = layout.weights_f64;
             lower_f64_offset = layout.lower_f64;
@@ -1269,6 +1731,10 @@ public:
     std::uint32_t lower_f64_offset = 0U;
     std::uint32_t upper_f64_offset = 0U;
     std::uint32_t diagonal_f64_offset = 0U;
+    // Partitioned solve; zero chunks keeps the sequential shaders.
+    std::uint32_t solve_chunks = 0U;
+    std::uint32_t solve_chunk_length = 0U;
+    std::uint32_t transfers_offset = 0U;
     bool retained_float64 = false;
     std::size_t storage_bytes = 0U;
     mutable std::atomic<std::uint32_t> execution_count{0U};
@@ -1333,15 +1799,19 @@ private:
 
 class PendingPlanUploads {
 public:
+    // The plans an execution uses, without duplicates: a frame names up to
+    // four distinct ones, and an upload is recorded once.
     explicit PendingPlanUploads(
         std::shared_ptr<const PackedPlan> first,
-        std::shared_ptr<const PackedPlan> second = {})
-        : first_(std::move(first)), second_(std::move(second)) {
-        if (second_ == first_) second_.reset();
-        if (second_ && std::less<const PackedPlan *>{}(
-                           second_.get(), first_.get())) {
-            std::swap(first_, second_);
-        }
+        std::shared_ptr<const PackedPlan> second = {}) {
+        add(std::move(first));
+        add(std::move(second));
+        order();
+    }
+    explicit PendingPlanUploads(
+        std::span<const std::shared_ptr<const PackedPlan>> plans) {
+        for (const auto &plan : plans) add(plan);
+        order();
     }
 
     ~PendingPlanUploads() { finish(false); }
@@ -1349,24 +1819,48 @@ public:
     PendingPlanUploads &operator=(const PendingPlanUploads &) = delete;
 
     void record(VkCommandBuffer command) {
-        first_pending_ = first_->record_pending_upload(command);
-        if (second_) second_pending_ = second_->record_pending_upload(command);
+        for (std::size_t index = 0U; index < count_; ++index) {
+            pending_[index] = plans_[index]->record_pending_upload(command);
+        }
     }
 
     void complete() noexcept { finish(true); }
 
 private:
+    static constexpr std::size_t capacity = 2U * frame_plane_limit;
+
+    void add(std::shared_ptr<const PackedPlan> plan) {
+        if (!plan) return;
+        for (std::size_t index = 0U; index < count_; ++index) {
+            if (plans_[index] == plan) return;
+        }
+        if (count_ == capacity) {
+            throw std::logic_error("too many Vulkan plans in one execution");
+        }
+        plans_[count_++] = std::move(plan);
+    }
+
+    // Uploads are recorded in address order: two executions that share plans
+    // then wait for each other's recording in the same order.
+    void order() noexcept {
+        std::sort(plans_.begin(), plans_.begin() + static_cast<std::ptrdiff_t>(count_),
+                  [](const auto &left, const auto &right) {
+                      return std::less<const PackedPlan *>{}(
+                          left.get(), right.get());
+                  });
+    }
+
     void finish(bool complete) noexcept {
         if (finished_) return;
-        if (first_pending_) first_->finish_pending_upload(complete);
-        if (second_pending_) second_->finish_pending_upload(complete);
+        for (std::size_t index = 0U; index < count_; ++index) {
+            if (pending_[index]) plans_[index]->finish_pending_upload(complete);
+        }
         finished_ = true;
     }
 
-    std::shared_ptr<const PackedPlan> first_;
-    std::shared_ptr<const PackedPlan> second_;
-    bool first_pending_ = false;
-    bool second_pending_ = false;
+    std::array<std::shared_ptr<const PackedPlan>, capacity> plans_{};
+    std::array<bool, capacity> pending_{};
+    std::size_t count_ = 0U;
     bool finished_ = false;
 };
 
@@ -1410,40 +1904,77 @@ private:
     bool complete_ = false;
 };
 
+// The packed plans of every runtime, one cache per process. A plan is packed
+// for one runtime's device, so the runtime is part of the key; a runtime that
+// the cache would keep alive (every cached plan holds one) is purged when its
+// last executor goes, which a borrowed device needs: it must not outlive the
+// core's device.
+struct PlanCacheKey {
+    const Runtime *runtime = nullptr;
+    const AxisPlan *identity = nullptr;
+    bool float64 = false;
+
+    [[nodiscard]] bool operator==(const PlanCacheKey &) const noexcept = default;
+};
+
+struct PlanCacheKeyHash {
+    [[nodiscard]] std::size_t operator()(const PlanCacheKey &key) const noexcept {
+        std::size_t hash = std::hash<const AxisPlan *>{}(key.identity);
+        hash ^= std::hash<const Runtime *>{}(key.runtime)
+            + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+        return hash ^ (key.float64
+            ? static_cast<std::size_t>(0x9e3779b97f4a7c15ULL) : 0U);
+    }
+};
+
+struct PlanCacheEntry {
+    std::shared_ptr<PackedPlanRequest> request;
+    std::list<PlanCacheKey>::iterator lru;
+    std::size_t bytes = 0U;
+};
+
+struct PlanCache {
+    std::mutex mutex;
+    std::unordered_map<PlanCacheKey, PlanCacheEntry, PlanCacheKeyHash> entries;
+    std::list<PlanCacheKey> lru;
+    std::size_t bytes = 0U;
+    const std::size_t capacity = environment_megabytes(
+        "DSMVC_VULKAN_PLAN_CACHE_MB", default_plan_cache_bytes);
+};
+
+[[nodiscard]] PlanCache &plan_cache() {
+    static PlanCache cache;
+    return cache;
+}
+
+void purge_packed_plans(const Runtime *runtime) noexcept {
+    std::vector<std::shared_ptr<PackedPlanRequest>> evicted;
+    {
+        auto &cache = plan_cache();
+        const std::scoped_lock lock(cache.mutex);
+        for (auto it = cache.entries.begin(); it != cache.entries.end();) {
+            if (it->first.runtime == runtime) {
+                cache.bytes -= it->second.bytes;
+                cache.lru.erase(it->second.lru);
+                evicted.push_back(std::move(it->second.request));
+                it = cache.entries.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    // `evicted` is released outside the lock: the plans free their buffers.
+}
+
 [[nodiscard]] std::shared_ptr<const PackedPlan> acquire_packed_plan(
     const std::shared_ptr<Runtime> &runtime,
     const std::shared_ptr<const AxisPlan> &plan, bool float64) {
-    struct Key {
-        const AxisPlan *identity = nullptr;
-        bool float64 = false;
+    using Key = PlanCacheKey;
+    using Entry = PlanCacheEntry;
+    auto &cache = plan_cache();
 
-        [[nodiscard]] bool operator==(const Key &) const noexcept = default;
-    };
-    struct KeyHash {
-        [[nodiscard]] std::size_t operator()(const Key &key) const noexcept {
-            const std::size_t pointer =
-                std::hash<const AxisPlan *>{}(key.identity);
-            return pointer ^ (key.float64
-                ? static_cast<std::size_t>(0x9e3779b97f4a7c15ULL) : 0U);
-        }
-    };
-    struct Entry {
-        std::shared_ptr<PackedPlanRequest> request;
-        std::list<Key>::iterator lru;
-        std::size_t bytes = 0U;
-    };
-    struct Cache {
-        std::mutex mutex;
-        std::unordered_map<Key, Entry, KeyHash> entries;
-        std::list<Key> lru;
-        std::size_t bytes = 0U;
-        const std::size_t capacity = environment_megabytes(
-            "DSMVC_VULKAN_PLAN_CACHE_MB", default_plan_cache_bytes);
-    };
-    static Cache cache;
-
-    const Key key{plan.get(), float64};
-    const std::size_t bytes = packed_plan_storage_bytes(*plan, float64);
+    const Key key{runtime.get(), plan.get(), float64};
+    const std::size_t bytes = packed_plan_storage_bytes(*runtime, *plan, float64);
     std::shared_ptr<PackedPlanRequest> request;
     std::vector<std::shared_ptr<PackedPlanRequest>> evicted;
     bool producer = false;
@@ -1516,35 +2047,30 @@ private:
 void pack_host_rows(
     const void *source, std::size_t source_pitch, void *destination,
     std::size_t row_bytes, std::size_t rows) {
-    if (source_pitch == row_bytes) {
-        std::memcpy(destination, source, row_bytes * rows);
-        return;
-    }
-    const auto *source_bytes = static_cast<const std::byte *>(source);
-    auto *destination_bytes = static_cast<std::byte *>(destination);
-    for (std::size_t row = 0U; row < rows; ++row) {
-        std::memcpy(
-            destination_bytes + static_cast<std::ptrdiff_t>(row * row_bytes),
-            source_bytes + static_cast<std::ptrdiff_t>(row * source_pitch),
-            row_bytes);
+    host_copy::copy_rows(
+        destination, row_bytes, source, source_pitch, row_bytes, rows);
+}
+
+// Packs rows tightly and zeroes the bytes between the packed image and the
+// word-aligned copy size: the shaders read whole 32-bit words.
+void pack_host_rows_aligned(
+    const void *source, std::size_t source_pitch, void *destination,
+    std::size_t row_bytes, std::size_t rows, std::size_t copy_bytes) {
+    pack_host_rows(source, source_pitch, destination, row_bytes, rows);
+    const std::size_t packed = row_bytes * rows;
+    if (copy_bytes > packed) {
+        std::memset(
+            static_cast<std::byte *>(destination)
+                + static_cast<std::ptrdiff_t>(packed),
+            0, copy_bytes - packed);
     }
 }
 
 void unpack_host_rows(
     const void *source, std::size_t row_bytes, void *destination,
     std::size_t destination_pitch, std::size_t rows) {
-    if (destination_pitch == row_bytes) {
-        std::memcpy(destination, source, row_bytes * rows);
-        return;
-    }
-    const auto *source_bytes = static_cast<const std::byte *>(source);
-    auto *destination_bytes = static_cast<std::byte *>(destination);
-    for (std::size_t row = 0U; row < rows; ++row) {
-        std::memcpy(
-            destination_bytes + static_cast<std::ptrdiff_t>(row * destination_pitch),
-            source_bytes + static_cast<std::ptrdiff_t>(row * row_bytes),
-            row_bytes);
-    }
+    host_copy::copy_rows(
+        destination, destination_pitch, source, row_bytes, row_bytes, rows);
 }
 
 void command_barrier(
@@ -1567,6 +2093,50 @@ void command_barrier(
         command, source_stage, destination_stage, 0U,
         0U, nullptr, 1U, &barrier, 0U, nullptr);
 }
+
+// The barriers one recording step of a frame needs, issued as one command so
+// that the planes of a frame do not wait for each other one at a time.
+class BarrierBatch {
+public:
+    void add(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
+             VkAccessFlags source_access, VkAccessFlags destination_access,
+             VkPipelineStageFlags source_stage,
+             VkPipelineStageFlags destination_stage) {
+        if (count_ == barriers_.size()) {
+            throw std::logic_error("too many Vulkan barriers in one step");
+        }
+        barriers_[count_++] = {
+            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            nullptr,
+            source_access,
+            destination_access,
+            VK_QUEUE_FAMILY_IGNORED,
+            VK_QUEUE_FAMILY_IGNORED,
+            buffer,
+            offset,
+            size,
+        };
+        source_stage_ |= source_stage;
+        destination_stage_ |= destination_stage;
+    }
+
+    void flush(VkCommandBuffer command) noexcept {
+        if (count_ != 0U) {
+            vkCmdPipelineBarrier(
+                command, source_stage_, destination_stage_, 0U,
+                0U, nullptr, count_, barriers_.data(), 0U, nullptr);
+        }
+        count_ = 0U;
+        source_stage_ = 0U;
+        destination_stage_ = 0U;
+    }
+
+private:
+    std::array<VkBufferMemoryBarrier, 4U * frame_plane_limit> barriers_{};
+    std::uint32_t count_ = 0U;
+    VkPipelineStageFlags source_stage_ = 0U;
+    VkPipelineStageFlags destination_stage_ = 0U;
+};
 
 template <class Slot>
 void bind_compute(
@@ -1636,6 +2206,16 @@ void fill_plan_push(PushConstants &push, const PackedPlan &plan) noexcept {
     return solve_only ? runtime.solve_pipeline : runtime.inverse_pipeline;
 }
 
+// A solve is recorded whole, or as the right-hand side (rhs) and then the
+// solve proper, with the caller's barrier between them.
+enum class InversePhase : std::uint8_t { all, rhs, solve };
+
+// True if an inverse with this output layout runs a separate right-hand side.
+[[nodiscard]] bool has_rhs_phase(
+    const PackedPlan &plan, std::uint32_t output_layout, bool split) noexcept {
+    return split || (plan.solve_chunks != 0U && output_layout == 0U);
+}
+
 template <class Slot>
 void record_inverse(
     Runtime &runtime, Slot &slot, const PackedPlan &plan,
@@ -1643,7 +2223,7 @@ void record_inverse(
     std::uint32_t vector_count, std::uint32_t source_offset,
     std::uint32_t output_offset, std::uint32_t source_buffer,
     std::uint32_t source_layout, std::uint32_t output_layout,
-    bool split) {
+    bool split, InversePhase phase = InversePhase::all) {
     PushConstants push;
     fill_plan_push(push, plan);
     push.value[3] = vector_count;
@@ -1652,30 +2232,62 @@ void record_inverse(
     push.value[6] = source_buffer;
     push.value[7] = source_layout;
     push.value[8] = output_layout;
-    if (split) {
-        VkDescriptorSet rhs_set = slot.descriptor_set(
-            plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
-            cache_buffer, cache_offset, cache_size);
-        bind_compute(runtime, slot, runtime.rhs_pipeline, rhs_set, push);
-        vkCmdDispatch(
-            slot.command, divide_up(vector_count, runtime.rhs_local_x),
-            divide_up(plan.destination_size, runtime.rhs_local_y), 1U);
-        command_barrier(
-            slot.command, slot.workspace.handle(),
-            static_cast<VkDeviceSize>(output_offset) * 4U,
-            static_cast<VkDeviceSize>(plan.destination_size) * vector_count * 4U,
-            VK_ACCESS_SHADER_WRITE_BIT,
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    // The partitioned solve works in place on column-major output, after the
+    // right-hand side has been written there.
+    const bool chunked = plan.solve_chunks != 0U && output_layout == 0U;
+    if (split || chunked) {
+        if (phase != InversePhase::solve) {
+            VkDescriptorSet rhs_set = slot.descriptor_set(
+                plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
+                cache_buffer, cache_offset, cache_size);
+            // A row-major source is walked along its rows (see rhs.comp),
+            // unless an element has too few taps for that to pay (measured:
+            // bilinear).
+            const bool samples_along_x = runtime.fold_transposes
+                && source_layout != 0U && plan.half_bandwidth > 1U;
+            push.value[18] = samples_along_x ? 1U : 0U;
+            bind_compute(runtime, slot, runtime.rhs_pipeline, rhs_set, push);
+            vkCmdDispatch(
+                slot.command,
+                divide_up(samples_along_x ? plan.destination_size
+                                          : vector_count,
+                          runtime.rhs_local_x),
+                divide_up(samples_along_x ? vector_count
+                                          : plan.destination_size,
+                          runtime.rhs_local_y), 1U);
+            push.value[18] = 0U;
+            if (phase == InversePhase::rhs) return;
+            command_barrier(
+                slot.command, slot.workspace.handle(),
+                static_cast<VkDeviceSize>(output_offset) * 4U,
+                static_cast<VkDeviceSize>(plan.destination_size)
+                    * vector_count * 4U,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        }
         VkDescriptorSet solve_set = slot.descriptor_set(
             plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
             cache_buffer, cache_offset, cache_size);
+        if (chunked) {
+            push.value[15] = plan.transfers_offset;
+            push.value[16] = plan.solve_chunk_length;
+            push.value[17] = plan.solve_chunks;
+            bind_compute(
+                runtime, slot,
+                runtime.chunked_solve_pipeline(
+                    plan.half_bandwidth, plan.solve_chunks),
+                solve_set, push);
+            vkCmdDispatch(slot.command, divide_up(vector_count, 32U), 1U, 1U);
+            return;
+        }
         bind_compute(
             runtime, slot,
             select_inverse_pipeline(runtime, plan.half_bandwidth, true),
             solve_set, push);
     } else {
+        if (phase == InversePhase::rhs) return;
         VkDescriptorSet inverse_set = slot.descriptor_set(
             plan.buffer(), plan.buffer_offset(), plan.buffer_size(),
             cache_buffer, cache_offset, cache_size);
@@ -2433,6 +3045,13 @@ Runtime::Runtime()
         nullptr,
         timeline_enabled ? VK_TRUE : VK_FALSE,
     };
+    std::vector<const char *> device_extensions;
+    if (environment_flag("DSMVC_VULKAN_DIRECT_IO", false)
+        && device_has_extension(
+            selected.physical, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+        device_extensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+        host_import_enabled = true;
+    }
     VkPhysicalDeviceFeatures enabled_features{};
     enabled_features.shaderFloat64 =
         selected.float64.strict_supported() ? VK_TRUE : VK_FALSE;
@@ -2444,14 +3063,71 @@ Runtime::Runtime()
         &queue_info,
         0U,
         nullptr,
-        0U,
-        nullptr,
+        static_cast<std::uint32_t>(device_extensions.size()),
+        device_extensions.data(),
         &enabled_features,
     };
     check(vkCreateDevice(selected.physical, &device_info, nullptr, &device),
           "vkCreateDevice");
+    finish_construction();
+#ifdef __linux__
+    // Threads that appeared since dsmvc first called the loader: the driver's.
+    std::ranges::set_difference(thread_ids(), threads_before_vulkan(),
+                                std::back_inserter(driver_threads_));
+    std::erase(driver_threads_, static_cast<long>(syscall(SYS_gettid)));
+#endif
+}
+
+Runtime::Runtime(const VulkanCoreDevice &borrowed)
+    : instance(), selected(describe_device(
+          static_cast<VkPhysicalDevice>(borrowed.physical_device), 0U)),
+      split_rhs(split_rhs_mode()) {
+    instance.instance = static_cast<VkInstance>(borrowed.instance);
+    instance.owned = false;
+    if (!borrowed.device || !instance.instance || !selected.physical) {
+        throw std::invalid_argument("invalid borrowed Vulkan device");
+    }
+    if (!selected.eligible) {
+        throw std::runtime_error(
+            "the VapourSynth core's Vulkan device cannot run dsmvc: "
+            + selected.reason);
+    }
+    force_non_coherent = environment_flag(
+        "DSMVC_VULKAN_FORCE_NON_COHERENT", false);
+    owns_device_ = false;
+    device = static_cast<VkDevice>(borrowed.device);
+    selected.queue_family = borrowed.queue_family;
+    queue_index_ = borrowed.queue_index;
+    lock_queue_ = borrowed.lock_queue;
+    unlock_queue_ = borrowed.unlock_queue;
+    queue_lock_user_ = borrowed.user;
+    // Timeline semaphores are part of the Vulkan 1.4 baseline the core requires.
+    timeline_enabled = true;
+    finish_construction();
+}
+
+void Runtime::finish_construction() {
     try {
-        vkGetDeviceQueue(device, selected.queue_family, 0U, &queue);
+        vkGetDeviceQueue(device, selected.queue_family, queue_index_, &queue);
+        if (host_import_enabled) {
+            get_host_pointer_properties =
+                reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+                    vkGetDeviceProcAddr(
+                        device, "vkGetMemoryHostPointerPropertiesEXT"));
+            VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
+                nullptr, 0U};
+            VkPhysicalDeviceProperties2 properties2{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &host_properties, {}};
+            vkGetPhysicalDeviceProperties2(selected.physical, &properties2);
+            host_import_alignment = host_properties.minImportedHostPointerAlignment;
+            host_import_limit = std::min<std::uint32_t>(
+                256U, std::max<std::uint32_t>(
+                    1U, selected.properties.limits.maxMemoryAllocationCount / 8U));
+            if (!get_host_pointer_properties || host_import_alignment == 0U) {
+                host_import_enabled = false;
+            }
+        }
         set_object_name = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
             vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
         command_begin_label =
@@ -2671,13 +3347,36 @@ Runtime::Runtime()
         destroy_device_objects();
         throw;
     }
+    if (host_import_enabled) {
+        BlockRegistrar::runtime = this;
+        host_blocks::install(
+            host_blocks::Domain::vulkan,
+            {&BlockRegistrar::register_block, &BlockRegistrar::unregister_block});
+    }
 }
 
-Runtime::~Runtime() { destroy_device_objects(); }
+Runtime::~Runtime() {
+    // Normally a no-op: the wait already ran when the last filter was freed.
+    if (owns_device_ && device) wait_for_driver_threads(driver_threads_, "teardown");
+    destroy_device_objects();
+}
 
 void Runtime::destroy_device_objects() noexcept {
     if (!device) return;
-    (void)vkDeviceWaitIdle(device);
+    // A borrowed device is the core's: nothing to unregister (only the owned
+    // runtime installs the host import registrar), no device-wide wait, and
+    // the device is not ours to destroy. Executions are synchronous, so no
+    // submission of ours is pending.
+    if (owns_device_) {
+        host_blocks::uninstall(host_blocks::Domain::vulkan);
+        // Normally skipped: the device went idle when the last filter was
+        // freed (detach_executor). This runs in an exit handler, where a
+        // layer's own static state may be gone already: synchronization
+        // validation crashed or hung in this call.
+        if (submitted_since_idle_.exchange(false)) {
+            (void)vkDeviceWaitIdle(device);
+        }
+    }
     slots.clear();
     staging_pool.reset();
     plan_upload_pool.reset();
@@ -2697,6 +3396,12 @@ void Runtime::destroy_device_objects() noexcept {
         if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
         pipeline = VK_NULL_HANDLE;
     }
+    for (auto &by_chunks : chunked_pipelines) {
+        for (VkPipeline &pipeline : by_chunks) {
+            if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+            pipeline = VK_NULL_HANDLE;
+        }
+    }
     for (VkPipeline *pipeline : {
              &convert_f64_pipeline, &solve_f64_pipeline, &rhs_f64_pipeline,
              &inverse_f64_pipeline, &transpose_f64_pipeline,
@@ -2713,7 +3418,7 @@ void Runtime::destroy_device_objects() noexcept {
         vkDestroyDescriptorSetLayout(device, descriptor_layout, nullptr);
     }
     descriptor_layout = VK_NULL_HANDLE;
-    vkDestroyDevice(device, nullptr);
+    if (owns_device_) vkDestroyDevice(device, nullptr);
     device = VK_NULL_HANDLE;
     queue = VK_NULL_HANDLE;
 }
@@ -2848,33 +3553,146 @@ VkPipeline Runtime::create_pipeline(
     return pipeline;
 }
 
+VkPipeline Runtime::chunked_solve_pipeline(
+    std::uint32_t bandwidth, std::uint32_t chunks) {
+    static constexpr std::array<std::uint32_t, 4U> bandwidths{1U, 3U, 5U, 7U};
+    const auto found = std::ranges::find(bandwidths, bandwidth);
+    const unsigned exponent = static_cast<unsigned>(std::countr_zero(chunks));
+    if (found == bandwidths.end() || !std::has_single_bit(chunks)
+        || exponent < 1U || exponent > 5U) {
+        throw std::logic_error("unsupported Vulkan partitioned solve shape");
+    }
+    const auto row = static_cast<std::size_t>(found - bandwidths.begin());
+    const std::scoped_lock lock(chunked_mutex);
+    VkPipeline &pipeline = chunked_pipelines[row][exponent - 1U];
+    if (pipeline) return pipeline;
+    // [bandwidth 1/3/5/7][log2(chunks) - 1]
+    static const std::array<std::array<std::pair<const std::uint32_t *, std::size_t>, 5U>, 4U>
+        code{{
+            {{
+                {embedded::vulkan_solve_chunked_b1_c2_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b1_c2_spv)},
+                {embedded::vulkan_solve_chunked_b1_c4_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b1_c4_spv)},
+                {embedded::vulkan_solve_chunked_b1_c8_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b1_c8_spv)},
+                {embedded::vulkan_solve_chunked_b1_c16_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b1_c16_spv)},
+                {embedded::vulkan_solve_chunked_b1_c32_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b1_c32_spv)},
+            }},
+            {{
+                {embedded::vulkan_solve_chunked_b3_c2_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b3_c2_spv)},
+                {embedded::vulkan_solve_chunked_b3_c4_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b3_c4_spv)},
+                {embedded::vulkan_solve_chunked_b3_c8_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b3_c8_spv)},
+                {embedded::vulkan_solve_chunked_b3_c16_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b3_c16_spv)},
+                {embedded::vulkan_solve_chunked_b3_c32_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b3_c32_spv)},
+            }},
+            {{
+                {embedded::vulkan_solve_chunked_b5_c2_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b5_c2_spv)},
+                {embedded::vulkan_solve_chunked_b5_c4_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b5_c4_spv)},
+                {embedded::vulkan_solve_chunked_b5_c8_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b5_c8_spv)},
+                {embedded::vulkan_solve_chunked_b5_c16_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b5_c16_spv)},
+                {embedded::vulkan_solve_chunked_b5_c32_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b5_c32_spv)},
+            }},
+            {{
+                {embedded::vulkan_solve_chunked_b7_c2_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b7_c2_spv)},
+                {embedded::vulkan_solve_chunked_b7_c4_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b7_c4_spv)},
+                {embedded::vulkan_solve_chunked_b7_c8_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b7_c8_spv)},
+                {embedded::vulkan_solve_chunked_b7_c16_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b7_c16_spv)},
+                {embedded::vulkan_solve_chunked_b7_c32_spv,
+                 sizeof(embedded::vulkan_solve_chunked_b7_c32_spv)},
+            }},
+        }};
+    const auto &[words, bytes] = code[row][exponent - 1U];
+    pipeline = create_pipeline(words, bytes, "dsmvc partitioned solve");
+    return pipeline;
+}
+
 std::uint64_t Runtime::submit(
     VkCommandBuffer command, VkFence fence, std::uint64_t wait_value,
-    bool signal_timeline) {
+    bool signal_timeline, const ExternalWait *externals,
+    std::size_t external_count) {
     throw_if_failed();
     const std::scoped_lock lock(queue_mutex_);
     std::uint64_t signal_value = 0U;
     if (timeline_enabled && signal_timeline) signal_value = ++next_timeline_value_;
-    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    VkTimelineSemaphoreSubmitInfo timeline_info{
+    constexpr std::size_t maximum_waits = 1U + 2U * frame_plane_limit;
+    std::array<VkSemaphore, maximum_waits> wait_semaphores{};
+    std::array<std::uint64_t, maximum_waits> wait_values{};
+    std::array<VkPipelineStageFlags, maximum_waits> wait_stages{};
+    std::uint32_t wait_count = 0U;
+    if (wait_value != 0U) {
+        wait_semaphores[wait_count] = timeline;
+        wait_values[wait_count] = wait_value;
+        wait_stages[wait_count] = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        ++wait_count;
+    }
+    // One submission lists a semaphore once: the largest value wins.
+    const std::uint32_t first_external = wait_count;
+    for (std::size_t index = 0U; index < external_count; ++index) {
+        const ExternalWait &external = externals[index];
+        if (external.semaphore == VK_NULL_HANDLE) continue;
+        std::uint32_t slot = first_external;
+        while (slot < wait_count && wait_semaphores[slot] != external.semaphore) {
+            ++slot;
+        }
+        if (slot == wait_count) {
+            if (wait_count == maximum_waits) {
+                throw std::logic_error("Vulkan submission has too many waits");
+            }
+            wait_semaphores[slot] = external.semaphore;
+            wait_stages[slot] = VK_PIPELINE_STAGE_TRANSFER_BIT
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            ++wait_count;
+        }
+        wait_values[slot] = std::max(wait_values[slot], external.value);
+    }
+    const VkTimelineSemaphoreSubmitInfo timeline_info{
         VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
         nullptr,
-        wait_value != 0U ? 1U : 0U,
-        wait_value != 0U ? &wait_value : nullptr,
+        wait_count,
+        wait_values.data(),
         signal_value != 0U ? 1U : 0U,
         signal_value != 0U ? &signal_value : nullptr,
     };
     const VkSubmitInfo submit_info{
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        (wait_value != 0U || signal_value != 0U) ? &timeline_info : nullptr,
-        wait_value != 0U ? 1U : 0U,
-        wait_value != 0U ? &timeline : nullptr,
-        wait_value != 0U ? &wait_stage : nullptr,
+        (wait_count != 0U || signal_value != 0U) ? &timeline_info : nullptr,
+        wait_count,
+        wait_semaphores.data(),
+        wait_stages.data(),
         1U,
         &command,
         signal_value != 0U ? 1U : 0U,
         signal_value != 0U ? &timeline : nullptr,
     };
+    // The core's queue is shared with every other GPU filter of the graph.
+    struct QueueLock {
+        QueueLock(void (*lock)(void *), void (*unlock)(void *), void *user)
+            : unlock_(unlock), user_(user) {
+            if (lock) lock(user);
+            else unlock_ = nullptr;
+        }
+        ~QueueLock() { if (unlock_) unlock_(user_); }
+        void (*unlock_)(void *);
+        void *user_;
+    } queue_lock(lock_queue_, unlock_queue_, queue_lock_user_);
+    submitted_since_idle_.store(true, std::memory_order_relaxed);
     check(vkQueueSubmit(queue, 1U, &submit_info, fence), "vkQueueSubmit");
     return signal_value;
 }
@@ -2928,6 +3746,21 @@ void Runtime::detach_executor() noexcept {
         reset_cache = executor_count_ != 0U && --executor_count_ == 0U;
     }
     if (reset_cache && input_cache) input_cache->reset();
+    // The plan cache would keep a borrowed device's runtime alive past the
+    // core's device. (The owned runtime lives as long as the process.)
+    if (reset_cache && !owns_device_) purge_packed_plans(this);
+    // Hosts free their filters before they exit; this is the last point
+    // before exit handlers run (see wait_for_driver_threads and
+    // destroy_device_objects).
+    if (reset_cache && owns_device_) {
+        {
+            const std::scoped_lock lock(queue_mutex_);
+            if (submitted_since_idle_.exchange(false)) {
+                (void)vkDeviceWaitIdle(device);
+            }
+        }
+        wait_for_driver_threads(driver_threads_, "release");
+    }
 }
 
 [[nodiscard]] std::shared_ptr<Runtime> shared_runtime() {
@@ -2961,6 +3794,8 @@ private:
 
 struct VulkanExecutor::Impl {
     Impl() : runtime(shared_runtime()) { runtime->attach_executor(); }
+    explicit Impl(std::shared_ptr<Runtime> borrowed)
+        : runtime(std::move(borrowed)) { runtime->attach_executor(); }
     ~Impl() { runtime->detach_executor(); }
 
     struct PreparedPlan {
@@ -3008,7 +3843,8 @@ struct VulkanExecutor::Impl {
         const Sample *input, std::ptrdiff_t input_row_stride,
         Sample *output, std::ptrdiff_t output_row_stride,
         const IntegerConversion *conversion,
-        std::shared_ptr<const void> input_lifetime) const {
+        std::shared_ptr<const void> input_lifetime,
+        const ResidentIo *resident = nullptr) const {
         if (!runtime->selected.float64.strict_supported()) {
             throw std::runtime_error(
                 runtime->selected.float64.requirement_error());
@@ -3101,15 +3937,29 @@ struct VulkanExecutor::Impl {
                 "Vulkan Float64 execution exceeds the 2 GiB guard");
         }
 
+        // Rows that lie in imported frame blocks are copied directly.
+        const HostRange source_range = resident
+            ? resident_range(*resident->source)
+            : (source_row_bytes * source_height) % 4U == 0U
+                ? host_range(1U, input, source_pitch, source_row_bytes,
+                             source_height)
+                : HostRange{};
+        const HostRange result_range = resident
+            ? resident_range(*resident->result)
+            : host_range(
+                2U, output, result_pitch, result_row_bytes,
+                destination_height);
+        const ExternalWait resident_source_wait = resident_wait(resident);
+        const bool staged_io = !((reused_input || source_range) && result_range);
         const bool host_limited =
-            std::is_same_v<Sample, float> && !reused_input;
+            std::is_same_v<Sample, float> && !reused_input && staged_io;
         const bool heavy = !host_limited
             && std::max(horizontal.half_bandwidth, vertical.half_bandwidth) >= 7;
         std::optional<StagingPool::Allocation> decoupled_staging;
         if constexpr (std::is_same_v<Sample, float>) {
-            decoupled_staging.emplace(
+            if (staged_io) decoupled_staging.emplace(
                 runtime->staging_pool->acquire(host_limited));
-            decoupled_staging->reserve(staging_bytes);
+            if (decoupled_staging) decoupled_staging->reserve(staging_bytes);
         }
         const std::size_t slot_index =
             runtime->acquire_slot(heavy, host_limited);
@@ -3119,11 +3969,10 @@ struct VulkanExecutor::Impl {
         Buffer &staging = decoupled_staging
             ? decoupled_staging->buffer() : slot.staging;
 
-        if (!reused_input) {
-            std::memset(staging.mapped(), 0, source_copy_bytes);
-            pack_host_rows(
+        if (!reused_input && !source_range) {
+            pack_host_rows_aligned(
                 input, source_pitch, staging.mapped(),
-                source_row_bytes, source_height);
+                source_row_bytes, source_height, source_copy_bytes);
             staging.flush(0U, source_copy_bytes);
         }
 
@@ -3143,9 +3992,31 @@ struct VulkanExecutor::Impl {
                     static_cast<VkDeviceSize>(source_offset) * 4U,
                     source_copy_bytes,
                 };
-                vkCmdCopyBuffer(
-                    slot.command, staging.handle(), slot.workspace.handle(),
-                    1U, &source_copy);
+                if (source_range) {
+                    if (source_copy_bytes != source_row_bytes * source_height) {
+                        // Whole-word loads: zero the word that ends the source.
+                        const VkDeviceSize tail = source_copy.dstOffset
+                            + ((source_row_bytes * source_height)
+                               & ~std::size_t{3U});
+                        vkCmdFillBuffer(
+                            slot.command, slot.workspace.handle(), tail, 4U, 0U);
+                        command_barrier(
+                            slot.command, slot.workspace.handle(), tail, 4U,
+                            VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT);
+                    }
+                    record_row_copies(
+                        slot.command, source_range.buffer(),
+                        source_range.offset, source_pitch,
+                        slot.workspace.handle(), source_copy.dstOffset,
+                        source_row_bytes, source_row_bytes, source_height);
+                } else {
+                    vkCmdCopyBuffer(
+                        slot.command, staging.handle(),
+                        slot.workspace.handle(), 1U, &source_copy);
+                }
                 command_barrier(
                     slot.command, slot.workspace.handle(), source_copy.dstOffset,
                     source_copy.size, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3261,9 +4132,24 @@ struct VulkanExecutor::Impl {
                 download_offset,
                 result_copy_bytes,
             };
-            vkCmdCopyBuffer(
-                slot.command, slot.workspace.handle(), staging.handle(),
-                1U, &result_copy);
+            if (result_range) {
+                record_row_copies(
+                    slot.command, slot.workspace.handle(),
+                    result_copy.srcOffset, result_row_bytes,
+                    result_range.buffer(), result_range.offset, result_pitch,
+                    result_row_bytes, destination_height);
+                command_barrier(
+                    slot.command, result_range.buffer(), result_range.offset,
+                    host_blocks::plane_span(
+                        result_pitch, result_row_bytes, destination_height),
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT);
+            } else {
+                vkCmdCopyBuffer(
+                    slot.command, slot.workspace.handle(), staging.handle(),
+                    1U, &result_copy);
+            }
             copy_f64_status(
                 slot, status_offset, staging, status_download_offset);
             command_barrier(
@@ -3278,7 +4164,8 @@ struct VulkanExecutor::Impl {
 
             const std::uint64_t signal_value = runtime->submit(
                 slot.command, slot.fence, input_wait_value,
-                cache_producer && runtime->timeline_enabled);
+                cache_producer && runtime->timeline_enabled,
+                resident ? &resident_source_wait : nullptr, resident ? 1U : 0U);
             submitted = true;
             if (cache_producer && runtime->timeline_enabled) {
                 cached_input->publish(signal_value);
@@ -3306,10 +4193,632 @@ struct VulkanExecutor::Impl {
         require_f64_status_clear(
             static_cast<const std::byte *>(staging.mapped())
                 + static_cast<std::ptrdiff_t>(status_download_offset));
-        unpack_host_rows(
-            static_cast<const std::byte *>(staging.mapped())
-                + static_cast<std::ptrdiff_t>(download_offset),
-            result_row_bytes, output, result_pitch, destination_height);
+        if (!result_range) {
+            unpack_host_rows(
+                static_cast<const std::byte *>(staging.mapped())
+                    + static_cast<std::ptrdiff_t>(download_offset),
+                result_row_bytes, output, result_pitch, destination_height);
+        }
+    }
+
+    // One plane of a Float32 2D execution: its arguments, its regions of the
+    // slot's workspace and staging buffer, and its input state. A frame runs
+    // its planes in one slot, each on regions of its own.
+    template <class Sample>
+    struct Plane2D {
+        const AxisPlan *horizontal = nullptr;
+        const AxisPlan *vertical = nullptr;
+        const Sample *input = nullptr;
+        std::ptrdiff_t input_row_stride = 0;
+        Sample *output = nullptr;
+        std::ptrdiff_t output_row_stride = 0;
+        const IntegerConversion *conversion = nullptr;
+        const ResidentIo *resident = nullptr;
+
+        std::shared_ptr<const PackedPlan> packed_horizontal;
+        std::shared_ptr<const PackedPlan> packed_vertical;
+        std::uint32_t source_width = 0U;
+        std::uint32_t source_height = 0U;
+        std::uint32_t destination_width = 0U;
+        std::uint32_t destination_height = 0U;
+        std::size_t destination_elements = 0U;
+        std::size_t source_bytes = 0U;
+        std::size_t source_copy_bytes = 0U;
+        std::size_t transposed_bytes = 0U;
+        std::size_t intermediate_bytes = 0U;
+        std::size_t destination_bytes = 0U;
+        std::size_t result_copy_bytes = 0U;
+        std::size_t source_row_bytes = 0U;
+        std::size_t source_pitch = 0U;
+        std::size_t result_row_bytes = 0U;
+        std::size_t result_pitch = 0U;
+        bool fold = false;
+        bool row_major_input = false;
+        std::uint32_t source_offset = 0U;
+        std::uint32_t transposed_offset = 0U;
+        std::uint32_t intermediate_offset = 0U;
+        std::uint32_t destination_offset = 0U;
+        std::uint32_t result_offset = 0U;
+        // The plane's staging region: the packed source, then the result.
+        std::size_t staging_base = 0U;
+        std::size_t download_offset = 0U;
+
+        std::shared_ptr<CachedInput> cached_input;
+        std::optional<InputCacheKey> cache_key;
+        bool cache_producer = false;
+        bool cache_published = false;
+        bool reused_input = false;
+        std::uint64_t input_wait_value = 0U;
+
+        bool source_in_place = false;
+        VkBuffer input_buffer = VK_NULL_HANDLE;
+        VkDeviceSize input_buffer_offset = 0U;
+        VkDeviceSize input_buffer_size = 0U;
+        std::uint32_t horizontal_source_offset = 0U;
+        std::uint32_t horizontal_output_offset = 0U;
+        HostRange source_range;
+        HostRange result_range;
+        ExternalWait resident_source_wait;
+        bool staged_io = false;
+        bool host_limited = false;
+        bool split_horizontal = false;
+        bool split_vertical = false;
+    };
+
+    // Sizes and offsets of a plane; appends its regions after those already
+    // in the builder and the staging cursor.
+    template <class Sample>
+    void lay_out_2d(
+        Plane2D<Sample> &plane, WorkspaceBuilder &builder,
+        std::size_t &staging_cursor) const {
+        const AxisPlan &horizontal = *plane.horizontal;
+        const AxisPlan &vertical = *plane.vertical;
+        plane.packed_horizontal = get(horizontal);
+        plane.packed_vertical = get(vertical);
+        plane.source_width = static_cast<std::uint32_t>(horizontal.source_size);
+        plane.source_height = static_cast<std::uint32_t>(vertical.source_size);
+        plane.destination_width =
+            static_cast<std::uint32_t>(horizontal.destination_size);
+        plane.destination_height =
+            static_cast<std::uint32_t>(vertical.destination_size);
+        const std::size_t source_elements = checked_product(
+            plane.source_width, plane.source_height, "Vulkan source image");
+        const std::size_t intermediate_elements = checked_product(
+            plane.destination_width, plane.source_height,
+            "Vulkan intermediate image");
+        plane.destination_elements = checked_product(
+            plane.destination_width, plane.destination_height,
+            "Vulkan destination image");
+        plane.source_bytes = checked_product(
+            source_elements, sizeof(Sample), "Vulkan source image");
+        plane.source_copy_bytes = align_up(
+            plane.source_bytes, 4U, "Vulkan packed source copy");
+        plane.transposed_bytes = checked_product(
+            source_elements, sizeof(float), "Vulkan transposed image");
+        plane.intermediate_bytes = checked_product(
+            intermediate_elements, sizeof(float), "Vulkan intermediate image");
+        plane.destination_bytes = checked_product(
+            plane.destination_elements, sizeof(float),
+            "Vulkan destination image");
+        const std::size_t result_bytes = checked_product(
+            plane.destination_elements, sizeof(Sample), "Vulkan result image");
+        plane.result_copy_bytes = align_up(
+            result_bytes, 4U, "Vulkan packed result copy");
+        plane.source_row_bytes = checked_product(
+            plane.source_width, sizeof(Sample), "Vulkan source row");
+        plane.source_pitch = checked_product(
+            static_cast<std::size_t>(plane.input_row_stride), sizeof(Sample),
+            "Vulkan source pitch");
+        plane.result_row_bytes = checked_product(
+            plane.destination_width, sizeof(Sample), "Vulkan result row");
+        plane.result_pitch = checked_product(
+            static_cast<std::size_t>(plane.output_row_stride), sizeof(Sample),
+            "Vulkan result pitch");
+
+        // The right-hand side reads either layout, so no pass only
+        // transposes: a Float32 source is read row-major as uploaded (an
+        // integer source keeps its transpose, which also converts it), and the
+        // vertical pass reads the horizontal result where it lies.
+        plane.fold = runtime->fold_transposes;
+        plane.row_major_input = plane.fold && std::is_same_v<Sample, float>;
+
+        plane.source_offset = builder.add_bytes(
+            std::max(plane.source_copy_bytes, plane.intermediate_bytes));
+        plane.transposed_offset = builder.add_bytes(plane.transposed_bytes);
+        plane.intermediate_offset =
+            plane.fold ? 0U : builder.add_bytes(plane.intermediate_bytes);
+        plane.destination_offset = builder.add_bytes(plane.destination_bytes);
+        plane.result_offset = plane.destination_offset;
+        if constexpr (!std::is_same_v<Sample, float>) {
+            plane.result_offset = builder.add_bytes(plane.result_copy_bytes);
+        }
+        plane.staging_base = align_up(
+            staging_cursor, 64U, "Vulkan staging buffer");
+        plane.download_offset = checked_add(
+            plane.staging_base, plane.source_copy_bytes,
+            "Vulkan staging buffer");
+        staging_cursor = checked_add(
+            plane.download_offset, plane.result_copy_bytes,
+            "Vulkan staging buffer");
+    }
+
+    // Joins the shared input of the plane: it is the cache's producer, or
+    // waits for the producer to have scheduled it.
+    template <class Sample>
+    void acquire_input_2d(
+        Plane2D<Sample> &plane,
+        std::shared_ptr<const void> input_lifetime) const {
+        if (!input_lifetime || !runtime->input_cache->enabled()) return;
+        plane.cache_key = make_input_cache_key(
+            plane.input, plane.input_row_stride, plane.source_width,
+            plane.source_height,
+            plane.row_major_input ? CachedInputLayout::row_major
+                                  : CachedInputLayout::transposed,
+            plane.conversion);
+        auto acquired = runtime->input_cache->acquire(
+            *plane.cache_key, plane.transposed_bytes, std::move(input_lifetime));
+        plane.cached_input = std::move(acquired.input);
+        plane.cache_producer = acquired.producer;
+        plane.reused_input = plane.cached_input && !plane.cache_producer;
+        if (plane.reused_input) {
+            plane.input_wait_value = plane.cached_input->wait_value();
+        }
+    }
+
+    // Where the plane's input is read from and its result written to.
+    template <class Sample>
+    void bind_io_2d(Plane2D<Sample> &plane) const {
+        const ResidentIo *resident = plane.resident;
+        // A GPU frame's plane with tight rows is read where it lies, through
+        // the binding a shared input would use.
+        plane.source_in_place = plane.row_major_input && resident
+            && plane.source_pitch == plane.source_row_bytes
+            && resident->source->buffer_bytes >= plane.source_bytes;
+        plane.input_buffer = plane.cached_input ? plane.cached_input->buffer()
+            : plane.source_in_place
+                ? reinterpret_cast<VkBuffer>(resident->source->buffer)
+                : VK_NULL_HANDLE;
+        plane.input_buffer_offset =
+            plane.cached_input ? plane.cached_input->offset() : 0U;
+        plane.input_buffer_size = plane.cached_input
+            ? plane.cached_input->size()
+            : plane.source_in_place ? plane.source_bytes : 0U;
+        plane.horizontal_source_offset = plane.input_buffer
+            ? 0U
+            : plane.row_major_input ? plane.source_offset
+                                    : plane.transposed_offset;
+        plane.horizontal_output_offset = plane.row_major_input
+            ? plane.transposed_offset : plane.source_offset;
+
+        // Rows that lie in imported frame blocks are copied directly.
+        plane.source_range = resident
+            ? resident_range(*resident->source)
+            : (plane.source_row_bytes * plane.source_height) % 4U == 0U
+                ? host_range(1U, plane.input, plane.source_pitch,
+                             plane.source_row_bytes, plane.source_height)
+                : HostRange{};
+        plane.result_range = resident
+            ? resident_range(*resident->result)
+            : host_range(
+                2U, plane.output, plane.result_pitch, plane.result_row_bytes,
+                plane.destination_height);
+        plane.resident_source_wait = resident_wait(resident);
+        plane.staged_io = !((plane.reused_input || plane.source_range)
+                            && plane.result_range);
+        plane.host_limited = std::is_same_v<Sample, float>
+            && !plane.reused_input && plane.staged_io;
+    }
+
+    // The steps of a plane's execution. A frame records each step for all of
+    // its planes, then one barrier command for the step, so the planes'
+    // dispatches overlap and the barriers are shared.
+    enum class Step2D : std::uint8_t {
+        upload,
+        input_transpose,
+        horizontal_rhs,
+        horizontal_solve,
+        intermediate_transpose,
+        vertical_rhs,
+        vertical_solve,
+        conversion,
+        download,
+    };
+    static constexpr std::array<std::pair<Step2D, const char *>, 9U> steps_2d{{
+        {Step2D::upload, "input upload"},
+        {Step2D::input_transpose, "input transpose"},
+        {Step2D::horizontal_rhs, "horizontal right-hand side"},
+        {Step2D::horizontal_solve, "horizontal inverse"},
+        {Step2D::intermediate_transpose, "intermediate transpose"},
+        {Step2D::vertical_rhs, "vertical right-hand side"},
+        {Step2D::vertical_solve, "vertical inverse"},
+        {Step2D::conversion, "integer conversion"},
+        {Step2D::download, "download"},
+    }};
+
+    template <class Sample>
+    void record_2d_step(
+        const Plane2D<Sample> &plane, Step2D step, ExecutionSlot &slot,
+        Buffer &staging, BarrierBatch &barriers) const {
+        const PackedPlan &packed_horizontal = *plane.packed_horizontal;
+        const PackedPlan &packed_vertical = *plane.packed_vertical;
+        const auto &cached_input = plane.cached_input;
+        const auto &source_range = plane.source_range;
+        const auto &result_range = plane.result_range;
+        const VkBuffer workspace = slot.workspace.handle();
+        const bool compute_input = !plane.reused_input && !plane.source_in_place;
+        constexpr VkPipelineStageFlags compute = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        constexpr VkPipelineStageFlags transfer = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        constexpr VkAccessFlags shader_write = VK_ACCESS_SHADER_WRITE_BIT;
+        constexpr VkAccessFlags shader_read = VK_ACCESS_SHADER_READ_BIT;
+
+        switch (step) {
+        case Step2D::upload: {
+            if (!compute_input) return;
+            const VkBuffer upload_buffer = plane.row_major_input && cached_input
+                ? cached_input->buffer() : workspace;
+            const VkBufferCopy source_copy{
+                plane.staging_base,
+                plane.row_major_input && cached_input
+                    ? cached_input->offset()
+                    : static_cast<VkDeviceSize>(plane.source_offset) * 4U,
+                plane.source_copy_bytes,
+            };
+            if (source_range) {
+                if (plane.source_copy_bytes != plane.source_bytes) {
+                    // The shaders load whole words: zero the one that ends
+                    // the packed source, as the staged path does.
+                    const VkDeviceSize tail = source_copy.dstOffset
+                        + (plane.source_bytes & ~std::size_t{3U});
+                    vkCmdFillBuffer(slot.command, workspace, tail, 4U, 0U);
+                    command_barrier(
+                        slot.command, workspace, tail, 4U,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT, transfer, transfer);
+                }
+                record_row_copies(
+                    slot.command, source_range.buffer(), source_range.offset,
+                    plane.source_pitch, upload_buffer, source_copy.dstOffset,
+                    plane.source_row_bytes, plane.source_row_bytes,
+                    plane.source_height);
+            } else {
+                vkCmdCopyBuffer(
+                    slot.command, staging.handle(), upload_buffer, 1U,
+                    &source_copy);
+            }
+            barriers.add(
+                upload_buffer, source_copy.dstOffset, source_copy.size,
+                VK_ACCESS_TRANSFER_WRITE_BIT, shader_read, transfer, compute);
+            return;
+        }
+        case Step2D::input_transpose: {
+            if (!compute_input || plane.row_major_input) return;
+            const std::uint32_t sample_type =
+                std::is_same_v<Sample, float> ? 0U
+                : std::is_same_v<Sample, std::uint8_t> ? 1U : 2U;
+            record_transpose(
+                *runtime, slot, packed_horizontal,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                plane.source_width, plane.source_height, plane.source_offset,
+                cached_input ? 0U : plane.transposed_offset,
+                0U, cached_input ? 1U : 0U, sample_type, plane.conversion);
+            barriers.add(
+                cached_input ? cached_input->buffer() : workspace,
+                cached_input
+                    ? cached_input->offset()
+                    : static_cast<VkDeviceSize>(plane.transposed_offset) * 4U,
+                cached_input ? cached_input->size() : plane.transposed_bytes,
+                shader_write, shader_read, compute, compute);
+            return;
+        }
+        case Step2D::horizontal_rhs:
+        case Step2D::horizontal_solve: {
+            const bool solve = step == Step2D::horizontal_solve;
+            const bool rhs_phase = has_rhs_phase(
+                packed_horizontal, 0U, plane.split_horizontal);
+            if (!solve && !rhs_phase) return;
+            record_inverse(
+                *runtime, slot, packed_horizontal,
+                plane.input_buffer, plane.input_buffer_offset,
+                plane.input_buffer_size,
+                plane.source_height, plane.horizontal_source_offset,
+                plane.horizontal_output_offset, plane.input_buffer ? 1U : 0U,
+                plane.row_major_input ? 1U : 0U, 0U, plane.split_horizontal,
+                solve ? InversePhase::solve : InversePhase::rhs);
+            barriers.add(
+                workspace,
+                static_cast<VkDeviceSize>(plane.horizontal_output_offset) * 4U,
+                solve ? VkDeviceSize{plane.intermediate_bytes}
+                      : static_cast<VkDeviceSize>(packed_horizontal.destination_size)
+                            * plane.source_height * 4U,
+                shader_write,
+                solve ? shader_read : shader_read | shader_write,
+                compute, compute);
+            return;
+        }
+        case Step2D::intermediate_transpose:
+            if (plane.fold) return;
+            record_transpose(
+                *runtime, slot, packed_horizontal,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                plane.source_height, plane.destination_width,
+                plane.source_offset, plane.intermediate_offset,
+                0U, 0U, 0U, nullptr);
+            barriers.add(
+                workspace,
+                static_cast<VkDeviceSize>(plane.intermediate_offset) * 4U,
+                plane.intermediate_bytes, shader_write, shader_read, compute,
+                compute);
+            return;
+        case Step2D::vertical_rhs:
+        case Step2D::vertical_solve: {
+            // The horizontal result is transposed: element x of row y lies at
+            // x * source_height + y, the vertical pass's vector-major layout.
+            const bool solve = step == Step2D::vertical_solve;
+            const bool rhs_phase = has_rhs_phase(
+                packed_vertical, 0U, plane.split_vertical);
+            if (!solve && !rhs_phase) return;
+            record_inverse(
+                *runtime, slot, packed_vertical,
+                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
+                cached_input ? cached_input->offset() : 0U,
+                cached_input ? cached_input->size() : 0U,
+                plane.destination_width,
+                plane.fold ? plane.horizontal_output_offset
+                           : plane.intermediate_offset,
+                plane.destination_offset, 0U, plane.fold ? 1U : 0U, 0U,
+                plane.split_vertical,
+                solve ? InversePhase::solve : InversePhase::rhs);
+            if (!solve) {
+                barriers.add(
+                    workspace,
+                    static_cast<VkDeviceSize>(plane.destination_offset) * 4U,
+                    static_cast<VkDeviceSize>(packed_vertical.destination_size)
+                        * plane.destination_width * 4U,
+                    shader_write, shader_read | shader_write, compute, compute);
+            } else if constexpr (!std::is_same_v<Sample, float>) {
+                barriers.add(
+                    workspace,
+                    static_cast<VkDeviceSize>(plane.destination_offset) * 4U,
+                    plane.destination_bytes, shader_write, shader_read,
+                    compute, compute);
+            }
+            return;
+        }
+        case Step2D::conversion:
+            if constexpr (!std::is_same_v<Sample, float>) {
+                record_conversion(
+                    *runtime, slot, packed_vertical,
+                    checked_u32(plane.destination_elements,
+                                "Vulkan destination element count"),
+                    plane.destination_offset, plane.result_offset,
+                    std::is_same_v<Sample, std::uint8_t> ? 1U : 2U,
+                    *plane.conversion);
+            }
+            barriers.add(
+                workspace,
+                static_cast<VkDeviceSize>(plane.result_offset) * 4U,
+                plane.result_copy_bytes, shader_write,
+                VK_ACCESS_TRANSFER_READ_BIT, compute, transfer);
+            return;
+        case Step2D::download: {
+            const VkBufferCopy result_copy{
+                static_cast<VkDeviceSize>(plane.result_offset) * 4U,
+                plane.download_offset,
+                plane.result_copy_bytes,
+            };
+            if (result_range) {
+                record_row_copies(
+                    slot.command, workspace, result_copy.srcOffset,
+                    plane.result_row_bytes, result_range.buffer(),
+                    result_range.offset, plane.result_pitch,
+                    plane.result_row_bytes, plane.destination_height);
+                barriers.add(
+                    result_range.buffer(), result_range.offset,
+                    host_blocks::plane_span(
+                        plane.result_pitch, plane.result_row_bytes,
+                        plane.destination_height),
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+                    transfer, VK_PIPELINE_STAGE_HOST_BIT);
+            } else {
+                vkCmdCopyBuffer(
+                    slot.command, workspace, staging.handle(), 1U,
+                    &result_copy);
+                barriers.add(
+                    staging.handle(), plane.download_offset,
+                    plane.result_copy_bytes, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT, transfer,
+                    VK_PIPELINE_STAGE_HOST_BIT);
+            }
+            return;
+        }
+        }
+    }
+
+    // Runs the planes of one frame (or the one plane of an execution) in one
+    // slot: one command buffer, one submission, one wait. A frame that does
+    // not fit a slot is not run and false is returned; nothing has happened
+    // then, and the caller runs the planes one by one.
+    template <class Sample>
+    bool execute_2d_planes(
+        std::span<Plane2D<Sample>> planes,
+        const std::shared_ptr<const void> &input_lifetime, bool frame) const {
+        WorkspaceBuilder builder;
+        std::size_t staging_bytes = 0U;
+        try {
+            for (auto &plane : planes) lay_out_2d(plane, builder, staging_bytes);
+        } catch (const std::length_error &) {
+            if (frame) return false;
+            throw;
+        }
+        if (builder.size() > maximum_allocation_bytes
+            || staging_bytes > maximum_allocation_bytes) {
+            if (frame) return false;
+            throw std::length_error("Vulkan execution exceeds the 2 GiB guard");
+        }
+        if (frame && builder.size()
+                > runtime->selected.properties.limits.maxStorageBufferRange) {
+            return false;
+        }
+
+        std::array<std::shared_ptr<const PackedPlan>, 2U * frame_plane_limit>
+            used_plans;
+        for (std::size_t index = 0U; index < planes.size(); ++index) {
+            used_plans[2U * index] = planes[index].packed_horizontal;
+            used_plans[2U * index + 1U] = planes[index].packed_vertical;
+        }
+        PendingPlanUploads plan_uploads(
+            std::span<const std::shared_ptr<const PackedPlan>>(
+                used_plans.data(), 2U * planes.size()));
+
+        std::optional<StagingPool::Allocation> decoupled_staging;
+        std::optional<SlotRelease> slot_release;
+        ExecutionSlot *slot_in_use = nullptr;
+        Buffer *staging = nullptr;
+        bool slot_begun = false;
+        bool submitted = false;
+        try {
+            // Shared inputs are joined before a slot is taken, in the order
+            // of their addresses: a frame that waits for an input holds only
+            // inputs at lower addresses, so the waits cannot form a cycle
+            // (plane order would not do: two clips may hold the planes of one
+            // frame in different orders), and no one waits for a producer
+            // while holding a slot.
+            std::array<Plane2D<Sample> *, frame_plane_limit> join_order{};
+            for (std::size_t index = 0U; index < planes.size(); ++index) {
+                std::size_t position = index;
+                for (; position != 0U
+                       && std::less<const Sample *>{}(
+                           planes[index].input,
+                           join_order[position - 1U]->input);
+                     --position) {
+                    join_order[position] = join_order[position - 1U];
+                }
+                join_order[position] = &planes[index];
+            }
+            for (std::size_t index = 0U; index < planes.size(); ++index) {
+                acquire_input_2d(*join_order[index], input_lifetime);
+            }
+            for (auto &plane : planes) bind_io_2d(plane);
+
+            bool staged_io = false;
+            bool host_limited = false;
+            std::int32_t bandwidth = 0;
+            std::uint64_t input_wait_value = 0U;
+            bool cache_producer = false;
+            std::array<ExternalWait, frame_plane_limit> externals{};
+            std::size_t external_count = 0U;
+            for (const auto &plane : planes) {
+                staged_io = staged_io || plane.staged_io;
+                host_limited = host_limited || plane.host_limited;
+                bandwidth = std::max({
+                    bandwidth, plane.horizontal->half_bandwidth,
+                    plane.vertical->half_bandwidth});
+                input_wait_value =
+                    std::max(input_wait_value, plane.input_wait_value);
+                cache_producer = cache_producer || plane.cache_producer;
+                if (plane.resident) {
+                    externals[external_count++] = plane.resident_source_wait;
+                }
+            }
+            const bool heavy = !host_limited && bandwidth >= 7;
+            if constexpr (std::is_same_v<Sample, float>) {
+                if (staged_io) {
+                    decoupled_staging.emplace(
+                        runtime->staging_pool->acquire(host_limited));
+                    decoupled_staging->reserve(staging_bytes);
+                }
+            }
+            const std::size_t slot_index =
+                runtime->acquire_slot(heavy, host_limited);
+            slot_release.emplace(*runtime, slot_index, heavy);
+            ExecutionSlot &slot = *runtime->slots[slot_index];
+            slot_in_use = &slot;
+            slot.reserve(builder.size(), decoupled_staging ? 4U : staging_bytes);
+            staging = decoupled_staging ? &decoupled_staging->buffer()
+                                        : &slot.staging;
+
+            for (const auto &plane : planes) {
+                if (plane.reused_input || plane.source_range) continue;
+                pack_host_rows_aligned(
+                    plane.input, plane.source_pitch,
+                    static_cast<std::byte *>(staging->mapped())
+                        + static_cast<std::ptrdiff_t>(plane.staging_base),
+                    plane.source_row_bytes, plane.source_height,
+                    plane.source_copy_bytes);
+                staging->flush(plane.staging_base, plane.source_copy_bytes);
+            }
+
+            slot_begun = true;
+            slot.begin();
+            plan_uploads.record(slot.command);
+            for (auto &plane : planes) {
+                plane.split_horizontal =
+                    should_split_rhs(*runtime, *plane.packed_horizontal);
+                plane.split_vertical =
+                    should_split_rhs(*runtime, *plane.packed_vertical);
+            }
+            runtime->begin_label(slot.command, "dsmvc 2D inverse");
+            BarrierBatch barriers;
+            for (const auto &[step, label] : steps_2d) {
+                runtime->begin_label(slot.command, label);
+                for (const auto &plane : planes) {
+                    record_2d_step(plane, step, slot, *staging, barriers);
+                }
+                barriers.flush(slot.command);
+                runtime->end_label(slot.command);
+            }
+            runtime->end_label(slot.command);
+            runtime->check(vkEndCommandBuffer(slot.command),
+                           "vkEndCommandBuffer(2D inverse)");
+
+            const bool signal = cache_producer && runtime->timeline_enabled;
+            const std::uint64_t signal_value = runtime->submit(
+                slot.command, slot.fence, input_wait_value, signal,
+                externals.data(), external_count);
+            submitted = true;
+            if (signal) {
+                for (auto &plane : planes) {
+                    if (!plane.cache_producer) continue;
+                    plane.cached_input->publish(signal_value);
+                    plane.cache_published = true;
+                }
+            }
+            runtime->wait_fence(slot.fence, "Vulkan 2D execution");
+            for (auto &plane : planes) {
+                if (plane.cache_producer && !plane.cache_published) {
+                    plane.cached_input->publish(0U);
+                    plane.cache_published = true;
+                }
+            }
+            plan_uploads.complete();
+        } catch (...) {
+            const auto error = std::current_exception();
+            if (slot_begun && !submitted) slot_in_use->recover_unsubmitted();
+            for (auto &plane : planes) {
+                if (plane.cache_producer && !plane.cache_published) {
+                    plane.cached_input->fail(error);
+                    runtime->input_cache->erase(
+                        *plane.cache_key, plane.cached_input);
+                }
+            }
+            std::rethrow_exception(error);
+        }
+
+        if (decoupled_staging) slot_release->release_now();
+        for (const auto &plane : planes) {
+            if (plane.result_range) continue;
+            staging->invalidate(plane.download_offset, plane.result_copy_bytes);
+            unpack_host_rows(
+                static_cast<const std::byte *>(staging->mapped())
+                    + static_cast<std::ptrdiff_t>(plane.download_offset),
+                plane.result_row_bytes, plane.output, plane.result_pitch,
+                plane.destination_height);
+        }
+        return true;
     }
 
     template <class Sample>
@@ -3318,294 +4827,109 @@ struct VulkanExecutor::Impl {
         const Sample *input, std::ptrdiff_t input_row_stride,
         Sample *output, std::ptrdiff_t output_row_stride,
         const IntegerConversion *conversion,
-        std::shared_ptr<const void> input_lifetime) const {
+        std::shared_ptr<const void> input_lifetime,
+        const ResidentIo *resident = nullptr) const {
         if (horizontal.requires_float64() || vertical.requires_float64()) {
             execute_2d_f64(
                 horizontal, vertical, input, input_row_stride,
                 output, output_row_stride, conversion,
-                std::move(input_lifetime));
+                std::move(input_lifetime), resident);
             return;
         }
-        const auto packed_horizontal = get(horizontal);
-        const auto packed_vertical = get(vertical);
-        const auto source_width = static_cast<std::uint32_t>(horizontal.source_size);
-        const auto source_height = static_cast<std::uint32_t>(vertical.source_size);
-        const auto destination_width =
-            static_cast<std::uint32_t>(horizontal.destination_size);
-        const auto destination_height =
-            static_cast<std::uint32_t>(vertical.destination_size);
-        const std::size_t source_elements = checked_product(
-            source_width, source_height, "Vulkan source image");
-        const std::size_t intermediate_elements = checked_product(
-            destination_width, source_height, "Vulkan intermediate image");
-        const std::size_t destination_elements = checked_product(
-            destination_width, destination_height, "Vulkan destination image");
-        const std::size_t source_bytes = checked_product(
-            source_elements, sizeof(Sample), "Vulkan source image");
-        const std::size_t source_copy_bytes = align_up(
-            source_bytes, 4U, "Vulkan packed source copy");
-        const std::size_t transposed_bytes = checked_product(
-            source_elements, sizeof(float), "Vulkan transposed image");
-        const std::size_t intermediate_bytes = checked_product(
-            intermediate_elements, sizeof(float), "Vulkan intermediate image");
-        const std::size_t destination_bytes = checked_product(
-            destination_elements, sizeof(float), "Vulkan destination image");
-        const std::size_t result_bytes = checked_product(
-            destination_elements, sizeof(Sample), "Vulkan result image");
-        const std::size_t result_copy_bytes = align_up(
-            result_bytes, 4U, "Vulkan packed result copy");
-        const std::size_t source_row_bytes = checked_product(
-            source_width, sizeof(Sample), "Vulkan source row");
-        const std::size_t source_pitch = checked_product(
-            static_cast<std::size_t>(input_row_stride), sizeof(Sample),
-            "Vulkan source pitch");
-        const std::size_t result_row_bytes = checked_product(
-            destination_width, sizeof(Sample), "Vulkan result row");
-        const std::size_t result_pitch = checked_product(
-            static_cast<std::size_t>(output_row_stride), sizeof(Sample),
-            "Vulkan result pitch");
+        Plane2D<Sample> plane;
+        plane.horizontal = &horizontal;
+        plane.vertical = &vertical;
+        plane.input = input;
+        plane.input_row_stride = input_row_stride;
+        plane.output = output;
+        plane.output_row_stride = output_row_stride;
+        plane.conversion = conversion;
+        plane.resident = resident;
+        (void)execute_2d_planes<Sample>(
+            std::span<Plane2D<Sample>>(&plane, 1U), input_lifetime, false);
+    }
 
-        const bool cache_requested = input_lifetime && runtime->input_cache->enabled();
-        std::shared_ptr<CachedInput> cached_input;
-        std::optional<InputCacheKey> cache_key;
-        bool cache_producer = false;
-        if (cache_requested) {
-            cache_key = make_input_cache_key(
-                input, input_row_stride, source_width, source_height,
-                CachedInputLayout::transposed, conversion);
-            auto acquired = runtime->input_cache->acquire(
-                *cache_key, transposed_bytes, std::move(input_lifetime));
-            cached_input = std::move(acquired.input);
-            cache_producer = acquired.producer;
+    // The planes of a multi-plane frame in one submission. Returns false,
+    // having done nothing, when the frame is not eligible (the caller then
+    // runs the planes one by one, which also reports invalid arguments).
+    template <class Sample>
+    [[nodiscard]] bool execute_2d_frame(
+        std::span<const FramePlane2D> jobs, bool gpu_frame,
+        const std::shared_ptr<const void> &input_lifetime) const {
+        if (!runtime->frame_submit || jobs.size() < 2U
+            || jobs.size() > frame_plane_limit) {
+            return false;
         }
-        const bool reused_input = cached_input && !cache_producer;
-        std::uint64_t input_wait_value = 0U;
-        if (reused_input) input_wait_value = cached_input->wait_value();
-
-        WorkspaceBuilder builder;
-        const std::uint32_t source_offset = builder.add_bytes(
-            std::max(source_copy_bytes, intermediate_bytes));
-        const std::uint32_t transposed_offset = builder.add_bytes(transposed_bytes);
-        const std::uint32_t intermediate_offset = builder.add_bytes(intermediate_bytes);
-        const std::uint32_t destination_offset = builder.add_bytes(destination_bytes);
-        std::uint32_t result_offset = destination_offset;
-        if constexpr (!std::is_same_v<Sample, float>) {
-            result_offset = builder.add_bytes(result_copy_bytes);
-        }
-        const std::size_t download_offset = source_copy_bytes;
-        const std::size_t staging_bytes = checked_add(
-            download_offset, result_copy_bytes, "Vulkan staging buffer");
-        if (builder.size() > maximum_allocation_bytes
-            || staging_bytes > maximum_allocation_bytes) {
-            throw std::length_error("Vulkan execution exceeds the 2 GiB guard");
-        }
-
-        const bool host_limited = std::is_same_v<Sample, float> && !reused_input;
-        const bool heavy = !host_limited
-            && std::max(horizontal.half_bandwidth, vertical.half_bandwidth) >= 7;
-        std::optional<StagingPool::Allocation> decoupled_staging;
-        if constexpr (std::is_same_v<Sample, float>) {
-            decoupled_staging.emplace(
-                runtime->staging_pool->acquire(host_limited));
-            decoupled_staging->reserve(staging_bytes);
-        }
-        const std::size_t slot_index = runtime->acquire_slot(heavy, host_limited);
-        SlotRelease slot_release(*runtime, slot_index, heavy);
-        ExecutionSlot &slot = *runtime->slots[slot_index];
-        slot.reserve(builder.size(), decoupled_staging ? 4U : staging_bytes);
-        Buffer &staging = decoupled_staging
-            ? decoupled_staging->buffer() : slot.staging;
-
-        if (!reused_input) {
-            std::memset(staging.mapped(), 0, source_copy_bytes);
-            pack_host_rows(
-                input, source_pitch, staging.mapped(),
-                source_row_bytes, source_height);
-            staging.flush(0U, source_copy_bytes);
-        }
-
-        bool submitted = false;
-        bool cache_published = false;
-        PendingPlanUploads plan_uploads(packed_horizontal, packed_vertical);
-        try {
-            slot.begin();
-            plan_uploads.record(slot.command);
-            runtime->begin_label(slot.command, "dsmvc 2D inverse");
-            if (!reused_input) {
-                runtime->begin_label(slot.command, "input transpose");
-                const VkBufferCopy source_copy{
-                    0U,
-                    static_cast<VkDeviceSize>(source_offset) * 4U,
-                    source_copy_bytes,
-                };
-                vkCmdCopyBuffer(
-                    slot.command, staging.handle(), slot.workspace.handle(),
-                    1U, &source_copy);
-                command_barrier(
-                    slot.command, slot.workspace.handle(), source_copy.dstOffset,
-                    source_copy.size, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-                const std::uint32_t sample_type =
-                    std::is_same_v<Sample, float> ? 0U
-                    : std::is_same_v<Sample, std::uint8_t> ? 1U : 2U;
-                record_transpose(
-                    *runtime, slot, *packed_horizontal,
-                    cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
-                    cached_input ? cached_input->offset() : 0U,
-                    cached_input ? cached_input->size() : 0U,
-                    source_width, source_height, source_offset,
-                    cached_input ? 0U : transposed_offset,
-                    0U, cached_input ? 1U : 0U, sample_type, conversion);
-                if (cached_input) {
-                    command_barrier(
-                        slot.command, cached_input->buffer(),
-                        cached_input->offset(), cached_input->size(),
-                        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-                } else {
-                    command_barrier(
-                        slot.command, slot.workspace.handle(),
-                        static_cast<VkDeviceSize>(transposed_offset) * 4U,
-                        transposed_bytes, VK_ACCESS_SHADER_WRITE_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-                }
-                runtime->end_label(slot.command);
+        std::array<Plane2D<Sample>, frame_plane_limit> planes;
+        std::array<ResidentIo, frame_plane_limit> resident{};
+        for (std::size_t index = 0U; index < jobs.size(); ++index) {
+            const FramePlane2D &job = jobs[index];
+            if (!job.horizontal || !job.vertical || !job.horizontal->valid()
+                || !job.vertical->valid()
+                || job.horizontal->requires_float64()
+                || job.vertical->requires_float64()
+                || job.vertical->source_size < 1
+                || job.vertical->destination_size < 1) {
+                return false;
             }
-
-            runtime->begin_label(slot.command, "horizontal inverse");
-            record_inverse(
-                *runtime, slot, *packed_horizontal,
-                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
-                cached_input ? cached_input->offset() : 0U,
-                cached_input ? cached_input->size() : 0U,
-                source_height, cached_input ? 0U : transposed_offset,
-                source_offset, cached_input ? 1U : 0U, 0U, 0U,
-                should_split_rhs(*runtime, *packed_horizontal));
-            command_barrier(
-                slot.command, slot.workspace.handle(),
-                static_cast<VkDeviceSize>(source_offset) * 4U,
-                intermediate_bytes, VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-            runtime->end_label(slot.command);
-
-            runtime->begin_label(slot.command, "intermediate transpose");
-            record_transpose(
-                *runtime, slot, *packed_horizontal,
-                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
-                cached_input ? cached_input->offset() : 0U,
-                cached_input ? cached_input->size() : 0U,
-                source_height, destination_width, source_offset,
-                intermediate_offset, 0U, 0U, 0U, nullptr);
-            command_barrier(
-                slot.command, slot.workspace.handle(),
-                static_cast<VkDeviceSize>(intermediate_offset) * 4U,
-                intermediate_bytes, VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-            runtime->end_label(slot.command);
-
-            runtime->begin_label(slot.command, "vertical inverse");
-            record_inverse(
-                *runtime, slot, *packed_vertical,
-                cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
-                cached_input ? cached_input->offset() : 0U,
-                cached_input ? cached_input->size() : 0U,
-                destination_width, intermediate_offset, destination_offset,
-                0U, 0U, 0U, should_split_rhs(*runtime, *packed_vertical));
-
             if constexpr (!std::is_same_v<Sample, float>) {
-                command_barrier(
-                    slot.command, slot.workspace.handle(),
-                    static_cast<VkDeviceSize>(destination_offset) * 4U,
-                    destination_bytes, VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_ACCESS_SHADER_READ_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-                runtime->end_label(slot.command);
-                runtime->begin_label(slot.command, "integer conversion");
-                record_conversion(
-                    *runtime, slot, *packed_vertical,
-                    checked_u32(destination_elements,
-                                "Vulkan destination element count"),
-                    destination_offset, result_offset,
-                    std::is_same_v<Sample, std::uint8_t> ? 1U : 2U,
-                    *conversion);
+                if (!valid_conversion<Sample>(job.conversion)) return false;
             }
-            command_barrier(
-                slot.command, slot.workspace.handle(),
-                static_cast<VkDeviceSize>(result_offset) * 4U,
-                result_copy_bytes, VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_TRANSFER_READ_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT);
-            runtime->end_label(slot.command);
-            const VkBufferCopy result_copy{
-                static_cast<VkDeviceSize>(result_offset) * 4U,
-                download_offset,
-                result_copy_bytes,
-            };
-            vkCmdCopyBuffer(
-                slot.command, slot.workspace.handle(), staging.handle(),
-                1U, &result_copy);
-            command_barrier(
-                slot.command, staging.handle(), download_offset,
-                result_copy_bytes, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_HOST_BIT);
-            runtime->end_label(slot.command);
-            runtime->check(vkEndCommandBuffer(slot.command),
-                           "vkEndCommandBuffer(2D inverse)");
-
-            const std::uint64_t signal_value = runtime->submit(
-                slot.command, slot.fence, input_wait_value,
-                cache_producer && runtime->timeline_enabled);
-            submitted = true;
-            if (cache_producer && runtime->timeline_enabled) {
-                cached_input->publish(signal_value);
-                cache_published = true;
+            Plane2D<Sample> &plane = planes[index];
+            plane.horizontal = job.horizontal;
+            plane.vertical = job.vertical;
+            if constexpr (!std::is_same_v<Sample, float>) {
+                plane.conversion = &job.conversion;
             }
-            runtime->wait_fence(slot.fence, "Vulkan 2D execution");
-            if (cache_producer && !cache_published) {
-                cached_input->publish(0U);
-                cache_published = true;
+            if (gpu_frame) {
+                const auto usable = [](const GpuPlane &gpu) {
+                    return gpu.buffer != 0U && gpu.pitch_bytes > 0
+                        && gpu.pitch_bytes
+                            % static_cast<std::ptrdiff_t>(sizeof(Sample)) == 0;
+                };
+                if (!usable(job.gpu_input) || !usable(job.gpu_output)) {
+                    return false;
+                }
+                resident[index] = {&job.gpu_input, &job.gpu_output};
+                plane.resident = &resident[index];
+                plane.input_row_stride = job.gpu_input.pitch_bytes
+                    / static_cast<std::ptrdiff_t>(sizeof(Sample));
+                plane.output_row_stride = job.gpu_output.pitch_bytes
+                    / static_cast<std::ptrdiff_t>(sizeof(Sample));
+            } else {
+                if (!job.input || !job.output
+                    || job.input_row_stride < job.horizontal->source_size
+                    || job.output_row_stride < job.horizontal->destination_size) {
+                    return false;
+                }
+                // Planes of one input are joined one by one.
+                for (std::size_t other = 0U; other < index; ++other) {
+                    if (jobs[other].input == job.input) return false;
+                }
+                plane.input = static_cast<const Sample *>(job.input);
+                plane.input_row_stride = job.input_row_stride;
+                plane.output = static_cast<Sample *>(job.output);
+                plane.output_row_stride = job.output_row_stride;
             }
-            plan_uploads.complete();
-        } catch (...) {
-            const auto error = std::current_exception();
-            if (!submitted) slot.recover_unsubmitted();
-            if (cache_producer && !cache_published) {
-                cached_input->fail(error);
-                runtime->input_cache->erase(*cache_key, cached_input);
-            }
-            std::rethrow_exception(error);
         }
-
-        if (decoupled_staging) slot_release.release_now();
-        staging.invalidate(download_offset, result_copy_bytes);
-        unpack_host_rows(
-            static_cast<const std::byte *>(staging.mapped())
-                + static_cast<std::ptrdiff_t>(download_offset),
-            result_row_bytes, output, result_pitch, destination_height);
+        return execute_2d_planes<Sample>(
+            std::span<Plane2D<Sample>>(planes.data(), jobs.size()),
+            input_lifetime, true);
     }
 
     void execute_one_dimensional(
         const AxisPlan &plan, const float *input,
         std::ptrdiff_t input_row_stride, float *output,
         std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
-        bool rows, std::shared_ptr<const void> input_lifetime) const;
+        bool rows, std::shared_ptr<const void> input_lifetime,
+        const ResidentIo *resident = nullptr) const;
 
     void execute_one_dimensional_f64(
         const AxisPlan &plan, const float *input,
         std::ptrdiff_t input_row_stride, float *output,
         std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
-        bool rows, std::shared_ptr<const void> input_lifetime) const;
+        bool rows, std::shared_ptr<const void> input_lifetime,
+        const ResidentIo *resident = nullptr) const;
 
     std::shared_ptr<Runtime> runtime;
     mutable std::mutex mutex;
@@ -3617,7 +4941,8 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
     const AxisPlan &plan, const float *input,
     std::ptrdiff_t input_row_stride, float *output,
     std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
-    bool rows, std::shared_ptr<const void> input_lifetime) const {
+    bool rows, std::shared_ptr<const void> input_lifetime,
+    const ResidentIo *resident) const {
     if (!runtime->selected.float64.strict_supported()) {
         throw std::runtime_error(runtime->selected.float64.requirement_error());
     }
@@ -3683,11 +5008,19 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
         4U, "Vulkan Float64 1D status download");
     const std::size_t staging_bytes = checked_add(
         status_download_offset, 4U, "Vulkan Float64 1D staging");
+    // Rows that lie in imported frame blocks are copied directly.
+    const HostRange source_range = resident
+        ? resident_range(*resident->source)
+        : host_range(1U, input, input_pitch, input_row_bytes, input_rows);
+    const HostRange result_range = resident
+        ? resident_range(*resident->result)
+        : host_range(2U, output, output_pitch, output_row_bytes, output_rows);
+    const ExternalWait resident_source_wait = resident_wait(resident);
     const std::size_t slot_index = runtime->acquire_slot(false, false);
     SlotRelease release(*runtime, slot_index, false);
     ExecutionSlot &slot = *runtime->slots[slot_index];
     slot.reserve(builder.size(), staging_bytes);
-    if (!reused_input) {
+    if (!reused_input && !source_range) {
         pack_host_rows(
             input, input_pitch, slot.staging.mapped(),
             input_row_bytes, input_rows);
@@ -3709,9 +5042,16 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
                 static_cast<VkDeviceSize>(source_offset) * 4U,
                 input_bytes,
             };
-            vkCmdCopyBuffer(
-                slot.command, slot.staging.handle(), slot.workspace.handle(),
-                1U, &source_copy);
+            if (source_range) {
+                record_row_copies(
+                    slot.command, source_range.buffer(), source_range.offset,
+                    input_pitch, slot.workspace.handle(), source_copy.dstOffset,
+                    input_row_bytes, input_row_bytes, input_rows);
+            } else {
+                vkCmdCopyBuffer(
+                    slot.command, slot.staging.handle(),
+                    slot.workspace.handle(), 1U, &source_copy);
+            }
             command_barrier(
                 slot.command, slot.workspace.handle(), source_copy.dstOffset,
                 source_copy.size, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3774,9 +5114,22 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
             download_offset,
             result_bytes,
         };
-        vkCmdCopyBuffer(
-            slot.command, slot.workspace.handle(), slot.staging.handle(),
-            1U, &result_copy);
+        if (result_range) {
+            record_row_copies(
+                slot.command, slot.workspace.handle(), result_copy.srcOffset,
+                output_row_bytes, result_range.buffer(), result_range.offset,
+                output_pitch, output_row_bytes, output_rows);
+            command_barrier(
+                slot.command, result_range.buffer(), result_range.offset,
+                host_blocks::plane_span(
+                    output_pitch, output_row_bytes, output_rows),
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+        } else {
+            vkCmdCopyBuffer(
+                slot.command, slot.workspace.handle(), slot.staging.handle(),
+                1U, &result_copy);
+        }
         copy_f64_status(
             slot, status_offset, slot.staging, status_download_offset);
         command_barrier(
@@ -3789,7 +5142,8 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
                        "vkEndCommandBuffer(Float64 1D inverse)");
         const std::uint64_t signal_value = runtime->submit(
             slot.command, slot.fence, input_wait_value,
-            cache_producer && runtime->timeline_enabled);
+            cache_producer && runtime->timeline_enabled,
+            resident ? &resident_source_wait : nullptr, resident ? 1U : 0U);
         submitted = true;
         if (cache_producer && runtime->timeline_enabled) {
             cached_input->publish(signal_value);
@@ -3814,21 +5168,24 @@ void VulkanExecutor::Impl::execute_one_dimensional_f64(
     require_f64_status_clear(
         static_cast<const std::byte *>(slot.staging.mapped())
             + static_cast<std::ptrdiff_t>(status_download_offset));
-    unpack_host_rows(
-        static_cast<const std::byte *>(slot.staging.mapped())
-            + static_cast<std::ptrdiff_t>(download_offset),
-        output_row_bytes, output, output_pitch, output_rows);
+    if (!result_range) {
+        unpack_host_rows(
+            static_cast<const std::byte *>(slot.staging.mapped())
+                + static_cast<std::ptrdiff_t>(download_offset),
+            output_row_bytes, output, output_pitch, output_rows);
+    }
 }
 
 void VulkanExecutor::Impl::execute_one_dimensional(
     const AxisPlan &plan, const float *input,
     std::ptrdiff_t input_row_stride, float *output,
     std::ptrdiff_t output_row_stride, std::uint32_t vector_count,
-    bool rows, std::shared_ptr<const void> input_lifetime) const {
+    bool rows, std::shared_ptr<const void> input_lifetime,
+    const ResidentIo *resident) const {
     if (plan.requires_float64()) {
         execute_one_dimensional_f64(
             plan, input, input_row_stride, output, output_row_stride,
-            vector_count, rows, std::move(input_lifetime));
+            vector_count, rows, std::move(input_lifetime), resident);
         return;
     }
     const auto packed = get(plan);
@@ -3879,14 +5236,29 @@ void VulkanExecutor::Impl::execute_one_dimensional(
     WorkspaceBuilder builder;
     const std::uint32_t source_offset = builder.add_bytes(input_bytes);
     const std::uint32_t output_offset = builder.add_bytes(output_bytes);
+    // Rows are solved with the partitioned solve, which works on vector-major
+    // data, and transposed back; that is faster than solving them in place
+    // one thread per row.
+    const bool transposed_solve =
+        rows && packed->solve_chunks != 0U && runtime->fold_transposes;
+    const std::uint32_t solved_offset =
+        transposed_solve ? builder.add_bytes(output_bytes) : output_offset;
     const std::size_t download_offset = input_bytes;
     const std::size_t staging_bytes = checked_add(
         download_offset, output_bytes, "Vulkan 1D staging");
+    // Rows that lie in imported frame blocks are copied directly.
+    const HostRange source_range = resident
+        ? resident_range(*resident->source)
+        : host_range(1U, input, input_pitch, input_row_bytes, input_rows);
+    const HostRange result_range = resident
+        ? resident_range(*resident->result)
+        : host_range(2U, output, output_pitch, output_row_bytes, output_rows);
+    const ExternalWait resident_source_wait = resident_wait(resident);
     const std::size_t slot_index = runtime->acquire_slot(false, false);
     SlotRelease release(*runtime, slot_index, false);
     ExecutionSlot &slot = *runtime->slots[slot_index];
     slot.reserve(builder.size(), staging_bytes);
-    if (!reused_input) {
+    if (!reused_input && !source_range) {
         pack_host_rows(
             input, input_pitch, slot.staging.mapped(),
             input_row_bytes, input_rows);
@@ -3908,10 +5280,21 @@ void VulkanExecutor::Impl::execute_one_dimensional(
                              : static_cast<VkDeviceSize>(source_offset) * 4U,
                 input_bytes,
             };
-            vkCmdCopyBuffer(
-                slot.command, slot.staging.handle(),
-                cached_input ? cached_input->buffer() : slot.workspace.handle(),
-                1U, &copy);
+            if (source_range) {
+                record_row_copies(
+                    slot.command, source_range.buffer(), source_range.offset,
+                    input_pitch,
+                    cached_input ? cached_input->buffer()
+                                 : slot.workspace.handle(),
+                    copy.dstOffset, input_row_bytes, input_row_bytes,
+                    input_rows);
+            } else {
+                vkCmdCopyBuffer(
+                    slot.command, slot.staging.handle(),
+                    cached_input ? cached_input->buffer()
+                                 : slot.workspace.handle(),
+                    1U, &copy);
+            }
             command_barrier(
                 slot.command,
                 cached_input ? cached_input->buffer() : slot.workspace.handle(),
@@ -3924,9 +5307,23 @@ void VulkanExecutor::Impl::execute_one_dimensional(
             cached_input ? cached_input->buffer() : VK_NULL_HANDLE,
             cached_input ? cached_input->offset() : 0U,
             cached_input ? cached_input->size() : 0U,
-            vector_count, cached_input ? 0U : source_offset, output_offset,
-            cached_input ? 1U : 0U, rows ? 1U : 0U, rows ? 1U : 0U,
+            vector_count, cached_input ? 0U : source_offset, solved_offset,
+            cached_input ? 1U : 0U, rows ? 1U : 0U,
+            rows && !transposed_solve ? 1U : 0U,
             should_split_rhs(*runtime, *packed));
+        if (transposed_solve) {
+            command_barrier(
+                slot.command, slot.workspace.handle(),
+                static_cast<VkDeviceSize>(solved_offset) * 4U, output_bytes,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            // Sample x of row y lies at x * rows + y: an image `rows` wide.
+            record_transpose(
+                *runtime, slot, *packed, VK_NULL_HANDLE, 0U, 0U,
+                vector_count, static_cast<std::uint32_t>(plan.destination_size),
+                solved_offset, output_offset, 0U, 0U, 0U, nullptr);
+        }
         command_barrier(
             slot.command, slot.workspace.handle(),
             static_cast<VkDeviceSize>(output_offset) * 4U, output_bytes,
@@ -3938,20 +5335,34 @@ void VulkanExecutor::Impl::execute_one_dimensional(
             download_offset,
             output_bytes,
         };
-        vkCmdCopyBuffer(
-            slot.command, slot.workspace.handle(), slot.staging.handle(),
-            1U, &result_copy);
-        command_barrier(
-            slot.command, slot.staging.handle(), download_offset,
-            output_bytes, VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_HOST_BIT);
+        if (result_range) {
+            record_row_copies(
+                slot.command, slot.workspace.handle(), result_copy.srcOffset,
+                output_row_bytes, result_range.buffer(), result_range.offset,
+                output_pitch, output_row_bytes, output_rows);
+            command_barrier(
+                slot.command, result_range.buffer(), result_range.offset,
+                host_blocks::plane_span(
+                    output_pitch, output_row_bytes, output_rows),
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+        } else {
+            vkCmdCopyBuffer(
+                slot.command, slot.workspace.handle(), slot.staging.handle(),
+                1U, &result_copy);
+            command_barrier(
+                slot.command, slot.staging.handle(), download_offset,
+                output_bytes, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT);
+        }
         runtime->end_label(slot.command);
         runtime->check(vkEndCommandBuffer(slot.command),
                        "vkEndCommandBuffer(1D inverse)");
         const std::uint64_t signal_value = runtime->submit(
             slot.command, slot.fence, input_wait_value,
-            cache_producer && runtime->timeline_enabled);
+            cache_producer && runtime->timeline_enabled,
+            resident ? &resident_source_wait : nullptr, resident ? 1U : 0U);
         submitted = true;
         if (cache_producer && runtime->timeline_enabled) {
             cached_input->publish(signal_value);
@@ -3972,11 +5383,13 @@ void VulkanExecutor::Impl::execute_one_dimensional(
         }
         std::rethrow_exception(error);
     }
-    slot.staging.invalidate(download_offset, output_bytes);
-    unpack_host_rows(
-        static_cast<const std::byte *>(slot.staging.mapped())
-            + static_cast<std::ptrdiff_t>(download_offset),
-        output_row_bytes, output, output_pitch, output_rows);
+    if (!result_range) {
+        slot.staging.invalidate(download_offset, output_bytes);
+        unpack_host_rows(
+            static_cast<const std::byte *>(slot.staging.mapped())
+                + static_cast<std::ptrdiff_t>(download_offset),
+            output_row_bytes, output, output_pitch, output_rows);
+    }
 }
 
 bool backend_available() noexcept {
@@ -4042,6 +5455,130 @@ void VulkanExecutor::prepare(std::shared_ptr<const AxisPlan> plan) const {
 void VulkanExecutor::seal() const {
     const std::scoped_lock lock(impl_->mutex);
     impl_->sealed.store(true, std::memory_order_release);
+}
+
+
+namespace {
+
+// One runtime per borrowed device, shared by every executor on that core and
+// gone with the last of them: it must not outlive the core's device.
+[[nodiscard]] std::shared_ptr<Runtime> borrowed_runtime(
+    const VulkanCoreDevice &device) {
+    static std::mutex mutex;
+    static std::map<void *, std::weak_ptr<Runtime>> runtimes;
+    const std::scoped_lock lock(mutex);
+    if (auto found = runtimes.find(device.device); found != runtimes.end()) {
+        if (auto existing = found->second.lock()) return existing;
+    }
+    auto created = std::make_shared<Runtime>(device);
+    runtimes[device.device] = created;
+    return created;
+}
+
+// A stride in elements of `element_bytes`; GPU frame pitches are multiples of
+// the sample size.
+[[nodiscard]] std::ptrdiff_t resident_stride(
+    const GpuPlane &plane, std::size_t element_bytes = sizeof(float)) {
+    if (plane.buffer == 0U || plane.pitch_bytes <= 0
+        || plane.pitch_bytes % static_cast<std::ptrdiff_t>(element_bytes) != 0) {
+        throw std::invalid_argument("invalid GPU plane");
+    }
+    return plane.pitch_bytes / static_cast<std::ptrdiff_t>(element_bytes);
+}
+
+} // namespace
+
+VulkanExecutor::VulkanExecutor(const VulkanCoreDevice &device)
+    : impl_(std::make_shared<Impl>(borrowed_runtime(device))) {}
+
+void VulkanExecutor::inverse_rows_resident(
+    const AxisPlan &plan, const GpuPlane &input, const GpuPlane &output,
+    std::int32_t row_count) const {
+    if (!plan.valid() || row_count < 0) {
+        throw std::invalid_argument("invalid Vulkan row executor arguments");
+    }
+    if (row_count == 0) return;
+    const ResidentIo io{&input, &output};
+    // The host pointers are never dereferenced when both sides are resident.
+    impl_->execute_one_dimensional(
+        plan, reinterpret_cast<const float *>(&io), resident_stride(input),
+        const_cast<float *>(reinterpret_cast<const float *>(&io)), resident_stride(output),
+        static_cast<std::uint32_t>(row_count), true, {}, &io);
+}
+
+void VulkanExecutor::inverse_columns_resident(
+    const AxisPlan &plan, const GpuPlane &input, const GpuPlane &output,
+    std::int32_t column_count) const {
+    if (!plan.valid() || column_count < 0) {
+        throw std::invalid_argument("invalid Vulkan column executor arguments");
+    }
+    if (column_count == 0) return;
+    const ResidentIo io{&input, &output};
+    impl_->execute_one_dimensional(
+        plan, reinterpret_cast<const float *>(&io), resident_stride(input),
+        const_cast<float *>(reinterpret_cast<const float *>(&io)), resident_stride(output),
+        static_cast<std::uint32_t>(column_count), false, {}, &io);
+}
+
+void VulkanExecutor::inverse_2d_u8_resident(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const GpuPlane &input, const GpuPlane &output,
+    const IntegerConversion &conversion) const {
+    if (!horizontal.valid() || !vertical.valid()
+        || !valid_conversion<std::uint8_t>(conversion)) {
+        throw std::invalid_argument("invalid Vulkan u8 2D arguments");
+    }
+    const ResidentIo io{&input, &output};
+    const auto *host = reinterpret_cast<const std::uint8_t *>(&io);
+    impl_->execute_2d<std::uint8_t>(
+        horizontal, vertical, host, resident_stride(input, 1U),
+        const_cast<std::uint8_t *>(host), resident_stride(output, 1U),
+        &conversion, {}, &io);
+}
+
+void VulkanExecutor::inverse_2d_u16_resident(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const GpuPlane &input, const GpuPlane &output,
+    const IntegerConversion &conversion) const {
+    if (!horizontal.valid() || !vertical.valid()
+        || !valid_conversion<std::uint16_t>(conversion)) {
+        throw std::invalid_argument("invalid Vulkan u16 2D arguments");
+    }
+    const ResidentIo io{&input, &output};
+    const auto *host = reinterpret_cast<const std::uint16_t *>(&io);
+    impl_->execute_2d<std::uint16_t>(
+        horizontal, vertical, host, resident_stride(input, 2U),
+        const_cast<std::uint16_t *>(host), resident_stride(output, 2U),
+        &conversion, {}, &io);
+}
+
+void VulkanExecutor::inverse_2d_resident(
+    const AxisPlan &horizontal, const AxisPlan &vertical,
+    const GpuPlane &input, const GpuPlane &output) const {
+    if (!horizontal.valid() || !vertical.valid()) {
+        throw std::invalid_argument("invalid Vulkan 2D executor arguments");
+    }
+    const ResidentIo io{&input, &output};
+    impl_->execute_2d<float>(
+        horizontal, vertical, reinterpret_cast<const float *>(&io),
+        resident_stride(input), const_cast<float *>(reinterpret_cast<const float *>(&io)),
+        resident_stride(output), nullptr, {}, &io);
+}
+
+bool VulkanExecutor::inverse_2d_frame(
+    SampleKind kind, std::span<const FramePlane2D> planes, bool gpu_frame,
+    const std::shared_ptr<const void> &input_lifetime) const {
+    switch (kind) {
+    case SampleKind::float32:
+        return impl_->execute_2d_frame<float>(planes, gpu_frame, input_lifetime);
+    case SampleKind::u8:
+        return impl_->execute_2d_frame<std::uint8_t>(
+            planes, gpu_frame, input_lifetime);
+    case SampleKind::u16:
+        return impl_->execute_2d_frame<std::uint16_t>(
+            planes, gpu_frame, input_lifetime);
+    }
+    return false;
 }
 
 void VulkanExecutor::inverse_rows(

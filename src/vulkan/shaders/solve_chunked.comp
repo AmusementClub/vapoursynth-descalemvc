@@ -1,0 +1,282 @@
+#version 460
+#extension GL_EXT_control_flow_attributes : require
+
+// Partitioned in-place LDL^T solve of column-major vectors (element i of
+// vector v at output + i * vector_count + v); see src/solve_partition.hpp.
+// A workgroup holds 32 vectors (x) and DSMVC_CHUNKS chunks of each (y). The
+// arithmetic per element is that of inverse.comp with DSMVC_SOLVE_ONLY.
+//
+// Push constants: [1] size, [3] vector count, [5] output word offset,
+// [12] lower, [13] upper, [14] inverse diagonal, [15] transfer matrices
+// (plan words), [16] chunk length, [17] chunk count (equals the workgroup's
+// y size; read from a push constant so that the driver does not unroll the
+// carry loop over it).
+
+#ifndef DSMVC_FIXED_BANDWIDTH
+#error "DSMVC_FIXED_BANDWIDTH is required"
+#endif
+#define W DSMVC_FIXED_BANDWIDTH
+#define BATCH 8U
+
+#ifndef DSMVC_CHUNKS
+#error "DSMVC_CHUNKS is required"
+#endif
+// A fixed workgroup size per variant: with the chunk count as a
+// specialization constant, NVIDIA's driver intermittently hung or crashed in
+// its background shader compiler (driver 615.71.09).
+layout(local_size_x = 32, local_size_y = DSMVC_CHUNKS, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly restrict buffer PlanBuffer {
+    uint plan_data[];
+};
+layout(set = 0, binding = 1, std430) restrict buffer WorkspaceBuffer {
+    uint workspace_data[];
+};
+layout(push_constant, std430) uniform PushConstants {
+    uint value[32];
+} pc;
+
+// Per chunk and vector: first the end state from a zero carry-in, then the
+// true carry-in.
+shared float carry[32U * W * 32U];
+
+float recent[W];
+
+uint element(uint index, uint vector) {
+    return pc.value[5] + index * pc.value[3] + vector;
+}
+
+float lower_factor(uint distance, uint index) {
+    return uintBitsToFloat(
+        plan_data[pc.value[12] + (distance - 1U) * pc.value[1] + index]);
+}
+
+float upper_factor(uint distance, uint index) {
+    return uintBitsToFloat(
+        plan_data[pc.value[13] + (distance - 1U) * pc.value[1] + index]);
+}
+
+void shift_in(float value) {
+    [[unroll]]
+    for (uint distance = W - 1U; distance > 0U; --distance) {
+        recent[distance] = recent[distance - 1U];
+    }
+    recent[0] = value;
+}
+
+void clear_recent() {
+    [[unroll]]
+    for (uint k = 0U; k < W; ++k) {
+        recent[k] = 0.0;
+    }
+}
+
+void chunk_forward(uint vector, uint begin, uint end, bool store) {
+    for (uint base = begin; base < end; base += BATCH) {
+        float values[BATCH];
+        [[unroll]]
+        for (uint offset = 0U; offset < BATCH; ++offset) {
+            if (base + offset < end) {
+                values[offset] = uintBitsToFloat(
+                    workspace_data[element(base + offset, vector)]);
+            }
+        }
+        [[unroll]]
+        for (uint offset = 0U; offset < BATCH; ++offset) {
+            const uint index = base + offset;
+            if (index < end) {
+                float sum = values[offset];
+                const uint available = min(uint(W), index);
+                [[unroll]]
+                for (uint distance = W; distance > 0U; --distance) {
+                    if (distance <= available) {
+                        sum = fma(
+                            -lower_factor(distance, index),
+                            recent[distance - 1U], sum);
+                    }
+                }
+                const float current = sum
+                    * uintBitsToFloat(plan_data[pc.value[14] + index]);
+                if (store) {
+                    workspace_data[element(index, vector)] =
+                        floatBitsToUint(current);
+                }
+                shift_in(current);
+            }
+        }
+    }
+}
+
+// Indices end - 1 down to begin.
+void chunk_backward(uint vector, uint begin, uint end, bool store) {
+    const uint size = pc.value[1];
+    for (uint top = end; top > begin;) {
+        const uint count = min(BATCH, top - begin);
+        float values[BATCH];
+        [[unroll]]
+        for (uint offset = 0U; offset < BATCH; ++offset) {
+            if (offset < count) {
+                values[offset] = uintBitsToFloat(
+                    workspace_data[element(top - 1U - offset, vector)]);
+            }
+        }
+        [[unroll]]
+        for (uint offset = 0U; offset < BATCH; ++offset) {
+            if (offset < count) {
+                const uint index = top - 1U - offset;
+                const uint available = min(uint(W), size - index - 1U);
+                float sum = 0.0;
+#if W == 3
+                [[unroll]]
+                for (uint distance = 1U; distance <= W; ++distance) {
+                    if (distance <= available) {
+                        sum = fma(
+                            upper_factor(distance, index),
+                            recent[distance - 1U], sum);
+                    }
+                }
+#else
+                [[unroll]]
+                for (uint distance = W; distance > 0U; --distance) {
+                    if (distance <= available) {
+                        sum = fma(
+                            upper_factor(distance, index),
+                            recent[distance - 1U], sum);
+                    }
+                }
+#endif
+                const float current = values[offset] - sum;
+                if (store) {
+                    workspace_data[element(index, vector)] =
+                        floatBitsToUint(current);
+                }
+                shift_in(current);
+            }
+        }
+        top -= count;
+    }
+}
+
+uint carry_index(uint chunk, uint k, uint lane) {
+    return (chunk * W + k) * 32U + lane;
+}
+
+void carry_across_chunks(uint lane, uint chunks, bool reverse, uint matrices) {
+    float incoming[W];
+    const uint first = reverse ? chunks - 1U : 0U;
+    [[unroll]]
+    for (uint k = 0U; k < W; ++k) {
+        incoming[k] = carry[carry_index(first, k, lane)];
+    }
+    if (!reverse) {
+        [[unroll]]
+        for (uint k = 0U; k < W; ++k) {
+            carry[carry_index(0U, k, lane)] = 0.0;
+        }
+    }
+    for (uint step = 1U; step < chunks; ++step) {
+        const uint chunk = reverse ? chunks - 1U - step : step;
+        const uint matrix = matrices + chunk * W * W;
+        float next[W];
+        [[unroll]]
+        for (uint row = 0U; row < W; ++row) {
+            float sum = carry[carry_index(chunk, row, lane)];
+            [[unroll]]
+            for (uint k = 0U; k < W; ++k) {
+                sum = fma(
+                    uintBitsToFloat(plan_data[matrix + row * W + k]),
+                    incoming[k], sum);
+            }
+            next[row] = sum;
+        }
+        [[unroll]]
+        for (uint k = 0U; k < W; ++k) {
+            carry[carry_index(chunk, k, lane)] = incoming[k];
+            incoming[k] = next[k];
+        }
+    }
+}
+
+void store_own(uint chunk, uint lane) {
+    [[unroll]]
+    for (uint k = 0U; k < W; ++k) {
+        carry[carry_index(chunk, k, lane)] = recent[k];
+    }
+}
+
+void load_own(uint chunk, uint lane) {
+    [[unroll]]
+    for (uint k = 0U; k < W; ++k) {
+        recent[k] = carry[carry_index(chunk, k, lane)];
+    }
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint chunk = gl_LocalInvocationID.y;
+    const uint chunks = pc.value[17];
+    const uint size = pc.value[1];
+    const uint vector_count = pc.value[3];
+    const uint vector = gl_WorkGroupID.x * 32U + lane;
+    const bool in_range = vector < vector_count;
+    const bool last = chunk + 1U == chunks;
+    const uint begin = min(size, chunk * pc.value[16]);
+    const uint end = min(size, begin + pc.value[16]);
+    const uint matrices = pc.value[15];
+
+    // Each substitution runs in two passes, from a zero carry-in (keeping only
+    // the end state) and then from the true carry-in. The passes are one
+    // rolled loop rather than two inlined copies of the unrolled solve: the
+    // copies made NVIDIA's compiler spend seconds on this shader.
+
+    // Forward substitution. The first chunk's carry-in is zero; the last
+    // chunk's end state is never needed.
+    clear_recent();
+    [[dont_unroll]]
+    for (uint pass = 0U; pass < 2U; ++pass) {
+        const bool store = pass == 1U;
+        if (in_range && (store || !last)) {
+            chunk_forward(vector, begin, end, store);
+        }
+        if (!store) {
+            store_own(chunk, lane);
+            barrier();
+            if (chunk == 0U) {
+                carry_across_chunks(lane, chunks, false, matrices);
+            }
+            barrier();
+            load_own(chunk, lane);
+        }
+    }
+    memoryBarrierBuffer();
+    barrier();
+
+    // Backward substitution. The last sample is final; the last chunk starts
+    // from it, and the first chunk's end state is never needed.
+    const uint backward_end = min(end, size - 1U);
+    [[dont_unroll]]
+    for (uint pass = 0U; pass < 2U; ++pass) {
+        const bool store = pass == 1U;
+        if (!store || last) {
+            clear_recent();
+            if (last && in_range) {
+                recent[0] = uintBitsToFloat(
+                    workspace_data[element(size - 1U, vector)]);
+            }
+        }
+        if (in_range && (store || chunk != 0U)) {
+            chunk_backward(vector, begin, backward_end, store);
+        }
+        if (!store) {
+            store_own(chunk, lane);
+            barrier();
+            if (chunk == 0U) {
+                carry_across_chunks(lane, chunks, true, matrices + chunks * W * W);
+            }
+            barrier();
+            if (!last) {
+                load_own(chunk, lane);
+            }
+        }
+    }
+}

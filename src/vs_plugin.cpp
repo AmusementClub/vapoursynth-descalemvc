@@ -1,4 +1,6 @@
 #include <dsmvc/engine.hpp>
+#include <dsmvc/host_blocks.hpp>
+#include "vs_frame_memory.hpp"
 
 #if defined(DSMVC_HAS_METAL)
 #include "metal_scheduler_apple.hpp"
@@ -7,6 +9,9 @@
 
 #include <VapourSynth4.h>
 #include <VSHelper4.h>
+#if defined(DSMVC_HAS_VS_GPU)
+#include <VSVulkan4.h>
+#endif
 
 #if defined(DSMVC_HAS_CUDA)
 #include "nvtx.hpp"
@@ -26,10 +31,12 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -110,6 +117,13 @@ struct FilterData {
     VSFunction *custom_kernel = nullptr;
     CustomKernel custom_callback;
     Executor executor{};
+    // Set once the filter is created: this filter reports its frames' pool
+    // blocks so that the backend can transfer to and from them directly.
+    std::optional<dsmvc::host_blocks::Domain> direct_domain;
+    VSCore *direct_core = nullptr;
+    // CUDA on GPU frames: the core exports its timeline semaphores
+    // (DSMVC_CUDA_GPU_FRAME_WAIT=host keeps the host wait).
+    std::atomic<bool> exported_semaphores{false};
     std::atomic<std::uint32_t> active_2d_frames{0};
 #if defined(DSMVC_HAS_METAL)
     bool metal_enabled = false;
@@ -1042,6 +1056,372 @@ void set_cpu_plan_packing_properties(
 }
 #endif
 
+#if defined(DSMVC_HAS_VS_GPU)
+// ---- GPU frames (VapourSynth R81 and later, API 4.3) ----------------------
+//
+// The plugin is built against the 4.3 headers for the table layout but still
+// declares API 4.0 to the core, so it loads on every core. The 4.3 members are
+// touched only when the core reports 4.3 and is one this plugin was tested on
+// (VSVULKANAPI has no version of its own: an untested header layout would call
+// the neighbouring function). DSMVC_GPU_FRAMES=0 turns GPU frames off and
+// =force allows an untested core.
+constexpr int tested_gpu_core = 81;
+
+bool gpu_frames_usable(VSCore *core, const VSAPI *vsapi) {
+    const char *mode = std::getenv("DSMVC_GPU_FRAMES");
+    const std::string_view text = mode ? std::string_view{mode} : std::string_view{};
+    if (text == "0") return false;
+    if (!vsapi->getAPIVersion || vsapi->getAPIVersion() < VS_MAKE_VERSION(4, 3)) {
+        return false;
+    }
+    VSCoreInfo info{};
+    vsapi->getCoreInfo(core, &info);
+    if (info.api < VS_MAKE_VERSION(4, 3)) return false;
+    return text == "force" || info.core == tested_gpu_core;
+}
+
+struct QueueLockContext {
+    const VSVULKANAPI *vulkan;
+    VSCore *core;
+};
+
+void lock_core_queue(void *user) {
+    const auto *context = static_cast<const QueueLockContext *>(user);
+    context->vulkan->lockVulkanQueue(context->core, vqCompute);
+}
+
+void unlock_core_queue(void *user) {
+    const auto *context = static_cast<const QueueLockContext *>(user);
+    context->vulkan->unlockVulkanQueue(context->core, vqCompute);
+}
+
+// Runs the kernels on the core's own Vulkan device, so GPU frames are read and
+// written in place.
+Executor make_resident_executor(
+    VSCore *core, const VSAPI *vsapi, BackendKind backend) {
+    const VSVULKANAPI *vulkan = vsapi->getVulkanAPI();
+    char error[512] = {};
+    if (backend == BackendKind::cuda) {
+        // CUDA shares the GPU through exported memory and has to be the same
+        // physical device as the core's Vulkan device (matched by UUID).
+        VSVulkanCoreInfo info{};
+        if (vulkan->getVulkanCoreInfo(core, &info, error, sizeof(error)) != 0) {
+            throw std::runtime_error(
+                std::string{"the core has no usable Vulkan device: "} + error);
+        }
+        if (info.exportHandleType == 0) {
+            throw std::runtime_error(
+                "the core cannot export GPU memory, so CUDA cannot read its "
+                "frames; use backend=\"vulkan\" or std.GPUDownload");
+        }
+        return Executor::on_core_cuda(info.deviceUUID);
+    }
+    VSVulkanCoreHandles handles{};
+    if (vulkan->getVulkanHandles(core, &handles, error, sizeof(error)) != 0) {
+        throw std::runtime_error(
+            std::string{"the core has no usable Vulkan device: "} + error);
+    }
+    static std::mutex mutex;
+    static std::map<VSCore *, std::unique_ptr<QueueLockContext>> contexts;
+    QueueLockContext *context = nullptr;
+    {
+        const std::scoped_lock lock(mutex);
+        auto &slot = contexts[core];
+        if (!slot) slot = std::make_unique<QueueLockContext>(
+            QueueLockContext{vulkan, core});
+        context = slot.get();
+    }
+    dsmvc::VulkanCoreDevice device;
+    device.instance = handles.instance;
+    device.physical_device = handles.physicalDevice;
+    device.device = handles.device;
+    device.queue_family = handles.computeQueueFamily;
+    device.queue_index = handles.computeQueueIndex;
+    device.lock_queue = lock_core_queue;
+    device.unlock_queue = unlock_core_queue;
+    device.user = context;
+    return Executor::on_core_vulkan(device);
+}
+
+dsmvc::GpuPlane gpu_plane(
+    const VSVULKANAPI *vulkan, const VSAPI *vsapi, const VSFrame *frame,
+    int plane) {
+    VSVulkanPlaneInfo info{};
+    if (vulkan->getGPUPlane(frame, plane, &info) != 0) {
+        throw std::runtime_error("frame plane is not GPU resident");
+    }
+    dsmvc::GpuPlane result;
+    result.buffer = reinterpret_cast<std::uint64_t>(info.buffer);
+    result.buffer_bytes = info.bufferSize;
+    result.ready_semaphore = reinterpret_cast<std::uint64_t>(info.readySemaphore);
+    result.ready_value = info.readyValue;
+    result.pitch_bytes = vsapi->getStride(frame, plane);
+    return result;
+}
+
+const VSFrame *process_gpu_frame(
+    FilterData &data, int frame_number, VSFrameContext *frame_context,
+    VSCore *core, const VSAPI *vsapi) {
+    const VSFrame *source = vsapi->getFrameFilter(
+        frame_number, data.node, frame_context);
+    VSFrame *destination = nullptr;
+    try {
+        ensure_filter_plans(data, vsapi);
+        const VSVULKANAPI *vulkan = vsapi->getVulkanAPI();
+        destination = vulkan->newGPUVideoFrame(
+            &data.vi.format, data.destination_width, data.destination_height,
+            source, core);
+        if (!destination) {
+            throw std::runtime_error("failed to allocate a GPU output frame");
+        }
+        const int range = data.fused_integer
+            ? frame_range(source, data.color_family, vsapi) : 0;
+        if (data.fused_integer) {
+            vsapi->mapSetInt(
+                vsapi->getFramePropertiesRW(destination), "_Range", range,
+                maReplace);
+        }
+        // The planes of a 2D frame go to the device in one submission.
+        if (data.num_planes > 1
+            && (data.fused_integer
+                || (data.process_horizontal && data.process_vertical))) {
+            std::array<dsmvc::FramePlane2D, 3> jobs{};
+            for (int plane = 0; plane < data.num_planes; ++plane) {
+                auto &job = jobs[static_cast<std::size_t>(plane)];
+                job.horizontal = data.horizontal[
+                    plane != 0 && data.subsampling_w > 0].get();
+                job.vertical = data.vertical[
+                    plane != 0 && data.subsampling_h > 0].get();
+                job.gpu_input = gpu_plane(vulkan, vsapi, source, plane);
+                job.gpu_output = gpu_plane(vulkan, vsapi, destination, plane);
+                if (data.fused_integer) {
+                    job.conversion = integer_conversion(data, plane, range);
+                }
+            }
+            const auto kind = !data.fused_integer
+                ? dsmvc::SampleKind::float32
+                : data.bytes_per_sample == 1 ? dsmvc::SampleKind::u8
+                                             : dsmvc::SampleKind::u16;
+            if (data.executor.inverse_2d_frame(
+                    kind, std::span<const dsmvc::FramePlane2D>(
+                              jobs.data(),
+                              static_cast<std::size_t>(data.num_planes)))) {
+                vsapi->freeFrame(source);
+                return destination;
+            }
+        }
+        for (int plane = 0; plane < data.num_planes; ++plane) {
+            const int horizontal_index = plane != 0 && data.subsampling_w > 0;
+            const int vertical_index = plane != 0 && data.subsampling_h > 0;
+            const auto input = gpu_plane(vulkan, vsapi, source, plane);
+            const auto output = gpu_plane(vulkan, vsapi, destination, plane);
+            if (data.fused_integer) {
+                const auto conversion = integer_conversion(data, plane, range);
+                if (data.bytes_per_sample == 1) {
+                    data.executor.inverse_2d_u8_resident(
+                        *data.horizontal[horizontal_index],
+                        *data.vertical[vertical_index], input, output,
+                        conversion);
+                } else {
+                    data.executor.inverse_2d_u16_resident(
+                        *data.horizontal[horizontal_index],
+                        *data.vertical[vertical_index], input, output,
+                        conversion);
+                }
+                continue;
+            }
+            if (data.process_horizontal && data.process_vertical) {
+                data.executor.inverse_2d_resident(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index], input, output);
+            } else if (data.process_horizontal) {
+                data.executor.inverse_rows_resident(
+                    *data.horizontal[horizontal_index], input, output,
+                    data.source_height >> (plane != 0 ? data.subsampling_h : 0));
+            } else {
+                data.executor.inverse_columns_resident(
+                    *data.vertical[vertical_index], input, output,
+                    data.source_width >> (plane != 0 ? data.subsampling_w : 0));
+            }
+        }
+        vsapi->freeFrame(source);
+        return destination;
+    } catch (const std::exception &error) {
+        if (destination) vsapi->freeFrame(destination);
+        vsapi->freeFrame(source);
+        const std::string message = "dsmvc: GPU frame processing failed: "
+            + std::string{error.what()};
+        vsapi->setFilterError(message.c_str(), frame_context);
+        return nullptr;
+    }
+}
+
+
+dsmvc::ExportedPlane export_gpu_plane(
+    const VSVULKANAPI *vulkan, const VSAPI *vsapi, const VSFrame *frame,
+    int plane) {
+    char error[512] = {};
+    VSVulkanExportedMemory exported{};
+    if (vulkan->exportGPUPlane(frame, plane, &exported, error, sizeof(error)) != 0) {
+        throw std::runtime_error(std::string{"exportGPUPlane: "} + error);
+    }
+    dsmvc::ExportedPlane result;
+    result.memory_id = exported.memoryId;
+    result.memory_size = exported.memorySize;
+    result.offset = exported.offset;
+    result.plane_bytes = exported.size;
+    result.handle_type = exported.handleType;
+    result.handle = exported.handle;
+    result.pitch_bytes = vsapi->getStride(frame, plane);
+    return result;
+}
+
+// CUDA on GPU frames: the input is taken over read-only with
+// getExportableFrameFilter, its producers are waited for on the host, and the
+// output is written by CUDA and synchronized before it is returned. The
+// handles of both exports belong to the executor from the moment of the call.
+const VSFrame *process_exported_frame(
+    FilterData &data, int frame_number, VSFrameContext *frame_context,
+    VSCore *core, const VSAPI *vsapi) {
+    const VSVULKANAPI *vulkan = vsapi->getVulkanAPI();
+    char error[512] = {};
+    const VSFrame *source = vulkan->getExportableFrameFilter(
+        frame_number, data.node, frame_context, error, sizeof(error));
+    if (!source) {
+        const std::string message = std::string{"dsmvc: GPU frame handover failed: "}
+            + error;
+        vsapi->setFilterError(message.c_str(), frame_context);
+        return nullptr;
+    }
+    VSFrame *destination = nullptr;
+    try {
+        ensure_filter_plans(data, vsapi);
+        // The producers of the input are waited for on the CUDA stream,
+        // through the core's exported timeline semaphores; where that is not
+        // possible, on the host (one submission round trip per frame).
+        std::array<VSVulkanPlaneInfo, 3> ready{};
+        bool device_wait =
+            data.exported_semaphores.load(std::memory_order_relaxed);
+        for (int plane = 0; device_wait && plane < data.num_planes; ++plane) {
+            auto &info = ready[static_cast<std::size_t>(plane)];
+            if (vulkan->getGPUPlane(source, plane, &info) != 0) {
+                device_wait = false;
+                break;
+            }
+            const auto key = reinterpret_cast<std::uint64_t>(info.readySemaphore);
+            if (key == 0U || data.executor.has_exported_semaphore(key)) continue;
+            VSVulkanExportedSemaphore exported{};
+            device_wait =
+                vulkan->exportGPUSemaphore(
+                    core, info.readySemaphore, &exported, error,
+                    sizeof(error)) == 0
+                && data.executor.import_exported_semaphore(
+                    key, exported.handleType, exported.handle);
+        }
+        if (!device_wait) {
+            // Not retried: a semaphore that cannot be imported stays that way.
+            data.exported_semaphores.store(false, std::memory_order_relaxed);
+            if (vulkan->waitGPUFrame(source, error, sizeof(error)) != 0) {
+                throw std::runtime_error(std::string{"waitGPUFrame: "} + error);
+            }
+        }
+        destination = vulkan->newGPUVideoFrame(
+            &data.vi.format, data.destination_width, data.destination_height,
+            source, core);
+        if (!destination) {
+            throw std::runtime_error("failed to allocate a GPU output frame");
+        }
+        const int range = data.fused_integer
+            ? frame_range(source, data.color_family, vsapi) : 0;
+        if (data.fused_integer) {
+            vsapi->mapSetInt(
+                vsapi->getFramePropertiesRW(destination), "_Range", range,
+                maReplace);
+        }
+        for (int plane = 0; plane < data.num_planes; ++plane) {
+            const int horizontal_index = plane != 0 && data.subsampling_w > 0;
+            const int vertical_index = plane != 0 && data.subsampling_h > 0;
+            auto input = export_gpu_plane(vulkan, vsapi, source, plane);
+            if (device_wait) {
+                const auto &info = ready[static_cast<std::size_t>(plane)];
+                input.ready_semaphore =
+                    reinterpret_cast<std::uint64_t>(info.readySemaphore);
+                input.ready_value = info.readyValue;
+            }
+            dsmvc::ExportedPlane output;
+            try {
+                output = export_gpu_plane(vulkan, vsapi, destination, plane);
+            } catch (...) {
+                dsmvc::close_exported_plane(input);
+                throw;
+            }
+            if (data.fused_integer) {
+                const auto conversion = integer_conversion(data, plane, range);
+                if (data.bytes_per_sample == 1) {
+                    data.executor.inverse_2d_u8_exported(
+                        *data.horizontal[horizontal_index],
+                        *data.vertical[vertical_index], input, output,
+                        conversion);
+                } else {
+                    data.executor.inverse_2d_u16_exported(
+                        *data.horizontal[horizontal_index],
+                        *data.vertical[vertical_index], input, output,
+                        conversion);
+                }
+                continue;
+            }
+            if (data.process_horizontal && data.process_vertical) {
+                data.executor.inverse_2d_exported(
+                    *data.horizontal[horizontal_index],
+                    *data.vertical[vertical_index], input, output);
+            } else if (data.process_horizontal) {
+                data.executor.inverse_rows_exported(
+                    *data.horizontal[horizontal_index], input, output,
+                    data.source_height >> (plane != 0 ? data.subsampling_h : 0));
+            } else {
+                data.executor.inverse_columns_exported(
+                    *data.vertical[vertical_index], input, output,
+                    data.source_width >> (plane != 0 ? data.subsampling_w : 0));
+            }
+        }
+        vsapi->freeFrame(source);
+        return destination;
+    } catch (const std::exception &failure) {
+        if (destination) vsapi->freeFrame(destination);
+        vsapi->freeFrame(source);
+        const std::string message = "dsmvc: CUDA GPU frame processing failed: "
+            + std::string{failure.what()};
+        vsapi->setFilterError(message.c_str(), frame_context);
+        return nullptr;
+    }
+}
+
+// An explicit cpu (or metal) backend on a GPU clip is a deliberate boundary:
+// download once and continue on the host path. Takes over `node`, which is
+// null from the moment the argument map owns it.
+VSNode *download_gpu_node(VSNode *&node, VSCore *core, const VSAPI *vsapi) {
+    VSPlugin *standard = vsapi->getPluginByID(VSH_STD_PLUGIN_ID, core);
+    if (!standard) throw std::runtime_error("std plugin lookup failed");
+    VSMap *arguments = vsapi->createMap();
+    vsapi->mapConsumeNode(arguments, "clip", node, maReplace);
+    node = nullptr;
+    VSMap *result = vsapi->invoke(standard, "GPUDownload", arguments);
+    vsapi->freeMap(arguments);
+    if (const char *error = vsapi->mapGetError(result)) {
+        const std::string message{error};
+        vsapi->freeMap(result);
+        throw std::runtime_error("std.GPUDownload failed: " + message);
+    }
+    int node_error = 0;
+    VSNode *downloaded = vsapi->mapGetNode(result, "clip", 0, &node_error);
+    vsapi->freeMap(result);
+    if (node_error || !downloaded) {
+        throw std::runtime_error("std.GPUDownload returned no clip");
+    }
+    return downloaded;
+}
+#endif
+
 const VSFrame *VS_CC filter_get_frame(
     int frame_number, int activation_reason, void *instance_data, void **,
     VSFrameContext *frame_context, VSCore *core, const VSAPI *vsapi) {
@@ -1051,6 +1431,15 @@ const VSFrame *VS_CC filter_get_frame(
         return nullptr;
     }
     if (activation_reason != arAllFramesReady) return nullptr;
+#if defined(DSMVC_HAS_VS_GPU)
+    if (data->executor.resident_kind() == dsmvc::ResidentKind::vulkan) {
+        return process_gpu_frame(*data, frame_number, frame_context, core, vsapi);
+    }
+    if (data->executor.resident_kind() == dsmvc::ResidentKind::cuda) {
+        return process_exported_frame(
+            *data, frame_number, frame_context, core, vsapi);
+    }
+#endif
 
     const VSFrame *source = vsapi->getFrameFilter(
         frame_number, data->node, frame_context);
@@ -1160,6 +1549,45 @@ const VSFrame *VS_CC filter_get_frame(
                 range, maReplace);
         }
 
+        if (data->direct_domain) {
+            dsmvc::vs_frame_memory::note_frame(
+                core, vsapi, *data->direct_domain, source);
+            dsmvc::vs_frame_memory::note_frame(
+                core, vsapi, *data->direct_domain, destination);
+        }
+
+        // The planes of a Vulkan 2D frame go to the device in one submission.
+        bool frame_submitted = false;
+        if (data->executor.backend() == BackendKind::vulkan
+            && data->num_planes > 1 && (data->fused_integer || adaptive_2d)) {
+            std::array<dsmvc::FramePlane2D, 3> jobs{};
+            for (int plane = 0; plane < data->num_planes; ++plane) {
+                auto &job = jobs[static_cast<std::size_t>(plane)];
+                job.horizontal = data->horizontal[
+                    plane != 0 && data->subsampling_w > 0].get();
+                job.vertical = data->vertical[
+                    plane != 0 && data->subsampling_h > 0].get();
+                job.input = vsapi->getReadPtr(source, plane);
+                job.input_row_stride = vsapi->getStride(source, plane)
+                    / data->bytes_per_sample;
+                job.output = vsapi->getWritePtr(destination, plane);
+                job.output_row_stride = vsapi->getStride(destination, plane)
+                    / data->bytes_per_sample;
+                if (data->fused_integer) {
+                    job.conversion = integer_conversion(*data, plane, range);
+                }
+            }
+            const auto kind = !data->fused_integer
+                ? dsmvc::SampleKind::float32
+                : data->bytes_per_sample == 1 ? dsmvc::SampleKind::u8
+                                              : dsmvc::SampleKind::u16;
+            frame_submitted = data->executor.inverse_2d_frame(
+                kind, std::span<const dsmvc::FramePlane2D>(
+                          jobs.data(),
+                          static_cast<std::size_t>(data->num_planes)),
+                source_lifetime);
+        }
+
 #if defined(DSMVC_HAS_METAL)
         if (use_metal) {
             if (data->fused_integer) {
@@ -1204,6 +1632,7 @@ const VSFrame *VS_CC filter_get_frame(
                 destination, data->executor.cpu_plan_packing_stats(), vsapi);
         } else
 #endif
+        if (!frame_submitted)
         for (int plane = 0; plane < data->num_planes; ++plane) {
 #if defined(DSMVC_HAS_CUDA)
             std::optional<dsmvc::cuda_detail::NvtxRange> plane_trace;
@@ -1335,6 +1764,10 @@ void VS_CC filter_free(void *instance_data, VSCore *, const VSAPI *vsapi) {
 #endif
     if (data->custom_kernel) vsapi->freeFunction(data->custom_kernel);
     if (data->node) vsapi->freeNode(data->node);
+    if (data->direct_domain) {
+        dsmvc::vs_frame_memory::detach(
+            data->direct_core, vsapi, *data->direct_domain);
+    }
     delete data;
 }
 
@@ -1376,13 +1809,64 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             return;
         }
 
-        const bool fused_integer =
+        // Fused 8-16 bit integer descale (both axes change); one axis or
+        // other formats go through a float conversion subgraph.
+        bool fused_integer =
             source_info->format.sampleType == stInteger
             && source_info->format.bitsPerSample >= 8
             && source_info->format.bitsPerSample <= 16
             && (source_info->format.bytesPerSample == 1
                 || source_info->format.bytesPerSample == 2)
             && process_horizontal && process_vertical;
+        bool resident = false;
+        [[maybe_unused]] BackendKind resident_backend = BackendKind::vulkan;
+#if defined(DSMVC_HAS_VS_GPU)
+        // getNodeResidency belongs to the 4.3 VSAPI table, so it is safe on any
+        // 4.3 core; the Vulkan table behind it is used only on tested cores.
+        if (vsapi->getAPIVersion
+            && vsapi->getAPIVersion() >= VS_MAKE_VERSION(4, 3)
+            && vsapi->getNodeResidency(source) == nrGPU) {
+            const bool usable = gpu_frames_usable(core, vsapi);
+            bool host_backend = !usable || parsed.backend == BackendKind::cpu;
+#if defined(DSMVC_HAS_METAL)
+            host_backend = host_backend || parsed.backend == BackendKind::metal;
+#endif
+            if (host_backend) {
+                if (!usable) {
+                    vsapi->logMessage(
+                        mtWarning,
+                        "dsmvc: this core is not one GPU frames were tested on "
+                        "(or DSMVC_GPU_FRAMES=0): the clip is downloaded and "
+                        "processed on the host. Set DSMVC_GPU_FRAMES=force to "
+                        "try GPU frames anyway.", core);
+                }
+                // A deliberate boundary: download once, then the host path.
+                source = download_gpu_node(source, core, vsapi);
+                source_info = vsapi->getVideoInfo(source);
+                // The format may differ from what was assumed above.
+                fused_integer =
+                    source_info->format.sampleType == stInteger
+                    && source_info->format.bitsPerSample >= 8
+                    && source_info->format.bitsPerSample <= 16
+                    && (source_info->format.bytesPerSample == 1
+                        || source_info->format.bytesPerSample == 2)
+                    && process_horizontal && process_vertical;
+            } else {
+                if (!fused_integer
+                    && (source_info->format.sampleType != stFloat
+                        || source_info->format.bitsPerSample != 32)) {
+                    throw std::invalid_argument(
+                        "GPU frames support 32-bit float clips, and 8-16 bit "
+                        "integer clips when both width and height change; "
+                        "for this clip convert it to float or use "
+                        "std.GPUDownload first");
+                }
+                resident = true;
+                resident_backend = parsed.backend == BackendKind::cuda
+                    ? BackendKind::cuda : BackendKind::vulkan;
+            }
+        }
+#endif
 #if defined(DSMVC_HAS_METAL)
         validate_metal_device(parsed);
         const bool metal_automatic =
@@ -1390,7 +1874,7 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
             && dsmvc::metal::available()
             && source_info->numFrames >= 64;
 #endif
-        if (!fused_integer
+        if (!resident && !fused_integer
             && (source_info->format.sampleType != stFloat
                 || source_info->format.bitsPerSample != 32)) {
             convert_and_invoke(source, *source_info, parsed, out, core, vsapi);
@@ -1406,7 +1890,22 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         const BackendKind executor_backend = parsed.backend;
 #endif
         auto data = std::make_unique<FilterData>(
-            executor_backend, parsed.cpu_path);
+            resident ? BackendKind::cpu : executor_backend, parsed.cpu_path);
+#if defined(DSMVC_HAS_VS_GPU)
+        if (resident) {
+            data->executor = make_resident_executor(core, vsapi, resident_backend);
+            if (resident_backend == BackendKind::cuda) {
+                const char *wait = std::getenv("DSMVC_CUDA_GPU_FRAME_WAIT");
+                VSVulkanCoreInfo info{};
+                char error[256] = {};
+                data->exported_semaphores =
+                    !(wait && std::string_view{wait} == "host")
+                    && vsapi->getVulkanAPI()->getVulkanCoreInfo(
+                        core, &info, error, sizeof(error)) == 0
+                    && info.semaphoreExportHandleType != 0;
+            }
+        }
+#endif
         data->node = source;
         data->vi = *source_info;
         data->source_width = source_info->width;
@@ -1444,12 +1943,34 @@ void VS_CC filter_create(const VSMap *in, VSMap *out, void *user_data,
         }
 
         const VSFilterDependency dependency{data->node, rpStrictSpatial};
-        VSNode *result = vsapi->createVideoFilter2(
+        VSNode *result = nullptr;
+#if defined(DSMVC_HAS_VS_GPU)
+        if (resident) {
+            result = vsapi->createVideoFilterEx2(
+                parsed.function_name.c_str(), &data->vi, filter_get_frame,
+                filter_free, fmParallel, ffGPUOutput, &dependency, 1,
+                data.get(), core);
+        } else
+#endif
+        result = vsapi->createVideoFilter2(
             parsed.function_name.c_str(), &data->vi, filter_get_frame,
             filter_free, fmParallel, &dependency, 1, data.get(), core);
         if (!result) throw std::runtime_error("failed to create video filter");
         source = nullptr;
         custom = nullptr;
+        {
+            std::optional<dsmvc::host_blocks::Domain> domain;
+            if (data->executor.backend() == BackendKind::cuda) {
+                domain = dsmvc::host_blocks::Domain::cuda;
+            } else if (data->executor.backend() == BackendKind::vulkan) {
+                domain = dsmvc::host_blocks::Domain::vulkan;
+            }
+            if (domain && !resident
+                && dsmvc::vs_frame_memory::attach(core, vsapi, *domain)) {
+                data->direct_domain = domain;
+                data->direct_core = core;
+            }
+        }
         data.release();
         if (vsapi->mapConsumeNode(out, "clip", result, maReplace) != 0) {
             throw std::runtime_error("failed to return video filter");
@@ -1493,38 +2014,48 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
     VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
     vspapi->configPlugin(
         plugin_id, "dsmvc", "dsmvc optimized descale",
-        VS_MAKE_VERSION(0, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
+        VS_MAKE_VERSION(0, 1), VS_MAKE_VERSION(4, 0), 0, plugin);
 
-    const std::string geometry = common_geometry;
+    // Residency suffixes parse only on API 4.3 cores; elsewhere (and when the
+    // plugin is built without the GPU headers) the plain signatures are used.
+#if defined(DSMVC_HAS_VS_GPU)
+    const bool gpu_signatures = vspapi->getAPIVersion() >= VS_MAKE_VERSION(4, 3);
+#else
+    const bool gpu_signatures = false;
+#endif
+    const std::string geometry = gpu_signatures
+        ? "src:vnode:all;width:int;height:int;" : common_geometry;
+    const std::string clip_return_type = gpu_signatures
+        ? "clip:vnode:all;" : clip_return;
     const std::string tail = common_tail;
     vspapi->registerFunction(
         "Debilinear", (geometry + "blur:float:opt;" + tail
-                       + backend_tail).c_str(), clip_return,
+                       + backend_tail).c_str(), clip_return_type.c_str(),
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(1)), plugin);
     vspapi->registerFunction(
         "Debicubic", (geometry + "b:float:opt;c:float:opt;blur:float:opt;" + tail
                       + backend_tail).c_str(),
-        clip_return, filter_create,
+        clip_return_type.c_str(), filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(2)), plugin);
     vspapi->registerFunction(
         "Delanczos", (geometry + "taps:int:opt;blur:float:opt;" + tail
                       + backend_tail).c_str(),
-        clip_return, filter_create,
+        clip_return_type.c_str(), filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(3)), plugin);
     vspapi->registerFunction(
         "Despline16", (geometry + "blur:float:opt;" + tail
-                       + backend_tail).c_str(), clip_return,
+                       + backend_tail).c_str(), clip_return_type.c_str(),
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(4)), plugin);
     vspapi->registerFunction(
         "Despline36", (geometry + "blur:float:opt;" + tail
-                       + backend_tail).c_str(), clip_return,
+                       + backend_tail).c_str(), clip_return_type.c_str(),
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(5)), plugin);
     vspapi->registerFunction(
         "Despline64", (geometry + "blur:float:opt;" + tail
-                       + backend_tail).c_str(), clip_return,
+                       + backend_tail).c_str(), clip_return_type.c_str(),
         filter_create,
         reinterpret_cast<void *>(static_cast<std::intptr_t>(6)), plugin);
     vspapi->registerFunction(
@@ -1534,5 +2065,5 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(
          + tail
          + "custom:func:opt;support:int:opt;custom_kernel:func:opt;"
          + backend_tail).c_str(),
-        clip_return, filter_create, nullptr, plugin);
+        clip_return_type.c_str(), filter_create, nullptr, plugin);
 }
