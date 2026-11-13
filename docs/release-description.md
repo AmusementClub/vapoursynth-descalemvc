@@ -1,7 +1,7 @@
 # dsmvc v0.1.4
 
 This release makes the CUDA and Vulkan backends faster and cheaper on the
-CPU, and adds two optional ways to keep frames off the host: GPU frames on
+CPU, and adds two ways to move frames without staging copies: GPU frames on
 VapourSynth R81 and direct transfers on vapoursynth-classic. The filter API,
 precision policy, CPU and Metal paths, and automatic backend selection are
 unchanged, so no script needs to change.
@@ -14,10 +14,10 @@ unchanged, so no script needs to change.
 - **GPU frames (VapourSynth R81).** A `std.GPUUpload()` clip is processed on
   the core's own Vulkan device, or by CUDA through exported memory, and stays
   on the GPU. dsmvc's own GPU work runs at 2300 to 9900 fps at 1080p.
-- **Direct transfers on vapoursynth-classic (R57.A14 and later).** Opt-in
-  with `DSMVC_CUDA_DIRECT_IO=1` or `DSMVC_VULKAN_DIRECT_IO=1`: rows are copied
-  straight between the core's frame memory and the device, 1.4x to 3.5x the
-  v0.1.3 frame rate.
+- **Direct transfers on vapoursynth-classic (R57.A14 and later).** Used
+  automatically: rows are copied straight between the core's frame memory and
+  the device, without staging copies, at 1.4x to 3.5x the v0.1.3 frame rate.
+  `DSMVC_CUDA_DIRECT_IO=0` or `DSMVC_VULKAN_DIRECT_IO=0` turns them off.
 - **Fixes.** A deadlock between CUDA filters that share one source under
   concurrent requests, a crash or hang at process exit while NVIDIA's
   background shader compile was still running, and a crash at exit under
@@ -92,9 +92,11 @@ and a chain of three Debicubic runs at 1461 fps on CUDA and 1747 fps on
 Vulkan. 8-bit YUV420 runs at 2259 fps on CUDA and 3539 fps on Vulkan. Output
 is bit-identical to the host path on every tested route.
 
-### Direct transfers (vapoursynth-classic R57.A15)
+### vapoursynth-classic (R57.A15)
 
-| Format | CUDA v0.1.3 | CUDA v0.1.4 | CUDA direct | Vulkan v0.1.3 | Vulkan v0.1.4 | Vulkan direct |
+"Staged" is v0.1.4 with direct transfers turned off.
+
+| Format | CUDA v0.1.3 | CUDA staged | CUDA v0.1.4 | Vulkan v0.1.3 | Vulkan staged | Vulkan v0.1.4 |
 |---|---:|---:|---:|---:|---:|---:|
 | Float32 gray | 699 | 829 | 1406 | 592 | 818 | 1220 |
 | Float32 RGB | 229 | 265 | 437 | 192 | 257 | 396 |
@@ -124,6 +126,11 @@ integration tests.
   against the API 4.3 headers of R81 and include GPU frames, which are
   enabled at run time on R81 only (`DSMVC_GPU_FRAMES=force` allows another
   core). On any other core the same binary behaves as before.
+- On vapoursynth-classic R57.A14 and later, the GPU backends keep frame
+  memory registered with the device: page-locked for CUDA, imported for
+  Vulkan, up to half of the core's frame cache
+  (`DSMVC_CUDA_DIRECT_IO_MAX_MB`, `DSMVC_VULKAN_DIRECT_IO_MAX_MB`). If a block
+  cannot be registered, that frame is staged as before.
 - A Vulkan slot now holds the workspace of all planes of a frame: about three
   times the previous figure for RGB (245 MB per slot at 4K).
 - On Linux with an NVIDIA driver, a Vulkan process may wait at exit for the
@@ -133,7 +140,8 @@ integration tests.
 - Every change has a switch that restores the previous behavior
   (`DSMVC_GPU_SOLVE_PARTITION=0`, `DSMVC_VULKAN_FRAME_SUBMIT=0`,
   `DSMVC_VULKAN_FOLD_TRANSPOSE=0`, `DSMVC_HOST_COPY_STREAM_MIN=0`,
-  `DSMVC_CUDA_WAIT=spin`, `DSMVC_CUDA_HOST_TRANSFER=staging-decoupled`); the
+  `DSMVC_CUDA_WAIT=spin`, `DSMVC_CUDA_HOST_TRANSFER=staging-decoupled`,
+  `DSMVC_CUDA_DIRECT_IO=0`, `DSMVC_VULKAN_DIRECT_IO=0`); the
   linked pages list them all.
 - Packages: Linux x64 CPU/CUDA/Vulkan, Linux arm64 CPU/NEON, Windows x64
   CPU/CUDA/Vulkan, and macOS arm64 CPU/Metal, as in v0.1.3.
@@ -141,5 +149,7 @@ integration tests.
 **Evidence boundaries.** All GPU measurements and the GPU-frame,
 direct-transfer and exit tests ran on Linux with one RTX 5080. The Windows
 handle paths for GPU frames and direct transfers are written but were not
-exercised. AMD and Intel Vulkan drivers and multi-GPU hosts are untested; the
-test suite also passes on Mesa lavapipe under the Vulkan validation layer.
+exercised; direct transfers are on by default there too, and
+`DSMVC_CUDA_DIRECT_IO=0` / `DSMVC_VULKAN_DIRECT_IO=0` restore staging. AMD
+and Intel Vulkan drivers and multi-GPU hosts are untested; the test suite
+also passes on Mesa lavapipe under the Vulkan validation layer.

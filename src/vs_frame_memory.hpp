@@ -10,7 +10,7 @@
 // keeps staging frames as before.
 namespace dsmvc::vs_frame_memory {
 
-// Opts the filter into direct block I/O for `domain` on `core`. Returns false
+// Attaches the filter to direct block I/O for `domain` on `core`. Returns false
 // (and does nothing) unless the backend enabled the domain and the core
 // provides the extension. Each true return must be paired with detach().
 [[nodiscard]] bool attach(
