@@ -851,7 +851,7 @@ public:
     VkPipeline solve_f64_pipeline = VK_NULL_HANDLE;
     VkPipeline convert_f64_pipeline = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
-    // VK_EXT_external_memory_host (opt-in, DSMVC_VULKAN_DIRECT_IO=1): classic
+    // VK_EXT_external_memory_host (DSMVC_VULKAN_DIRECT_IO=0 turns it off): classic
     // frame pool blocks are imported as buffers so rows are copied straight
     // from and to the frames.
     bool host_import_enabled = false;
@@ -3046,7 +3046,7 @@ Runtime::Runtime()
         timeline_enabled ? VK_TRUE : VK_FALSE,
     };
     std::vector<const char *> device_extensions;
-    if (environment_flag("DSMVC_VULKAN_DIRECT_IO", false)
+    if (environment_flag("DSMVC_VULKAN_DIRECT_IO", true)
         && device_has_extension(
             selected.physical, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
         device_extensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);

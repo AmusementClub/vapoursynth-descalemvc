@@ -38,10 +38,11 @@ bandwidth and every copy takes more cycles.
 
 ### vapoursynth-classic (R57.A15)
 
-"Direct" is the opt-in direct transfer of [frame-io.md](frame-io.md)
-(`DSMVC_CUDA_DIRECT_IO=1`, `DSMVC_VULKAN_DIRECT_IO=1`).
+On a core that exposes its frame memory, v0.1.4 uses the direct transfers of
+[frame-io.md](frame-io.md) by default. "Staged" turns them off
+(`DSMVC_CUDA_DIRECT_IO=0`, `DSMVC_VULKAN_DIRECT_IO=0`).
 
-| Route | v0.1.3 | v0.1.4 | v0.1.4 direct | Direct against v0.1.3 |
+| Route | v0.1.3 | v0.1.4 staged | v0.1.4 | v0.1.4 against v0.1.3 |
 |---|---:|---:|---:|---:|
 | CUDA, Float32 gray | 699 | 829 | 1406 | 2.0x |
 | CUDA, Float32 RGB | 229 | 265 | 437 | 1.9x |
@@ -196,8 +197,8 @@ previous behavior.
 ## Where the time goes now
 
 - **Host frames: host copies and PCIe.** The GPU is 52 to 58% busy on Float32
-  frames. This is why Float32 RGB and 4K gain least, and why classic direct
-  transfers still double the frame rate.
+  frames. This is why Float32 RGB and 4K gain least, and why direct transfers
+  on classic still double the frame rate.
 - **CUDA on GPU frames: the core's `exportGPUPlane`.** One call takes 43 us,
   calls do not overlap, and every plane of every frame needs two. That is
   about 16000 exports per second: 8000 fps for one plane at any size up to

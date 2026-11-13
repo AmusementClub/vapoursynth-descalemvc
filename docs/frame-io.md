@@ -1,9 +1,10 @@
 # Frame I/O: classic direct transfers and GPU frames
 
 dsmvc's CUDA and Vulkan backends can avoid copying frames through staging
-buffers in two independent ways. Both are additive: nothing changes for a script
-that does not use them, and every unsupported case either keeps the old path or
-fails with a message that names the remedy.
+buffers in two independent ways. No script needs to change for either: direct
+transfers are used automatically on a core that supports them, GPU frames when a
+script passes a GPU clip, and every unsupported case either keeps the old path
+or fails with a message that names the remedy.
 
 This page describes what was built and what was measured.
 
@@ -16,11 +17,14 @@ imports (Vulkan, `VK_EXT_external_memory_host`) a block on its **second** use an
 then copies rows straight between the block and the device. PCIe transfers still
 happen; the host-side staging copies do not.
 
-**Opt-in.** Set `DSMVC_CUDA_DIRECT_IO=1` and/or `DSMVC_VULKAN_DIRECT_IO=1`.
+**On by default** on a core that provides the extension; on any other core
+nothing changes. `DSMVC_CUDA_DIRECT_IO=0` and `DSMVC_VULKAN_DIRECT_IO=0` turn it
+off. Registered blocks stay page-locked (CUDA) or imported (Vulkan) until the
+core frees them, up to the cap below.
 
 | Variable | Meaning |
 |---|---|
-| `DSMVC_CUDA_DIRECT_IO`, `DSMVC_VULKAN_DIRECT_IO` | `1` enables. Unset or `0`: unchanged behavior. |
+| `DSMVC_CUDA_DIRECT_IO`, `DSMVC_VULKAN_DIRECT_IO` | `0` disables: frames are staged as on other cores. Unset or `1`: enabled. |
 | `DSMVC_CUDA_DIRECT_IO_MAX_MB`, `DSMVC_VULKAN_DIRECT_IO_MAX_MB` | Cap on bytes registered per core. Default: half of the core's frame cache. |
 | `DSMVC_CUDA_DIRECT_IO_STATS`, `DSMVC_VULKAN_DIRECT_IO_STATS` | `1` prints registrations, hits, misses, cap refusals and hook releases when a core's last filter is freed. |
 | `DSMVC_CUDA_DIRECT_IO_SIDES`, `DSMVC_VULKAN_DIRECT_IO_SIDES` | Bit mask, `1` source, `2` destination (diagnostic). |
@@ -38,7 +42,7 @@ frames are copied by the driver straight from frame memory on any core. The
 driver still transfers registered blocks directly, but the executor no longer
 looks them up, so the statistics show no hits or misses for those frames; the
 block lookup now matters for 8-bit frames and the rows-only and columns-only
-routes. The table below was measured before that default, against staging.
+routes.
 
 Defaults that were measured, not assumed: an 8-bit CUDA source stays staged
 (a direct 8-bit upload was ~13% slower than the packed pinned upload on the test
@@ -46,22 +50,24 @@ machine), everything else uses both sides.
 
 ### Measured (RTX 5080, Ryzen 9 5950X, driver 615.71.09, classic R57.A15)
 
-1080p to 720p, 32 requests in flight, 32 core threads, fresh frames per request,
-median of 3-5 alternating runs. The GPU also drives the desktop, so treat small
-differences as noise.
+Debicubic 1080p to 720p unless noted, 16 requests in flight, fresh frames per
+request, fps, median of five alternating runs (2026-11-13). "Staged" sets the
+switch to `0`. "Registered" is the peak of registered frame memory in the run.
 
-| Route | CUDA staged | CUDA direct | Vulkan staged | Vulkan direct |
-|---|---:|---:|---:|---:|
-| Float32 gray 2D | 688 fps | 1375 (2.0x) | 582 | 876 (+51%) |
-| Float32 RGB 2D | 228 | 434 (1.9x) | 191 | 282 (+47%) |
-| Float32 gray 4K to 1440p | 185 | 325 (+76%) | 145 | 260 (+80%) |
-| 16-bit YUV420 2D | 904 | 1288 (+42%) | 624 | 639 (flat) |
-| 8-bit YUV420 2D | 1722 | 1935 (+12%) | 753 | 748 (flat) |
-| Float32 rows only | 1315 | 1309 (flat) | 609 | 990 (+63%) |
+| Route | CUDA staged | CUDA default | Registered | Vulkan staged | Vulkan default | Registered |
+|---|---:|---:|---:|---:|---:|---:|
+| Float32 gray | 813 | 1374 (+69%) | 254 MiB | 808 | 1185 (+47%) | 190 MiB |
+| Float32 RGB | 265 | 436 (+65%) | 667 | 257 | 391 (+52%) | 514 |
+| Float32 gray, 4K to 1440p | 199 | 325 (+63%) | 794 | 193 | 295 (+52%) | 671 |
+| Float32 gray, width only | 751 | 1280 (+70%) | 234 | 729 | 1096 (+50%) | 226 |
+| 16-bit YUV420 | 1026 | 1283 (+25%) | 220 | 1027 | 1484 (+45%) | 143 |
+| 8-bit YUV420 | 1987 | 2332 (+17%) | 101 | 2124 | 2493 (+17%) | 71 |
+| 8-bit YUV420, Despline64 | 1910 | 2267 (+19%) | 113 | 2015 | 2028 (+1%) | 71 |
 
-The existing per-call `DSMVC_CUDA_HOST_TRANSFER=registered` mode measured 444 fps
-on the gray case. Output digests are identical with direct transfers on and off
-for every route (2D, one axis, 8/16-bit, Float64, pool churn).
+Output digests are identical with direct transfers on, off and unset for every
+route (2D, one axis, 8/16-bit, Float64, pool churn), and identical to the
+staged path on classic R57.A13 (no extension), R80 and R81, where the default
+changes nothing (frame rates within 1% of the build before the default).
 
 ## 2. GPU frames (VapourSynth R81 and later)
 
@@ -151,8 +157,9 @@ GetNative-style candidate scans.
 
 ## Known limits and open items
 
-- Direct transfers were run on Linux only. The Windows handle paths are written
-  but not exercised.
+- Direct transfers were run on Linux only. The Windows paths are written but
+  not exercised, and they are on by default there too; set the switches to `0`
+  if a Windows classic core misbehaves.
 - GPU frames: executions are synchronous; there are no producer pairs and no
   cross-API semaphores yet, so a chain does not overlap work across filters.
   Memory that dsmvc allocates on the core's device is not yet charged to the

@@ -190,13 +190,14 @@ enum class HostTransferMode : std::uint8_t {
     return HostTransferMode::automatic;
 }
 
-// Direct transfers to and from vapoursynth-classic frame blocks are opt-in
-// (DSMVC_CUDA_DIRECT_IO=1). An explicit DSMVC_CUDA_HOST_TRANSFER keeps its
-// meaning: its registered mode registers every frame per call, which would
-// clash with the block registrations.
+// Direct transfers to and from vapoursynth-classic frame blocks are used on
+// every core that exposes its blocks (DSMVC_CUDA_DIRECT_IO=0 turns them off).
+// An explicit DSMVC_CUDA_HOST_TRANSFER keeps its meaning: its registered mode
+// registers every frame per call, which would clash with the block
+// registrations.
 [[nodiscard]] bool block_direct_io_requested() noexcept {
     const char *direct = std::getenv("DSMVC_CUDA_DIRECT_IO");
-    return direct && std::string_view{direct} == "1"
+    return !(direct && std::string_view{direct} == "0")
         && !std::getenv("DSMVC_CUDA_HOST_TRANSFER");
 }
 
